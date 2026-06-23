@@ -20,6 +20,9 @@ env/
 .mypy_cache/
 .ipynb_checkpoints/
 
+# Ascend C reference implementation (kept local, not pushed)
+ops-transformer/
+
 # OS / editor
 .DS_Store
 *.swp
