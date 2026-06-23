@@ -273,9 +273,11 @@ def _build_swa(
                     T.tile.div(o_ub, o_ub, den_2d)
                     T.tile.cast(o_half, o_ub, "CAST_NONE", G2 * D)
                     T.copy(o_half, Output[tok, vid * G2 : (vid + 1) * G2, :])
-                    # lse = m + log(denom)
-                    T.tile.log(lse_ub, denom)
-                    T.tile.add(lse_ub, lse_ub, m_i)
+                    # lse = m + log(denom). No T.tile.log primitive exists, so
+                    # do it element-wise with the TIR log (same idiom as the
+                    # example kernels using T.exp inside T.Parallel).
+                    for i in T.Parallel(G2):
+                        lse_ub[i, 0] = m_i[i, 0] + T.log(denom[i, 0])
                     T.copy(lse_ub, LSE[tok, vid * G2 : (vid + 1) * G2])
 
         return sparse_attn_sharedkv_swa
