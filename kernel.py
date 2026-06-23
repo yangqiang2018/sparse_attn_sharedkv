@@ -145,9 +145,13 @@ def _build_swa(
     accum_dtype = "float"
     idx_dtype = "int32"
     neg_inf = -3.0e38
+    # Cast rounding modes, faithful to Ascend C: P->KV_T uses CAST_ROUND
+    # (swa_block_vector.h:433); output->OUT_T uses CAST_RINT for bf16, else
+    # CAST_ROUND (swa_block_vector.h:618-622). CAST_NONE (truncate) would drift.
+    out_cast_mode = "CAST_RINT" if dtype == "bfloat16" else "CAST_ROUND"
 
-    # One core per (batch, query position). Positions s >= act_q (padding)
-    # are skipped. Mirrors the Ascend C bN2 x gS1 task space (kvHeadNum==1).
+    # One core per (batch, query position); mirrors the Ascend C bN2 x gS1
+    # task space (kvHeadNum==1). Every (b, s) is computed unconditionally.
     block_num = batch * max_seq
 
     q_shape = [total_tokens, N1, D]
@@ -262,8 +266,8 @@ def _build_swa(
                 T.tile.sub(psink, sink_ub, m_i)
                 T.tile.exp(psink, psink)
                 T.tile.add(denom, denom, psink)
-                # P → half → workspace for the PV matmul
-                T.tile.cast(p_half, s_ub, "CAST_NONE", G2 * BI)
+                # P → half → workspace for the PV matmul (round, matching Ascend C)
+                T.tile.cast(p_half, s_ub, "CAST_ROUND", G2 * BI)
                 T.copy(p_half, ws_p[cid, vid * G2 : (vid + 1) * G2, :])
 
                 # ===== Cube: O = P @ V  (V = same ori_kv window) =====
@@ -275,7 +279,7 @@ def _build_swa(
                 T.copy(ws_o[cid, vid * G2 : (vid + 1) * G2, :], o_ub)
                 T.tile.broadcast(den_2d, denom)
                 T.tile.div(o_ub, o_ub, den_2d)
-                T.tile.cast(o_half, o_ub, "CAST_NONE", G2 * D)
+                T.tile.cast(o_half, o_ub, out_cast_mode, G2 * D)
                 T.copy(o_half, Output[tok, vid * G2 : (vid + 1) * G2, :])
                 # lse = m + log(denom). No T.tile.log primitive exists, so do it
                 # element-wise with the TIR log (same idiom as the example
