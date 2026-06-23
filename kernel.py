@@ -144,7 +144,6 @@ def _build_swa(
 
     accum_dtype = "float"
     idx_dtype = "int32"
-    neg_inf = -3.0e38
     # Cast rounding modes, faithful to Ascend C: P->KV_T uses CAST_ROUND
     # (swa_block_vector.h:433); output->OUT_T uses CAST_RINT for bf16, else
     # CAST_ROUND (swa_block_vector.h:618-622). CAST_NONE (truncate) would drift.
@@ -205,6 +204,8 @@ def _build_swa(
                 m_2d = T.alloc_ub([G2, BI], accum_dtype)
                 den_2d = T.alloc_ub([G2, D], accum_dtype)
                 lse_ub = T.alloc_ub([G2, 1], accum_dtype)
+                mask_ub = T.alloc_ub([BI // 8], "uint8")  # window bitmask (1 bit/col)
+                pos_ub = T.alloc_ub([BI], accum_dtype)  # per-column kv positions
 
                 # cid fixes (b, s) for this block. Compute unconditionally for
                 # every (b, s) -- like the reference kernels. NOTE: wrapping the
@@ -222,7 +223,6 @@ def _build_swa(
                 s_global = act_kv - act_q + s
                 ori_left = T.max(s_global - ori_win_left, 0)
                 ori_right = s_global + 1  # ori_win_right == 0
-                win = ori_right - ori_left  # <= BI valid keys
 
                 # ===== Load Q (all G heads of this token) → L1 =====
                 T.copy(Q[tok, :, :], q_l1)
@@ -247,10 +247,22 @@ def _build_swa(
 
                 # ===== Vector: scale + window mask + softmax (1 tile) =====
                 T.copy(ws_s[cid, vid * G2 : (vid + 1) * G2, :], s_ub)
-                # scale and mask out-of-window columns to -inf
-                for i, j in T.Parallel(G2, BI):
-                    s_ub[i, j] = T.if_then_else(
-                        j < win, s_ub[i, j] * softmax_scale, neg_inf
+                T.tile.mul(s_ub, s_ub, softmax_scale)
+                # Window mask via the idiomatic compare+select (VSEL), the same
+                # pattern as example_sparse_flash_attn_mask.py -- NOT
+                # if_then_else inside T.Parallel (a Select there fails to
+                # vectorize and leaks a v_thread predicate into codegen).
+                # Column j -> kv position ori_left+j; in-window iff <= s_global.
+                for j in T.serial(BI):
+                    pos_ub[j] = T.cast(ori_left + j, accum_dtype)
+                T.tile.compare(mask_ub, pos_ub, T.float32(s_global), "LE")
+                for i in T.serial(G2):
+                    T.tile.select(
+                        s_ub[i, :],
+                        mask_ub,
+                        s_ub[i, :],
+                        -T.infinity(accum_dtype),
+                        "VSEL_TENSOR_SCALAR_MODE",
                     )
                 # load this vid's per-head sink logit
                 T.copy(sinks[vid * G2 : (vid + 1) * G2], sink_ub)
