@@ -35,8 +35,6 @@ load balancing. The ``metadata`` argument is accepted (contract parity)
 but not used to drive scheduling yet. Numerics are unaffected.
 """
 
-from __future__ import annotations
-
 import tilelang
 from tilelang import language as T
 
@@ -162,7 +160,7 @@ def _build_swa(
     )
     def kernel():
         @T.prim_func
-        def main(
+        def sparse_attn_sharedkv_swa(
             Q: T.Tensor(q_shape, dtype),  # 0
             ori_kv: T.Tensor(ori_kv_shape, dtype),  # 1  (shared K & V)
             ori_block_table: T.Tensor([batch, ori_table_len], idx_dtype),  # 2
@@ -182,14 +180,34 @@ def _build_swa(
             ws_o: T.Tensor([block_num, G, D], accum_dtype),  # 16 PV result
         ):
             with T.Kernel(block_num, is_npu=True) as (cid, vid):
+                # ---- Allocations: unconditional (shapes are compile-time).
+                # The example kernels allocate at kernel scope, never inside a
+                # conditional -- an `if` must not gate buffer allocation. ----
+                q_l1 = T.alloc_L1([G, D], dtype)
+                kv_l1 = T.alloc_L1([BI, D], dtype)
+                p_l1 = T.alloc_L1([G, BI], dtype)
+                acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
+                acc_o_l0c = T.alloc_L0C([G, D], accum_dtype)
+                kv_ub = T.alloc_ub([D], dtype)
+                s_ub = T.alloc_ub([G2, BI], accum_dtype)
+                p_half = T.alloc_ub([G2, BI], dtype)
+                o_ub = T.alloc_ub([G2, D], accum_dtype)
+                o_half = T.alloc_ub([G2, D], dtype)
+                m_i = T.alloc_ub([G2, 1], accum_dtype)  # running max
+                m_raw = T.alloc_ub([G2, 1], accum_dtype)
+                sink_ub = T.alloc_ub([G2, 1], accum_dtype)  # per-head sink
+                psink = T.alloc_ub([G2, 1], accum_dtype)
+                denom = T.alloc_ub([G2, 1], accum_dtype)
+                m_2d = T.alloc_ub([G2, BI], accum_dtype)
+                den_2d = T.alloc_ub([G2, D], accum_dtype)
+                lse_ub = T.alloc_ub([G2, 1], accum_dtype)
+
                 b = cid // max_seq
                 s = cid % max_seq
-
                 act_q = act_q_lens[b]
-                # Only valid query positions produce output. For TND padded
-                # slots there is no output token; for BSND they would need
-                # zeroing (auto-alloc'd Output is uninitialised) -- handled
-                # for the no-padding case; revisit if BSND+padding is tested.
+                # Only valid query positions produce output. cid fixes (b, s),
+                # so a block's cube + both its vector cores take the same branch
+                # and cross-core sync stays consistent. (TND test has no padding.)
                 if s < act_q:
                     act_kv = seqused_kv[b]
                     tok = q_prefix[b] + s
@@ -198,28 +216,6 @@ def _build_swa(
                     ori_left = T.max(s_global - ori_win_left, 0)
                     ori_right = s_global + 1  # ori_win_right == 0
                     win = ori_right - ori_left  # <= BI valid keys
-
-                    # ---- Cube L1 / L0C ----
-                    q_l1 = T.alloc_L1([G, D], dtype)
-                    kv_l1 = T.alloc_L1([BI, D], dtype)
-                    p_l1 = T.alloc_L1([G, BI], dtype)
-                    acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
-                    acc_o_l0c = T.alloc_L0C([G, D], accum_dtype)
-
-                    # ---- Vector UB (per-vid half of the G rows) ----
-                    kv_ub = T.alloc_ub([D], dtype)
-                    s_ub = T.alloc_ub([G2, BI], accum_dtype)
-                    p_half = T.alloc_ub([G2, BI], dtype)
-                    o_ub = T.alloc_ub([G2, D], accum_dtype)
-                    o_half = T.alloc_ub([G2, D], dtype)
-                    m_i = T.alloc_ub([G2, 1], accum_dtype)  # running max
-                    m_raw = T.alloc_ub([G2, 1], accum_dtype)
-                    sink_ub = T.alloc_ub([G2, 1], accum_dtype)  # per-head sink
-                    psink = T.alloc_ub([G2, 1], accum_dtype)
-                    denom = T.alloc_ub([G2, 1], accum_dtype)
-                    m_2d = T.alloc_ub([G2, BI], accum_dtype)
-                    den_2d = T.alloc_ub([G2, D], accum_dtype)
-                    lse_ub = T.alloc_ub([G2, 1], accum_dtype)
 
                     # ===== Load Q (all G heads of this token) → L1 =====
                     T.copy(Q[tok, :, :], q_l1)
@@ -282,6 +278,6 @@ def _build_swa(
                     T.tile.add(lse_ub, lse_ub, m_i)
                     T.copy(lse_ub, LSE[tok, vid * G2 : (vid + 1) * G2])
 
-        return main
+        return sparse_attn_sharedkv_swa
 
     return kernel()
