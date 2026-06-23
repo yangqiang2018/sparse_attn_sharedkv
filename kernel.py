@@ -221,16 +221,19 @@ def _build_swa(
                     T.copy(Q[tok, :, :], q_l1)
 
                     # ===== Gather the sliding-window KV (paged) → workspace.
-                    # Each vid gathers its half of the BI rows. Rows with
-                    # pos >= ori_right are out of window (left stale, masked).
+                    # Each vid gathers its half of the BI rows. Rows past the
+                    # window clamp to the last valid position (ori_right-1);
+                    # their columns are masked to -inf below, so the duplicate
+                    # KV they load never contributes. No vid-dependent `if`
+                    # (that produced an undefined v_thread in codegen) -- this
+                    # mirrors the reference example's unconditional gather.
                     for r in T.serial(BI // VEC_NUM):
                         row = vid * (BI // VEC_NUM) + r
-                        pos = ori_left + row
-                        if pos < ori_right:
-                            page = ori_block_table[b, pos // ori_block_size]
-                            brow = pos % ori_block_size
-                            T.copy(ori_kv[page, brow, 0, :], kv_ub)
-                            T.copy(kv_ub, ws_kv[cid, row, :])
+                        pos = T.min(ori_left + row, ori_right - 1)
+                        page = ori_block_table[b, pos // ori_block_size]
+                        brow = pos % ori_block_size
+                        T.copy(ori_kv[page, brow, 0, :], kv_ub)
+                        T.copy(kv_ub, ws_kv[cid, row, :])
                     T.copy(ws_kv[cid, :, :], kv_l1)
 
                     # ===== Cube: S = Q @ Kᵀ  (K = ori_kv window) =====
