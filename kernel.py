@@ -202,86 +202,87 @@ def _build_swa(
                 den_2d = T.alloc_ub([G2, D], accum_dtype)
                 lse_ub = T.alloc_ub([G2, 1], accum_dtype)
 
+                # cid fixes (b, s) for this block. Compute unconditionally for
+                # every (b, s) -- like the reference kernels. NOTE: wrapping the
+                # body in a data-dependent `if s < act_q` made the CV-split leak
+                # the thread var (v_thread) into the cube codegen; the examples
+                # never gate cube+vector work behind such an `if`. The TND fast
+                # test has no padding (s < act_q always), so this is exact;
+                # BSND/TND padding handling is a separate (later) concern.
                 b = cid // max_seq
                 s = cid % max_seq
                 act_q = act_q_lens[b]
-                # Only valid query positions produce output. cid fixes (b, s),
-                # so a block's cube + both its vector cores take the same branch
-                # and cross-core sync stays consistent. (TND test has no padding.)
-                if s < act_q:
-                    act_kv = seqused_kv[b]
-                    tok = q_prefix[b] + s
+                act_kv = seqused_kv[b]
+                tok = q_prefix[b] + s
 
-                    s_global = act_kv - act_q + s
-                    ori_left = T.max(s_global - ori_win_left, 0)
-                    ori_right = s_global + 1  # ori_win_right == 0
-                    win = ori_right - ori_left  # <= BI valid keys
+                s_global = act_kv - act_q + s
+                ori_left = T.max(s_global - ori_win_left, 0)
+                ori_right = s_global + 1  # ori_win_right == 0
+                win = ori_right - ori_left  # <= BI valid keys
 
-                    # ===== Load Q (all G heads of this token) → L1 =====
-                    T.copy(Q[tok, :, :], q_l1)
+                # ===== Load Q (all G heads of this token) → L1 =====
+                T.copy(Q[tok, :, :], q_l1)
 
-                    # ===== Gather the sliding-window KV (paged) → workspace.
-                    # Each vid gathers its half of the BI rows. Rows past the
-                    # window clamp to the last valid position (ori_right-1);
-                    # their columns are masked to -inf below, so the duplicate
-                    # KV they load never contributes. No vid-dependent `if`
-                    # (that produced an undefined v_thread in codegen) -- this
-                    # mirrors the reference example's unconditional gather.
-                    for r in T.serial(BI // VEC_NUM):
-                        row = vid * (BI // VEC_NUM) + r
-                        pos = T.min(ori_left + row, ori_right - 1)
-                        page = ori_block_table[b, pos // ori_block_size]
-                        brow = pos % ori_block_size
-                        T.copy(ori_kv[page, brow, 0, :], kv_ub)
-                        T.copy(kv_ub, ws_kv[cid, row, :])
-                    T.copy(ws_kv[cid, :, :], kv_l1)
+                # ===== Gather the sliding-window KV (paged) → workspace.
+                # Each vid gathers its half of the BI rows. Rows past the window
+                # clamp to the last valid position (ori_right-1); their columns
+                # are masked to -inf below, so the duplicate KV they load never
+                # contributes. Unconditional gather (mirrors the reference).
+                for r in T.serial(BI // VEC_NUM):
+                    row = vid * (BI // VEC_NUM) + r
+                    pos = T.min(ori_left + row, ori_right - 1)
+                    page = ori_block_table[b, pos // ori_block_size]
+                    brow = pos % ori_block_size
+                    T.copy(ori_kv[page, brow, 0, :], kv_ub)
+                    T.copy(kv_ub, ws_kv[cid, row, :])
+                T.copy(ws_kv[cid, :, :], kv_l1)
 
-                    # ===== Cube: S = Q @ Kᵀ  (K = ori_kv window) =====
-                    T.gemm_v0(q_l1, kv_l1, acc_s_l0c, transpose_B=True, init=True)
-                    T.copy(acc_s_l0c, ws_s[cid, :, :])
+                # ===== Cube: S = Q @ Kᵀ  (K = ori_kv window) =====
+                T.gemm_v0(q_l1, kv_l1, acc_s_l0c, transpose_B=True, init=True)
+                T.copy(acc_s_l0c, ws_s[cid, :, :])
 
-                    # ===== Vector: scale + window mask + softmax (1 tile) =====
-                    T.copy(ws_s[cid, vid * G2 : (vid + 1) * G2, :], s_ub)
-                    # scale and mask out-of-window columns to -inf
-                    for i, j in T.Parallel(G2, BI):
-                        s_ub[i, j] = T.if_then_else(
-                            j < win, s_ub[i, j] * softmax_scale, neg_inf
-                        )
-                    # load this vid's per-head sink logit
-                    T.copy(sinks[vid * G2 : (vid + 1) * G2], sink_ub)
-                    # running max includes the sink (sink = virtual key logit)
-                    T.reduce_max(s_ub, m_raw, dim=-1)
-                    T.tile.max(m_i, m_raw, sink_ub)
-                    # p = exp(S - m)
-                    T.tile.broadcast(m_2d, m_i)
-                    T.tile.sub(s_ub, s_ub, m_2d)
-                    T.tile.exp(s_ub, s_ub)
-                    # denom = sum(p) + exp(sink - m)
-                    T.reduce_sum(s_ub, denom, dim=-1)
-                    T.tile.sub(psink, sink_ub, m_i)
-                    T.tile.exp(psink, psink)
-                    T.tile.add(denom, denom, psink)
-                    # P → half → workspace for the PV matmul
-                    T.tile.cast(p_half, s_ub, "CAST_NONE", G2 * BI)
-                    T.copy(p_half, ws_p[cid, vid * G2 : (vid + 1) * G2, :])
+                # ===== Vector: scale + window mask + softmax (1 tile) =====
+                T.copy(ws_s[cid, vid * G2 : (vid + 1) * G2, :], s_ub)
+                # scale and mask out-of-window columns to -inf
+                for i, j in T.Parallel(G2, BI):
+                    s_ub[i, j] = T.if_then_else(
+                        j < win, s_ub[i, j] * softmax_scale, neg_inf
+                    )
+                # load this vid's per-head sink logit
+                T.copy(sinks[vid * G2 : (vid + 1) * G2], sink_ub)
+                # running max includes the sink (sink = virtual key logit)
+                T.reduce_max(s_ub, m_raw, dim=-1)
+                T.tile.max(m_i, m_raw, sink_ub)
+                # p = exp(S - m)
+                T.tile.broadcast(m_2d, m_i)
+                T.tile.sub(s_ub, s_ub, m_2d)
+                T.tile.exp(s_ub, s_ub)
+                # denom = sum(p) + exp(sink - m)
+                T.reduce_sum(s_ub, denom, dim=-1)
+                T.tile.sub(psink, sink_ub, m_i)
+                T.tile.exp(psink, psink)
+                T.tile.add(denom, denom, psink)
+                # P → half → workspace for the PV matmul
+                T.tile.cast(p_half, s_ub, "CAST_NONE", G2 * BI)
+                T.copy(p_half, ws_p[cid, vid * G2 : (vid + 1) * G2, :])
 
-                    # ===== Cube: O = P @ V  (V = same ori_kv window) =====
-                    T.copy(ws_p[cid, :, :], p_l1)
-                    T.gemm_v0(p_l1, kv_l1, acc_o_l0c, init=True)
-                    T.copy(acc_o_l0c, ws_o[cid, :, :])
+                # ===== Cube: O = P @ V  (V = same ori_kv window) =====
+                T.copy(ws_p[cid, :, :], p_l1)
+                T.gemm_v0(p_l1, kv_l1, acc_o_l0c, init=True)
+                T.copy(acc_o_l0c, ws_o[cid, :, :])
 
-                    # ===== Vector: normalize, write Output + LSE =====
-                    T.copy(ws_o[cid, vid * G2 : (vid + 1) * G2, :], o_ub)
-                    T.tile.broadcast(den_2d, denom)
-                    T.tile.div(o_ub, o_ub, den_2d)
-                    T.tile.cast(o_half, o_ub, "CAST_NONE", G2 * D)
-                    T.copy(o_half, Output[tok, vid * G2 : (vid + 1) * G2, :])
-                    # lse = m + log(denom). No T.tile.log primitive exists, so
-                    # do it element-wise with the TIR log (same idiom as the
-                    # example kernels using T.exp inside T.Parallel).
-                    for i in T.Parallel(G2):
-                        lse_ub[i, 0] = m_i[i, 0] + T.log(denom[i, 0])
-                    T.copy(lse_ub, LSE[tok, vid * G2 : (vid + 1) * G2])
+                # ===== Vector: normalize, write Output + LSE =====
+                T.copy(ws_o[cid, vid * G2 : (vid + 1) * G2, :], o_ub)
+                T.tile.broadcast(den_2d, denom)
+                T.tile.div(o_ub, o_ub, den_2d)
+                T.tile.cast(o_half, o_ub, "CAST_NONE", G2 * D)
+                T.copy(o_half, Output[tok, vid * G2 : (vid + 1) * G2, :])
+                # lse = m + log(denom). No T.tile.log primitive exists, so do it
+                # element-wise with the TIR log (same idiom as the example
+                # kernels using T.exp inside T.Parallel).
+                for i in T.Parallel(G2):
+                    lse_ub[i, 0] = m_i[i, 0] + T.log(denom[i, 0])
+                T.copy(lse_ub, LSE[tok, vid * G2 : (vid + 1) * G2])
 
         return sparse_attn_sharedkv_swa
 
