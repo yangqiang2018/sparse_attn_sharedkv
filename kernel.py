@@ -293,10 +293,13 @@ def _build_swa(
                 T.tile.div(o_ub, o_ub, den_2d)
                 T.tile.cast(o_half, o_ub, out_cast_mode, G2 * D)
                 T.copy(o_half, Output[tok, vid * G2 : (vid + 1) * G2, :])
-                # lse = m + log(denom). No T.tile.log primitive exists, so do it
-                # element-wise with the TIR log (same idiom as the example
-                # kernels using T.exp inside T.Parallel).
-                for i in T.Parallel(G2):
+                # lse = m + log(denom), element-wise via the TIR log. Use
+                # T.serial, NOT T.Parallel: this (the last T.Parallel in the
+                # kernel) is what failed to vectorize and left a surviving
+                # parallel loop with an unbound v_thread thread-predicate that
+                # leaked into the cube codegen. The working paged_flash_attn
+                # example uses zero T.Parallel -- only T.tile.* and T.serial.
+                for i in T.serial(G2):
                     lse_ub[i, 0] = m_i[i, 0] + T.log(denom[i, 0])
                 T.copy(lse_ub, LSE[tok, vid * G2 : (vid + 1) * G2])
 
