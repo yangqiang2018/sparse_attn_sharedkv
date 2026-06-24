@@ -23,5 +23,6 @@
 | 002 | [Ascend `gemm_v0`:增加 N 方向切分（对齐 Ascend C）](002-ascend-gemm-v0-n-tiling.md) | `Merge 002` `2f146c1c`(原 `26116e27`) | ✅ 已合入 `ascendc_pto` |
 | 003 | [Ascend 新增 `copy_pa` 原语（分页 KV 直读进 L1）](003-ascend-copy-pa-paged-kv-load.md) | `Merge 003` `e4fc9e1c` | ✅ 已合入 `ascendc_pto`(SWA 正确 + 11050→5330us + 回归过) |
 | 004 | [Ascend 新增 `gemm_v0_fixp` 原语（按 N-tile 即时 fixpipe，根治 PV 的 L0C 越界）](004-ascend-gemm-v0-fixp-l0c.md) | `wip/ascend-gemm-v0-fixp` `03cc14b6` | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
+| 005 | [Ascend 新增 `row_expand_sub`/`row_expand_div` 原语（行广播 Sub/Div，消掉非忠实的 [M,N] 广播缓冲）](005-ascend-row-expand-sub-div.md) | `wip/ascend-gemm-v0-fixp` `410cafbd` | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
 
 > 各修改互不依赖、各自一个 commit、各自基于 `ascendc_pto`，**逐个独立合并**，每次合并都是一个自洽的修复。004 是 002（N 切分切 L0B）之上的忠实收尾（切 L0C + 即时搬出），但仍是独立的兼容性新增原语。
