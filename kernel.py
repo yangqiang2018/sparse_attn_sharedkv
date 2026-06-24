@@ -208,7 +208,12 @@ def _build_swa(
                 kv_l1 = T.alloc_L1([BI, D], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
                 acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
-                acc_o_l0c = T.alloc_L0C([G, D], accum_dtype)
+                # PV uses gemm_v0_fixp: the O[G,D] result is fixpiped to GM one
+                # N-tile at a time (faithful to Ascend C ComputeMm2), so the L0C
+                # accumulator is a single [G, BI] N-tile slot (32KB), not the
+                # full [G, D] (128KB, which alone fills L0C and overflowed once
+                # the cube/vector pipeline stopped the planner from reusing it).
+                acc_o_l0c = T.alloc_L0C([G, BI], accum_dtype)
                 # Vector UB scratch.
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
                 p_half = T.alloc_ub([G2, BI], dtype)
@@ -314,9 +319,15 @@ def _build_swa(
                                         0,
                                     )
                                     T.barrier_all()
-                                    T.gemm_v0(p_l1, kv_l1, acc_o_l0c, init=True)
-                                    T.barrier_all()
-                                    T.copy(acc_o_l0c, workspace_o[cid, bufm, :, :])
+                                    # PV = P @ V, fixpiped per N-tile straight to
+                                    # workspace_o (L0C holds one [G,BI] tile).
+                                    T.gemm_v0_fixp(
+                                        p_l1,
+                                        kv_l1,
+                                        acc_o_l0c,
+                                        workspace_o[cid, bufm, :, :],
+                                        init=True,
+                                    )
                                     T.barrier_all()
                             T.set_cross_flag("FIX", EV_PV)
 
