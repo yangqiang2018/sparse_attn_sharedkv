@@ -1,21 +1,18 @@
-# Compiler change log
+# 编译器修改记录
 
-This directory records every **compiler** modification (to `tilelang-ascend`,
-repo `yangqiang2018/tilelang-ascend-2`, branch `ascendc_pto`) that was made
-**for the faithful TileLang port of `sparse_attn_sharedkv`** and merged into the
-compiler's integration branch.
+本目录记录为了**忠实复刻 `sparse_attn_sharedkv`**（TileLang 逐指令复刻 Ascend C
+实现）而对**编译器**（`tilelang-ascend`,仓库 `yangqiang2018/tilelang-ascend-2`,
+集成分支 `ascendc_pto`）所做、并已合入集成分支的每一处修改。
 
-Why this log exists: the rule for this project is *"TileLang 表达不了→加原语；
-编译器有 bug→修编译器"* — i.e. when a faithful instruction-by-instruction port
-hits something TileLang/its compiler cannot express or a genuine compiler bug,
-we fix the compiler rather than inventing a kernel-side workaround. Every such
-compiler change **must be compatibility-preserving** (it must not break any
-other operator). Each merged change gets one document here capturing the full
-story: the symptom, the root cause, why it could not be solved in the kernel,
-the fix, and the evidence that it is compatible.
+为什么要有这个记录：本项目的规则是 *“TileLang 表达不了→加原语;编译器有 bug→修
+编译器”* —— 当忠实的逐指令复刻撞到 TileLang/其编译器表达不了的东西、或撞到真正
+的编译器 bug 时,我们去修编译器,而不是在内核里发明绕路写法。并且**每一处对编译器
+的修改都必须是兼容性修改**（绝不能因此让其它算子出问题）。每一处合入的修改在此对应
+一篇文档,完整记录来龙去脉:现象、根因、为什么不能在内核侧解决、修法、以及证明它兼容
+的证据。
 
-One file per change, numbered in merge order:
+文档用**中文**书写,一处修改一篇,按合入顺序编号:
 
-| # | Title | Compiler commit / branch | Status |
+| 编号 | 标题 | 编译器提交 / 分支 | 状态 |
 |---|---|---|---|
-| 001 | [Ascend codegen: emit integer max/min as a ternary](001-ascend-codegen-integer-minmax-ternary.md) | `wip/ascend-codegen-int-minmax-ternary` (`0e53a8ad`) | verified compatible; pending merge to `ascendc_pto` |
+| 001 | [Ascend codegen:整数 max/min 输出为三元表达式](001-ascend-codegen-integer-minmax-ternary.md) | `wip/ascend-codegen-int-minmax-ternary`（`0e53a8ad`） | 已验证兼容;待合入 `ascendc_pto` |
