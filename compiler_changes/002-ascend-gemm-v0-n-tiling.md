@@ -3,11 +3,11 @@
 | | |
 |---|---|
 | **编译器仓库** | `yangqiang2018/tilelang-ascend-2` |
-| **分支** | `wip/ascend-gemm-n-tiling`（基于 `wip/ascend-codegen-int-minmax-ternary`，即叠在 001 之上） |
+| **分支 / 提交** | `wip/ascend-gemm-n-tiling` · `2c245573`（**独立基于 `ascendc_pto`**，与 001 互不依赖，可单独合并） |
 | **改动文件** | `src/tl_templates/ascend/common.h`（`gemm_v0` 模板） |
 | **是否必须** | 是 —— 不改的话 SWA 的 PV 矩阵乘要么溢出 L0B 崩溃，要么只能在内核里切 K 绕行（而绕行又引出同步/数值问题） |
 | **是否兼容** | 是 —— 小 N / `transpose_B` 路径逐字节不变；大 N `transpose_B=false` 原本会溢出（没有可用调用），只新增能力 |
-| **状态** | 待容器从源码重编 + SWA 正确性测 + 回归例子验证，通过后合入 `ascendc_pto` |
+| **状态** | 已验证：SWA 快速正确性测试通过（`1 passed`）。待回归例子复核后合入 `ascendc_pto`（与 001 分两次独立合并） |
 
 ---
 
