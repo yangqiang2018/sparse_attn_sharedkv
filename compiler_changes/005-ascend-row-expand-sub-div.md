@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **编译器仓库** | `yangqiang2018/tilelang-ascend-2` |
-| **分支 / 提交** | `wip/ascend-gemm-v0-fixp` · `410cafbd`(叠在 004 之上,使一次重编同时含 gemm_v0_fixp + row_expand) |
+| **分支 / 提交** | `wip/ascend-row-expand` · `c8a6920a`(**独立基于 `ascendc_pto`**,与 004 互不依赖、可单独合入。仅供 NPU 构建用的集成分支 `wip/swa-compiler-build` 同时含 004+005) |
 | **改动文件** | `src/tl_templates/ascend/common.h`(模板 `row_expand_div`/`row_expand_sub`)、`src/op/ascend.{cc,h}`(builtin)、`src/target/codegen_ascend.{cc,h}`(dispatch + `RowExpandCodegen`)、`src/transform/common/operation_config.h`(读写 + PIPE_V)、`tilelang/language/ascend_tile.py`(`T.tile.row_expand_{div,sub}` 绑定) |
 | **是否必须** | 是 —— 不改的话向量侧只能 materialize `[M,N]` 广播缓冲,撑爆向量 UB(196352B) |
 | **是否兼容** | 是 —— 纯新增,既有 `sub`/`div`/`row_expand_mul` 逐字不变 |
