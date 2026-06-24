@@ -7,7 +7,7 @@
 | **改动文件** | `src/tl_templates/ascend/common.h`（`copy_pa` 模板）、`src/op/ascend.{cc,h}`（builtin）、`src/target/codegen_ascend.{cc,h}`（handler）、`src/transform/common/operation_config.h`、`src/transform/ascend_combinecv.cc`（pipe/读写 + cube 归类） |
 | **是否必须** | 是 —— 不加的话 KV 只能逐行 gather 走 GM workspace,是和 Ascend C 性能差距(~6×)的最大来源 |
 | **是否兼容** | 是 —— **纯新增**(一个新 op + 新模板),不改任何现有 op / codegen 路径 |
-| **状态** | 待容器从源码重编 + SWA 正确性 + 性能复测;通过后抽成独立分支合入 `ascendc_pto` |
+| **状态** | 已在容器重编 + 验证:**SWA 正确性通过**,**性能 11050us→5330us(↓2.1×)**;待抽成独立分支合入 `ascendc_pto` |
 
 ---
 
@@ -28,12 +28,57 @@ device 侧 msprof 对比(swa_prefill,每次 kernel):
 vector 很轻;TileLang 反过来——cube 空等,vector 被**逐行 gather(GM→UB→GM)+
 `workspace_kv` GM 中转**拖死,且各 pipe 串行不 overlap。
 
-## 2. 为什么内核侧/现有原语解决不了
+**003 落地后实测**(device 侧,swa_prefill):Task Duration **11050us → 5330us(↓2.1×)**,
+其中 `aiv_mte2` 2787→**282(↓10×)**、`aiv_mte3` 3122→**197(↓16×)**——gather 那趟 GM
+搬运彻底消失。现在 TileLang 是 Ascend C(1838us)的 **~2.9×**(原 6×)。剩余差距主要在
+`aiv_scalar`(2347us,主要是固定 BI=128 + 掩码引入的逐列位置标量计算)和 cube/vector 的
+overlap,留待后续优化。
 
-`T.copy` 按 src/dst 的 scope 自动选 `copy_gm_to_l1` 等,**表达不了 block table 的间接
-寻址**;而 `DataCopyPA` 的核心是一个**数据相关的按页 while 循环**(查 block table 拿页号、
-每页一次 `Nd2Nz` 的 `DataCopy`、运行期行数),TileLang 的静态 `T.serial` + 静态 copy
-extent 都表达不了。所以这是「TileLang 表达不了→加原语」。
+## 2. 为什么不能用现有 TileLang 原语在内核侧写出来
+
+`DataCopyPA` 的核心是一个**数据相关的按页 `while` 循环**:
+
+```c
+while (已拷行数 < window) {
+    page      = blockTable[s2Idx / blockSize];          // 间接寻址
+    copyRows  = blockSize - (s2Idx % blockSize);        // 本页能拷多少行(运行期)
+    DataCopy(L1[已拷行数], kv[page * kvStride + ...], Nd2Nz(copyRows 行));
+    s2Idx += copyRows;  已拷行数 += copyRows;
+}
+```
+
+要在内核侧用现有原语写出它,有**三处当前 TileLang 表达不了**:
+
+1. **循环次数是运行期的。** 窗口跨几页取决于 `s2Idx`(=`ori_left`,每个 token 不同),
+   而 `T.serial(N)` 要求 `N` 是**编译期常量**。即使把页数放宽到一个编译期上界(窗口 ≤128、
+   blockSize 已知 ⇒ 至多 2 页)做**固定展开**,也躲不过下面两条。
+2. **每页拷贝的行数是运行期的**(`blockSize - s2Idx%blockSize`)。`T.copy` 的搬运
+   extent 必须**编译期已知**(它要据此算 `DataCopy`/`Nd2Nz` 的参数),没法接受一个
+   运行期行数。
+3. **给 matmul 的子窗口偏移是运行期的。** 即便把整页(定长)搬进 L1 再让 matmul 取
+   `[brow : brow+window]`,这个起点 `brow` 是运行期的,而 `gemm_v0` **拒绝切片/运行期
+   偏移操作数**(本项目早先已撞到 "Unsupported BufferLoad")。
+
+`T.copy` 本身只按 src/dst 的 **scope** 自动选 `copy_gm_to_l1` 等,**根本没有 block table
+这个操作数**,表达不了分页间接寻址。所以这不是"懒得用现有原语",而是现有原语在
+**控制流(运行期循环)+ 搬运 extent(运行期)+ 间接寻址(block table)** 三个维度上都不够。
+这正是项目规则里的「**TileLang 表达不了→加原语**」。
+
+> 退一步的"内核侧批量 copy"(假设窗口不跨页 ⇒ 一次定长 `T.copy(kv[page, brow:brow+128])`)
+> 只在 blockSize 足够大、窗口恰好不跨页的**退化配置**下成立,且依赖上面第 3 条仍表达不了的
+> 运行期 `brow` 切片;它也**不忠实**于参考的分页 dataflow(参考是按页循环、可跨页)。
+
+## 2b. 这个原语通用吗?（不是只有本算子用）
+
+**通用。** `DataCopyPA` 是 paged-attention 的**通用 KV 加载操作**,在参考仓库里被**多个
+attention 算子共用**(`grep DataCopyPA ops-transformer/` 命中):`sparse_attn_sharedkv`、
+`sparse_flash_attention`、`kv_quant_sparse_flash_attention` 等。分页 KV cache + block table
+是 PagedAttention 的标准布局,"把分页窗口直读进 L1"是任何 paged 注意力 cube 侧都要做的事。
+
+并且——**把一个 C 模板封装成原语,正是 TileLang Ascend 后端本来的工作方式**:
+`gemm_v0`、`copy_gm_to_l1`、`copy_l1_to_l0a`、所有 `T.tile.*` **无一例外**都是
+`common.h` 里的 C 模板,经 builtin + codegen + Python 绑定暴露成 `T.xxx`。`copy_pa` 与它们
+**同构**,不是特例,也不是"把某算子的私有逻辑塞进编译器"。
 
 ## 3. 修法（纯新增一个 `copy_pa` 原语）
 
