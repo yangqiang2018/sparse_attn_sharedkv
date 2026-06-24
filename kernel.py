@@ -326,11 +326,18 @@ def _build_swa(
                                     T.barrier_all()
                                     # PV = P @ V, fixpiped per N-tile straight to
                                     # workspace_o (L0C holds one [G,BI] tile).
+                                    # k_actual=winm: contract only the real window
+                                    # rows (faithful to Ascend C ComputeMm2's
+                                    # kSize=window). The pad rows kv_l1[winm:BI]
+                                    # are uninitialised L1 -- summing them as
+                                    # 0(masked P)*NaN(garbage V) would give NaN;
+                                    # contracting only winm excludes them.
                                     T.gemm_v0_fixp(
                                         p_l1,
                                         kv_l1,
                                         acc_o_l0c,
                                         workspace_o[cid, bufm, :, :],
+                                        k_actual=winm,
                                         init=True,
                                     )
                                     T.barrier_all()
