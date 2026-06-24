@@ -214,8 +214,12 @@ def _build_swa(
                 # never gate cube+vector work behind such an `if`. The TND fast
                 # test has no padding (s < act_q always), so this is exact;
                 # BSND/TND padding handling is a separate (later) concern.
-                b = cid // max_seq
-                s = cid % max_seq
+                # int32 indices: the grid vars cid/vid are int64, but Ascend C
+                # uses 32-bit index types. Keeping these int64 makes codegen
+                # emit max(int64,int) / min(int64,int), which bisheng rejects as
+                # an ambiguous overload. Sequence/token indices fit int32.
+                b = T.cast(cid // max_seq, "int32")
+                s = T.cast(cid % max_seq, "int32")
                 act_q = act_q_lens[b]
                 act_kv = seqused_kv[b]
                 tok = q_prefix[b] + s
@@ -233,7 +237,7 @@ def _build_swa(
                 # are masked to -inf below, so the duplicate KV they load never
                 # contributes. Unconditional gather (mirrors the reference).
                 for r in T.serial(BI // VEC_NUM):
-                    row = vid * (BI // VEC_NUM) + r
+                    row = T.cast(vid * (BI // VEC_NUM) + r, "int32")
                     pos = T.min(ori_left + row, ori_right - 1)
                     page = ori_block_table[b, pos // ori_block_size]
                     brow = pos % ori_block_size
