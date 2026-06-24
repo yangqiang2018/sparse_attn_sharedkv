@@ -13,10 +13,14 @@
 
 文档用**中文**书写,一处修改一篇,按合入顺序编号:
 
-| 编号 | 标题 | 编译器提交 / 分支 | 状态 |
+集成分支为 `ascendc_pto`(本仓库无 `main`)。001/002/003 已各自作为一次**独立 merge**
+合入 `ascendc_pto`(`Merge 001` `11d28d8d` → `Merge 002` `2f146c1c` → `Merge 003`
+`e4fc9e1c`),对应 wip 分支已删除。验证:`git log --graph --oneline --merges ascendc_pto`。
+
+| 编号 | 标题 | 合并提交 | 状态 |
 |---|---|---|---|
-| 001 | [Ascend codegen:整数 max/min 输出为三元表达式](001-ascend-codegen-integer-minmax-ternary.md) | `wip/ascend-codegen-int-minmax-ternary`（`0e53a8ad`，基于 `ascendc_pto`） | 已验证兼容;待独立合入 `ascendc_pto` |
-| 002 | [Ascend `gemm_v0`:增加 N 方向切分（对齐 Ascend C）](002-ascend-gemm-v0-n-tiling.md) | `wip/ascend-gemm-n-tiling`（`26116e27`，独立基于 `ascendc_pto`） | SWA 快测已过;待独立合入 `ascendc_pto` |
-| 003 | [Ascend 新增 `copy_pa` 原语（分页 KV 直读进 L1）](003-ascend-copy-pa-paged-kv-load.md) | 编译分支 `wip/build-001-002`（`5bdc6165`）；独立分支待建 | 纯新增;待重编 + 性能复测 |
+| 001 | [Ascend codegen:整数 max/min 输出为三元表达式](001-ascend-codegen-integer-minmax-ternary.md) | `Merge 001` `11d28d8d`(原 `0e53a8ad`) | ✅ 已合入 `ascendc_pto` |
+| 002 | [Ascend `gemm_v0`:增加 N 方向切分（对齐 Ascend C）](002-ascend-gemm-v0-n-tiling.md) | `Merge 002` `2f146c1c`(原 `26116e27`) | ✅ 已合入 `ascendc_pto` |
+| 003 | [Ascend 新增 `copy_pa` 原语（分页 KV 直读进 L1）](003-ascend-copy-pa-paged-kv-load.md) | `Merge 003` `e4fc9e1c` | ✅ 已合入 `ascendc_pto`(SWA 正确 + 11050→5330us + 回归过) |
 
 > 两处修改互不依赖（001 改 codegen、002 改 gemm 模板，文件不重叠），各自一个 commit、各自基于 `ascendc_pto`，**分两次独立合并**，每次合并都是一个自洽的修复。
