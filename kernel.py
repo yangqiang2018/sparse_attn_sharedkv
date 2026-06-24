@@ -161,7 +161,7 @@ def _build_swa(
     cmp_idx_shape = [total_tokens, N2, DEFAULT_BLOCK_I]
 
     @tilelang.jit(
-        out_idx=[11, 12], workspace_idx=[13, 14, 15, 16], pass_configs=_PASS_CONFIGS
+        out_idx=[11, 12], workspace_idx=[13, 14, 15], pass_configs=_PASS_CONFIGS
     )
     def kernel():
         @T.prim_func
@@ -179,28 +179,25 @@ def _build_swa(
             metadata: T.Tensor([SAS_META_SIZE], idx_dtype),  # 10 (unused, v1)
             Output: T.Tensor(q_shape, dtype),  # 11 out
             LSE: T.Tensor([total_tokens, N1], accum_dtype),  # 12 out
-            workspace_kv: T.Tensor([block_num, BI, D], dtype),  # 13 gathered window
-            workspace_s: T.Tensor([block_num, G, BI], accum_dtype),  # 14 QKᵀ result
-            workspace_p: T.Tensor([block_num, G, BI], dtype),  # 15 softmax P
-            workspace_o: T.Tensor([block_num, G, D], accum_dtype),  # 16 PV result
+            workspace_s: T.Tensor([block_num, G, BI], accum_dtype),  # 13 QKᵀ result
+            workspace_p: T.Tensor([block_num, G, BI], dtype),  # 14 softmax P
+            workspace_o: T.Tensor([block_num, G, D], accum_dtype),  # 15 PV result
         ):
             with T.Kernel(block_num, is_npu=True) as (cid, vid):
                 # ---- Allocations: unconditional (shapes are compile-time).
                 # The example kernels allocate at kernel scope, never inside a
                 # conditional -- an `if` must not gate buffer allocation. ----
                 q_l1 = T.alloc_L1([G, D], dtype)
-                # One full window buffer for both matmuls. QK (N=BI) and PV
-                # (N=D, tiled inside gemm_v0) each read this whole [BI, D] tile;
-                # no K-splitting -- gemm_v0 now tiles N internally, so PV does
-                # not overflow L0B. Each workspace is touched exactly once per
-                # side (1 cube read of workspace_kv, 1 cube write of workspace_s,
-                # 1 cube read of workspace_p, 1 cube write of workspace_o), so
-                # the auto cross-core-sync counts are all 1:1.
+                # One full window buffer for both matmuls. The cube loads the
+                # paged KV window straight into kv_l1 via T.copy_pa (DataCopyPA
+                # dataflow): no UB staging, no GM "workspace_kv" round-trip, no
+                # vector gather. QK reads N=BI; PV reads N=D (tiled inside
+                # gemm_v0). workspace_s/p/o still pass the cube<->vector results
+                # through GM (the reference does the same), each touched 1:1.
                 kv_l1 = T.alloc_L1([BI, D], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
                 acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
                 acc_o_l0c = T.alloc_L0C([G, D], accum_dtype)
-                kv_ub = T.alloc_ub([D], dtype)
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
                 p_half = T.alloc_ub([G2, BI], dtype)
                 o_ub = T.alloc_ub([G2, D], accum_dtype)
@@ -240,26 +237,35 @@ def _build_swa(
                 # ===== Load Q (all G heads of this token) → L1 =====
                 T.copy(Q[tok, :, :], q_l1)
 
-                # ===== Gather the sliding-window KV (paged) → workspace. Each
-                # vid gathers its half of the BI rows in one copy statement (one
-                # vector-side write of workspace_kv, matching the cube's single
-                # read below -> 1:1 cross-core sync). Rows past the window clamp
-                # to the last valid position (ori_right-1) and are masked to -inf
-                # below, so the duplicate KV they load never contributes.
-                # Unconditional gather (mirrors the reference).
-                for r in T.serial(BI // VEC_NUM):
-                    row = T.cast(vid * (BI // VEC_NUM) + r, "int32")
-                    pos = T.min(ori_left + row, ori_right - 1)
-                    page = ori_block_table[b, pos // ori_block_size]
-                    brow = pos % ori_block_size
-                    T.copy(ori_kv[page, brow, 0, :], kv_ub)
-                    T.copy(kv_ub, workspace_kv[cid, row, :])
+                # ===== Cube: load the paged sliding-window KV straight into L1
+                # (faithful to the reference's DataCopyPA -- one Nd2Nz DataCopy
+                # per page the window spans, resolved through ori_block_table).
+                # This replaces the per-row vector gather + workspace_kv round
+                # trip entirely; it runs on the (otherwise idle) cube, L1-direct.
+                # copy_row_num = window length (<= BI); rows [window:BI) of kv_l1
+                # are unused and their QK columns are masked to -inf below. =====
+                win = ori_right - ori_left
+                T.copy_pa(
+                    kv_l1,  # dst L1 [BI, D]
+                    ori_kv,  # paged KV cache (GM)
+                    ori_block_table,  # block table (GM)
+                    ori_block_size,  # block_size
+                    N2,  # head_num (kv heads)
+                    D,  # head_dim
+                    ori_block_size * N2 * D,  # kv_stride (per-page elem stride)
+                    ori_table_len,  # max_block_num_per_batch
+                    D,  # act_head_dim (full D, no N split on the load)
+                    win,  # copy_row_num (window length)
+                    BI,  # copy_row_num_align (L1 row alignment)
+                    b,  # b_idx
+                    0,  # n2_idx
+                    ori_left,  # s2_idx (window start)
+                    0,  # d_idx
+                )
 
-                # ===== Cube: read the whole window once, then S = Q @ Kᵀ in a
-                # single gemm. QK's N=BI(=128) fits L0B as-is (transpose_B path,
-                # no N-tiling); K=D=512 is tiled 4x128 inside gemm_v0. One read of
-                # workspace_kv, one write of workspace_s -> 1:1 sync. =====
-                T.copy(workspace_kv[cid, :, :], kv_l1)
+                # ===== Cube: S = Q @ Kᵀ in a single gemm. QK's N=BI(=128) fits
+                # L0B as-is (transpose_B path, no N-tiling); K=D=512 is tiled
+                # 4x128 inside gemm_v0. One write of workspace_s -> 1:1 sync. =====
                 T.gemm_v0(q_l1, kv_l1, acc_s_l0c, transpose_B=True, init=True)
                 T.copy(acc_s_l0c, workspace_s[cid, :, :])
 
