@@ -190,7 +190,9 @@ def _build_swa(
                 # conditional -- an `if` must not gate buffer allocation. ----
                 q_l1 = T.alloc_L1([G, D], dtype)
                 kv_l1 = T.alloc_L1([BI, D], dtype)
-                p_l1 = T.alloc_L1([G, BI], dtype)
+                # P split into two K=BI/2 halves for the PV gemm (see below).
+                p_l1_0 = T.alloc_L1([G, BI // 2], dtype)
+                p_l1_1 = T.alloc_L1([G, BI // 2], dtype)
                 acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
                 acc_o_l0c = T.alloc_L0C([G, D], accum_dtype)
                 kv_ub = T.alloc_ub([D], dtype)
@@ -288,9 +290,19 @@ def _build_swa(
                 T.tile.cast(p_half, s_ub, "CAST_ROUND", G2 * BI)
                 T.copy(p_half, workspace_p[cid, vid * G2 : (vid + 1) * G2, :])
 
-                # ===== Cube: O = P @ V  (V = same ori_kv window) =====
-                T.copy(workspace_p[cid, :, :], p_l1)
-                T.gemm_v0(p_l1, kv_l1, acc_o_l0c, init=True)
+                # ===== Cube: O = P @ V  (V = same ori_kv window).
+                # gemm_v0 tiles the K axis but NOT N; with N=D=512 a single PV
+                # call loads a 512*BI*2 B-tile (128KB for BI=128) that overflows
+                # L0B (64KB) and crashes the cube. Split the K=BI contraction
+                # into two halves -- each B-tile is 512*(BI/2)*2 = 64KB and fits
+                # -- and accumulate (init=True then init=False). Same "split to
+                # fit L0" idiom as the paged-FA example. The P halves load
+                # contiguously from workspace_p column slices; kv_l1[0:BI/2] /
+                # [BI/2:BI] are contiguous row slices -- no strided operands.
+                T.copy(workspace_p[cid, :, 0 : BI // 2], p_l1_0)
+                T.copy(workspace_p[cid, :, BI // 2 : BI], p_l1_1)
+                T.gemm_v0(p_l1_0, kv_l1[0 : BI // 2, :], acc_o_l0c, init=True)
+                T.gemm_v0(p_l1_1, kv_l1[BI // 2 : BI, :], acc_o_l0c, init=False)
                 T.copy(acc_o_l0c, workspace_o[cid, :, :])
 
                 # ===== Vector: normalize, write Output + LSE =====
