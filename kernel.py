@@ -35,6 +35,8 @@ load balancing. The ``metadata`` argument is accepted (contract parity)
 but not used to drive scheduling yet. Numerics are unaffected.
 """
 
+import os
+
 import tilelang
 from tilelang import language as T
 
@@ -307,4 +309,16 @@ def _build_swa(
 
         return sparse_attn_sharedkv_swa
 
-    return kernel()
+    func = kernel()
+    # Debug hook: set SAS_DUMP_SRC=1 to dump the generated Ascend C (for
+    # inspecting buffer sizes / sync flags / indexing when localising a runtime
+    # fault without a local NPU). No effect unless the env var is set.
+    if os.environ.get("SAS_DUMP_SRC"):
+        try:
+            src = func.get_kernel_source()
+            with open("/tmp/swa_gen.cpp", "w") as fh:
+                fh.write(src)
+            print(f"[SAS_DUMP_SRC] wrote {len(src)} chars to /tmp/swa_gen.cpp")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[SAS_DUMP_SRC] get_kernel_source failed: {exc!r}")
+    return func
