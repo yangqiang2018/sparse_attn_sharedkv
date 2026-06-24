@@ -211,7 +211,10 @@ def _build_swa(
                 den_2d = T.alloc_ub([G2, D], accum_dtype)
                 lse_ub = T.alloc_ub([G2, 1], accum_dtype)
                 mask_ub = T.alloc_ub([BI // 8], "uint8")  # window bitmask (1 bit/col)
-                pos_ub = T.alloc_ub([BI], accum_dtype)  # per-column kv positions
+                col_idx = T.alloc_ub([BI], idx_dtype)  # per-column kv positions (int)
+                pos_ub = T.alloc_ub(
+                    [BI], accum_dtype
+                )  # per-column kv positions (float)
 
                 # cid fixes (b, s) for this block. Compute unconditionally for
                 # every (b, s) -- like the reference kernels. NOTE: wrapping the
@@ -277,8 +280,14 @@ def _build_swa(
                 # if_then_else inside T.Parallel (a Select there fails to
                 # vectorize and leaks a v_thread predicate into codegen).
                 # Column j -> kv position ori_left+j; in-window iff <= s_global.
-                for j in T.serial(BI):
-                    pos_ub[j] = T.cast(ori_left + j, accum_dtype)
+                # Generate the per-column positions with the vector index
+                # primitive (createvecindex: col_idx[j]=ori_left+j on PIPE_V),
+                # the same idiom as seer_attention's causal mask -- NOT a
+                # 128-iter scalar loop (that loop dominated aiv_scalar). int32
+                # col_idx -> float pos_ub via copy-cast, then compare. Faithful
+                # values, identical to the scalar loop, just on the vector pipe.
+                T.tile.createvecindex(col_idx, ori_left)
+                T.copy(col_idx, pos_ub)
                 T.tile.compare(mask_ub, pos_ub, T.float32(s_global), "LE")
                 for i in T.serial(G2):
                     T.tile.select(
