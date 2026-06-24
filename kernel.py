@@ -293,14 +293,12 @@ def _build_swa(
                 T.tile.div(o_ub, o_ub, den_2d)
                 T.tile.cast(o_half, o_ub, out_cast_mode, G2 * D)
                 T.copy(o_half, Output[tok, vid * G2 : (vid + 1) * G2, :])
-                # lse = m + log(denom), element-wise via the TIR log. Use
-                # T.serial, NOT T.Parallel: this (the last T.Parallel in the
-                # kernel) is what failed to vectorize and left a surviving
-                # parallel loop with an unbound v_thread thread-predicate that
-                # leaked into the cube codegen. The working paged_flash_attn
-                # example uses zero T.Parallel -- only T.tile.* and T.serial.
-                for i in T.serial(G2):
-                    lse_ub[i, 0] = m_i[i, 0] + T.log(denom[i, 0])
+                # lse = max + ln(sum). Vector ops, mirroring the Ascend C
+                # ProcessLse (swa_block_vector.h:395-397: Log then Add). The
+                # primitive is T.tile.ln (not T.tile.log); scalar tir.log in a
+                # serial loop is unlowerable on Ascend ("Unresolved call tir.log").
+                T.tile.ln(lse_ub, denom)
+                T.tile.add(lse_ub, lse_ub, m_i)
                 T.copy(lse_ub, LSE[tok, vid * G2 : (vid + 1) * G2])
 
         return sparse_attn_sharedkv_swa
