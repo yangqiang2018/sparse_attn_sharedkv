@@ -151,6 +151,13 @@ def _build_swa(
     BI = DEFAULT_BLOCK_I  # kv window tile (= 128)
     VEC_NUM = 2  # 2 vector cores per cube core
     G2 = G // VEC_NUM  # rows per vector core (= 32)
+    # Output D-chunk: the cube/vector pipeline keeps the softmax-stage and the
+    # output-stage UB buffers live at once (softmax(j) ∥ output(j-1)), so they
+    # can no longer be reused -- the full-D output buffers (o_ub/o_half/den_2d,
+    # [G2,512]) pushed the vector UB over the 196352B budget. Process the output
+    # D in OC-wide chunks so those buffers are [G2,OC]; the per-D-chunk Div is
+    # also what Ascend C's ProcessO does. OC must divide D.
+    OC = D // 2  # = 256
 
     accum_dtype = "float"
     idx_dtype = "int32"
@@ -217,13 +224,13 @@ def _build_swa(
                 # Vector UB scratch.
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
                 p_half = T.alloc_ub([G2, BI], dtype)
-                o_ub = T.alloc_ub([G2, D], accum_dtype)
-                o_half = T.alloc_ub([G2, D], dtype)
+                o_ub = T.alloc_ub([G2, OC], accum_dtype)  # output D-chunk
+                o_half = T.alloc_ub([G2, OC], dtype)
                 m_raw = T.alloc_ub([G2, 1], accum_dtype)
                 sink_ub = T.alloc_ub([G2, 1], accum_dtype)
                 psink = T.alloc_ub([G2, 1], accum_dtype)
                 m_2d = T.alloc_ub([G2, BI], accum_dtype)
-                den_2d = T.alloc_ub([G2, D], accum_dtype)
+                den_2d = T.alloc_ub([G2, OC], accum_dtype)  # output D-chunk
                 lse_ub = T.alloc_ub([G2, 1], accum_dtype)
                 col_idx = T.alloc_ub([BI], idx_dtype)
                 pos_ub = T.alloc_ub([BI], accum_dtype)
@@ -409,23 +416,39 @@ def _build_swa(
                                 sm = T.cast(pidm % max_seq, "int32")
                                 if sm < act_q_lens[bm]:
                                     tokm = q_prefix[bm] + sm
-                                    T.copy(
-                                        workspace_o[
-                                            cid, bufm, vid * G2 : (vid + 1) * G2, :
-                                        ],
-                                        o_ub,
-                                    )
-                                    T.barrier_all()
-                                    T.tile.broadcast(den_2d, denom[bufm, :, :])
-                                    T.tile.div(o_ub, o_ub, den_2d)
-                                    T.tile.cast(o_half, o_ub, out_cast_mode, G2 * D)
-                                    T.barrier_all()
-                                    T.copy(
-                                        o_half,
-                                        Output[tokm, vid * G2 : (vid + 1) * G2, :],
-                                    )
+                                    # Normalize + write Output in OC-wide D-chunks
+                                    # (o_ub/o_half/den_2d are [G2,OC]); the GM
+                                    # slices are the same strided copy the full-D
+                                    # write already used, just OC columns wide.
+                                    for dc in T.serial(D // OC):
+                                        T.copy(
+                                            workspace_o[
+                                                cid,
+                                                bufm,
+                                                vid * G2 : (vid + 1) * G2,
+                                                dc * OC : (dc + 1) * OC,
+                                            ],
+                                            o_ub,
+                                        )
+                                        T.barrier_all()
+                                        T.tile.broadcast(den_2d, denom[bufm, :, :])
+                                        T.tile.div(o_ub, o_ub, den_2d)
+                                        T.tile.cast(
+                                            o_half, o_ub, out_cast_mode, G2 * OC
+                                        )
+                                        T.barrier_all()
+                                        T.copy(
+                                            o_half,
+                                            Output[
+                                                tokm,
+                                                vid * G2 : (vid + 1) * G2,
+                                                dc * OC : (dc + 1) * OC,
+                                            ],
+                                        )
+                                        T.barrier_all()
                                     # lse = max + ln(sum) (T.tile.ln; scalar
-                                    # tir.log is unlowerable on Ascend)
+                                    # tir.log is unlowerable on Ascend). Once per
+                                    # task (denom/m are per-row, D-independent).
                                     T.tile.ln(lse_ub, denom[bufm, :, :])
                                     T.tile.add(lse_ub, lse_ub, m_i[bufm, :, :])
                                     T.barrier_all()
