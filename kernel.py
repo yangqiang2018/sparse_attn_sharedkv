@@ -192,7 +192,10 @@ def _build_swa(
                 # KV window split into two BI/2 halves: gemm_v0 needs full
                 # buffers (it rejects sliced operands), and each half's V-tile
                 # (D*(BI/2)*2 = 64KB) fits L0B, whereas a full BI=128 V-tile
-                # (128KB) overflows it. Used for both QK and PV.
+                # (128KB) overflows it. Used for both QK and PV. The window is
+                # read from workspace_kv in exactly two cube copies (the two
+                # halves) -- matched by two vector gather writes below so the
+                # auto cross-core-sync pass sees equal cube/vec sync counts.
                 kv_l1_0 = T.alloc_L1([BI // 2, D], dtype)
                 kv_l1_1 = T.alloc_L1([BI // 2, D], dtype)
                 p_l1_0 = T.alloc_L1([G, BI // 2], dtype)
@@ -240,29 +243,50 @@ def _build_swa(
                 T.copy(Q[tok, :, :], q_l1)
 
                 # ===== Gather the sliding-window KV (paged) → workspace.
-                # Each vid gathers its half of the BI rows. Rows past the window
-                # clamp to the last valid position (ori_right-1); their columns
-                # are masked to -inf below, so the duplicate KV they load never
-                # contributes. Unconditional gather (mirrors the reference).
-                for r in T.serial(BI // VEC_NUM):
-                    row = T.cast(vid * (BI // VEC_NUM) + r, "int32")
-                    pos = T.min(ori_left + row, ori_right - 1)
-                    page = ori_block_table[b, pos // ori_block_size]
-                    brow = pos % ori_block_size
-                    T.copy(ori_kv[page, brow, 0, :], kv_ub)
-                    T.copy(kv_ub, workspace_kv[cid, row, :])
+                # Written in TWO copies per iteration -- one per BI/2 window half
+                # -- so workspace_kv has two vector-side sync points that match
+                # the cube's two half reads below (the auto cross-core-sync pass
+                # requires equal cube/vec sync-point counts per workspace, paired
+                # in order: half0-write<->half0-read, half1-write<->half1-read).
+                # The two vids split each half (vid*SUB..); rows past the window
+                # clamp to the last valid position (ori_right-1) and are masked to
+                # -inf below, so the duplicate KV they load never contributes.
+                # Unconditional gather (mirrors the reference).
+                for r in T.serial(BI // (2 * VEC_NUM)):
+                    row0 = T.cast(vid * (BI // (2 * VEC_NUM)) + r, "int32")
+                    pos0 = T.min(ori_left + row0, ori_right - 1)
+                    page0 = ori_block_table[b, pos0 // ori_block_size]
+                    brow0 = pos0 % ori_block_size
+                    T.copy(ori_kv[page0, brow0, 0, :], kv_ub)
+                    T.copy(kv_ub, workspace_kv[cid, row0, :])  # window half 0
+                    row1 = T.cast(BI // 2 + vid * (BI // (2 * VEC_NUM)) + r, "int32")
+                    pos1 = T.min(ori_left + row1, ori_right - 1)
+                    page1 = ori_block_table[b, pos1 // ori_block_size]
+                    brow1 = pos1 % ori_block_size
+                    T.copy(ori_kv[page1, brow1, 0, :], kv_ub)
+                    T.copy(kv_ub, workspace_kv[cid, row1, :])  # window half 1
+
+                # ===== Cube: read the two window halves (matching the two gather
+                # writes), then S = Q @ Kᵀ per half into the two halves of S.
+                # gemm_v0 rejects sliced operands, so each half is a full buffer;
+                # each QK B-tile (K=D=512 tiled 4x128, N=BI/2) fits L0B. =====
                 T.copy(workspace_kv[cid, 0 : BI // 2, :], kv_l1_0)
                 T.copy(workspace_kv[cid, BI // 2 : BI, :], kv_l1_1)
-
-                # ===== Cube: S = Q @ Kᵀ. Compute the two KV halves separately
-                # (full buffers, each fits L0) into the two halves of S. =====
                 T.gemm_v0(q_l1, kv_l1_0, acc_s_l0c, transpose_B=True, init=True)
                 T.copy(acc_s_l0c, workspace_s[cid, :, 0 : BI // 2])
                 T.gemm_v0(q_l1, kv_l1_1, acc_s_l0c, transpose_B=True, init=True)
                 T.copy(acc_s_l0c, workspace_s[cid, :, BI // 2 : BI])
 
-                # ===== Vector: scale + window mask + softmax (1 tile) =====
-                T.copy(workspace_s[cid, vid * G2 : (vid + 1) * G2, :], s_ub)
+                # ===== Vector: scale + window mask + softmax (1 tile). Read the
+                # two S column halves separately, matching the cube's two writes.
+                T.copy(
+                    workspace_s[cid, vid * G2 : (vid + 1) * G2, 0 : BI // 2],
+                    s_ub[:, 0 : BI // 2],
+                )
+                T.copy(
+                    workspace_s[cid, vid * G2 : (vid + 1) * G2, BI // 2 : BI],
+                    s_ub[:, BI // 2 : BI],
+                )
                 T.tile.mul(s_ub, s_ub, softmax_scale)
                 # Window mask via the idiomatic compare+select (VSEL), the same
                 # pattern as example_sparse_flash_attn_mask.py -- NOT
@@ -294,19 +318,30 @@ def _build_swa(
                 T.tile.sub(psink, sink_ub, m_i)
                 T.tile.exp(psink, psink)
                 T.tile.add(denom, denom, psink)
-                # P → half → workspace for the PV matmul (round, matching Ascend C)
+                # P → half → workspace for the PV matmul (round, matching Ascend C).
+                # Write P in two column halves so workspace_p gets TWO vector-side
+                # sync points, matching the cube's two column-half reads in PV
+                # below (the auto cross-core-sync pass requires per-workspace
+                # cube/vec sync-point counts to match).
                 T.tile.cast(p_half, s_ub, "CAST_ROUND", G2 * BI)
-                T.copy(p_half, workspace_p[cid, vid * G2 : (vid + 1) * G2, :])
+                T.copy(
+                    p_half[:, 0 : BI // 2],
+                    workspace_p[cid, vid * G2 : (vid + 1) * G2, 0 : BI // 2],
+                )
+                T.copy(
+                    p_half[:, BI // 2 : BI],
+                    workspace_p[cid, vid * G2 : (vid + 1) * G2, BI // 2 : BI],
+                )
 
                 # ===== Cube: O = P @ V  (V = same ori_kv window).
                 # gemm_v0 tiles the K axis but NOT N; with N=D=512 a single PV
                 # call loads a 512*BI*2 B-tile (128KB for BI=128) that overflows
                 # L0B (64KB) and crashes the cube. Split the K=BI contraction
                 # into two halves -- each B-tile is 512*(BI/2)*2 = 64KB and fits
-                # -- and accumulate (init=True then init=False). Same "split to
-                # fit L0" idiom as the paged-FA example. The P halves load
-                # contiguously from workspace_p column slices; kv_l1[0:BI/2] /
-                # [BI/2:BI] are contiguous row slices -- no strided operands.
+                # -- and accumulate (init=True then init=False). The two P column
+                # halves are read straight from workspace_p (two cube reads that
+                # match the vector's two column-half writes above); the V K-halves
+                # are kv_l1_0/1 loaded from the two workspace_kv halves. =====
                 T.copy(workspace_p[cid, :, 0 : BI // 2], p_l1_0)
                 T.copy(workspace_p[cid, :, BI // 2 : BI], p_l1_1)
                 T.gemm_v0(p_l1_0, kv_l1_0, acc_o_l0c, init=True)
