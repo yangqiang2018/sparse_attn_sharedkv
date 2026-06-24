@@ -189,11 +189,15 @@ def _build_swa(
                 # The example kernels allocate at kernel scope, never inside a
                 # conditional -- an `if` must not gate buffer allocation. ----
                 q_l1 = T.alloc_L1([G, D], dtype)
-                kv_l1 = T.alloc_L1([BI, D], dtype)
-                # P split into two K=BI/2 halves for the PV gemm (see below).
+                # KV window split into two BI/2 halves: gemm_v0 needs full
+                # buffers (it rejects sliced operands), and each half's V-tile
+                # (D*(BI/2)*2 = 64KB) fits L0B, whereas a full BI=128 V-tile
+                # (128KB) overflows it. Used for both QK and PV.
+                kv_l1_0 = T.alloc_L1([BI // 2, D], dtype)
+                kv_l1_1 = T.alloc_L1([BI // 2, D], dtype)
                 p_l1_0 = T.alloc_L1([G, BI // 2], dtype)
                 p_l1_1 = T.alloc_L1([G, BI // 2], dtype)
-                acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
+                acc_s_l0c = T.alloc_L0C([G, BI // 2], accum_dtype)
                 acc_o_l0c = T.alloc_L0C([G, D], accum_dtype)
                 kv_ub = T.alloc_ub([D], dtype)
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
@@ -247,11 +251,15 @@ def _build_swa(
                     brow = pos % ori_block_size
                     T.copy(ori_kv[page, brow, 0, :], kv_ub)
                     T.copy(kv_ub, workspace_kv[cid, row, :])
-                T.copy(workspace_kv[cid, :, :], kv_l1)
+                T.copy(workspace_kv[cid, 0 : BI // 2, :], kv_l1_0)
+                T.copy(workspace_kv[cid, BI // 2 : BI, :], kv_l1_1)
 
-                # ===== Cube: S = Q @ Kᵀ  (K = ori_kv window) =====
-                T.gemm_v0(q_l1, kv_l1, acc_s_l0c, transpose_B=True, init=True)
-                T.copy(acc_s_l0c, workspace_s[cid, :, :])
+                # ===== Cube: S = Q @ Kᵀ. Compute the two KV halves separately
+                # (full buffers, each fits L0) into the two halves of S. =====
+                T.gemm_v0(q_l1, kv_l1_0, acc_s_l0c, transpose_B=True, init=True)
+                T.copy(acc_s_l0c, workspace_s[cid, :, 0 : BI // 2])
+                T.gemm_v0(q_l1, kv_l1_1, acc_s_l0c, transpose_B=True, init=True)
+                T.copy(acc_s_l0c, workspace_s[cid, :, BI // 2 : BI])
 
                 # ===== Vector: scale + window mask + softmax (1 tile) =====
                 T.copy(workspace_s[cid, vid * G2 : (vid + 1) * G2, :], s_ub)
@@ -301,8 +309,8 @@ def _build_swa(
                 # [BI/2:BI] are contiguous row slices -- no strided operands.
                 T.copy(workspace_p[cid, :, 0 : BI // 2], p_l1_0)
                 T.copy(workspace_p[cid, :, BI // 2 : BI], p_l1_1)
-                T.gemm_v0(p_l1_0, kv_l1[0 : BI // 2, :], acc_o_l0c, init=True)
-                T.gemm_v0(p_l1_1, kv_l1[BI // 2 : BI, :], acc_o_l0c, init=False)
+                T.gemm_v0(p_l1_0, kv_l1_0, acc_o_l0c, init=True)
+                T.gemm_v0(p_l1_1, kv_l1_1, acc_o_l0c, init=False)
                 T.copy(acc_o_l0c, workspace_o[cid, :, :])
 
                 # ===== Vector: normalize, write Output + LSE =====
