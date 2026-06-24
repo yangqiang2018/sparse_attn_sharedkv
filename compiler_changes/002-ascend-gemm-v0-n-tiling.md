@@ -99,3 +99,20 @@ ping-pong buffer，所以 N-tile 与 K 真正 overlap（最早一版「逐 N-til
 `ComputeMm1`（K 切 4×128、N=窗口）/`ComputeMm2`（N 切 4×128、K=窗口）完全一致**，
 内核里**不再有切 K 两半、列半同步配平、strided 拷贝等任何绕行**。这正是
 *"TileLang 表达不了→加原语/修编译器，绝不在内核里发明绕路"* 的要求。
+
+## 8. 必要性与通用性
+
+**必要性(为什么非改不可)。** PV 矩阵乘是 `<M=64, N=D=512, K=窗口>`。`gemm_v0` 原本
+**只切 K 不切 N**,一次 mma 把整个 N 的 B 操作数载入 L0B = `512*128*2 = 128KB > L0B 64KB`
+→ **溢出、cube 运行期崩**。而 Ascend C 的 `ComputeMm2` 本来就按 `N_SPLIT_SIZE=128` 切 N。
+要忠实复刻、又要能跑,**必须让 gemm 切 N**。内核侧切不了(§4:`gemm_v0` 拒绝切片操作数、
+L1→L1 拷贝 codegen 不支持);唯一的内核侧替代(切 K 两半)又引出跨核同步点不匹配、列半
+strided 拷贝,最终把数值搞崩。所以这一处**只能在 gemm 原语里修**。
+
+**通用性(不止本算子)。** N 切分是**矩阵乘原语的通用能力**,与 sparse_attn_sharedkv 无关:
+**任何** B-tile(`N*kL0Size*elem`)超过 L0B 预算的 gemm 都需要它——在此修复前,`gemm_v0`
+**根本做不了大 N 的 matmul**(必溢出 L0B)。修复是**兼容性的**:小 N / `transpose_B` 调用
+`nL0split==1`、`tileIdx==kL0Idx`,与原实现**逐字节相同**;它只是**新增**了"以前根本跑不了
+的大 N matmul"这一类能力(如任何 head_dim 较大的 attention PV)。catlass 自己的分块 mmad
+(`block_mmad_pingpong_tla.hpp`)本就通用地切 M/N/K,本修复只是把 `gemm_v0` 拉齐到同一
+水平。流水化(prime/drain 一次、连续 ping-pong)也是通用的 overlap 改进。

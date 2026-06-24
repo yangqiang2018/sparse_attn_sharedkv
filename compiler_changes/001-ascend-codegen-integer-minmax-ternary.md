@@ -132,3 +132,20 @@ void CodeGenTileLangAscend::VisitExpr_(const MaxNode *op, std::ostream &os) {
 这是一个真实的 codegen bug(对一个标准操作输出了有歧义的代码),以最小且兼容的方式修复。
 算子用的是普通的 `max`/`min` —— 与 Ascend C 参考实现里的 `Max()`/`Min()` 是同一个操作;
 修复只改变 codegen *打印* 它们的方式。没有发明新方法,也没有用内核侧绕路。
+
+## 8. 必要性与通用性
+
+**必要性(为什么非改不可)。** SWA 的窗口边界与分页 gather 位置是**运行期标量整数**
+`max`/`min`(`max(s_global-127,0)`、`min(ori_left+row, ori_right-1)`),与 Ascend C 的
+`Max()`/`Min()` 一一对应,不是可选写法。codegen 对整数 `Max`/`Min` 输出**裸 `max(a,b)`**,
+在 int64(grid 变量)对 int 字面量时是有歧义重载,bisheng **直接编译失败**。内核侧又躲不
+掉(§4:simplifier 把收窄 cast 折掉)。所以**不改这一处,SWA 内核根本编不过**——这是
+阻断性的、必须在 codegen 修。
+
+**通用性(不止本算子)。** 这是一个**通用的 codegen 正确性修复**,与 sparse_attn_sharedkv
+无关:**任何**会产生「**运行期**(不能被常量折叠的)标量整数 `max`/`min`」的算子,都会撞到
+同一个歧义重载而编译失败。此前非 PTO 的 Ascend codegen **根本没有** `Max`/`Min` 的
+override(只有 PTO 路径用 `std::max`),这个缺口一直**潜伏**——既有示例的 `T.max`/`T.min`
+都作用在编译期常量上、会被折叠(如 `T.max(ceildiv(...),1)`),本算子只是**第一个**真正需要
+运行期整数 min/max 的。修复(整数/uint 走三元、浮点走原路)是 dtype 通用的,任何后续做
+下标/窗口/钳位运算的算子都直接受益。
