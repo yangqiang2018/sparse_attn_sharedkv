@@ -179,10 +179,10 @@ def _build_swa(
             metadata: T.Tensor([SAS_META_SIZE], idx_dtype),  # 10 (unused, v1)
             Output: T.Tensor(q_shape, dtype),  # 11 out
             LSE: T.Tensor([total_tokens, N1], accum_dtype),  # 12 out
-            ws_kv: T.Tensor([block_num, BI, D], dtype),  # 13 gathered window
-            ws_s: T.Tensor([block_num, G, BI], accum_dtype),  # 14 QKᵀ result
-            ws_p: T.Tensor([block_num, G, BI], dtype),  # 15 softmax P
-            ws_o: T.Tensor([block_num, G, D], accum_dtype),  # 16 PV result
+            workspace_kv: T.Tensor([block_num, BI, D], dtype),  # 13 gathered window
+            workspace_s: T.Tensor([block_num, G, BI], accum_dtype),  # 14 QKᵀ result
+            workspace_p: T.Tensor([block_num, G, BI], dtype),  # 15 softmax P
+            workspace_o: T.Tensor([block_num, G, D], accum_dtype),  # 16 PV result
         ):
             with T.Kernel(block_num, is_npu=True) as (cid, vid):
                 # ---- Allocations: unconditional (shapes are compile-time).
@@ -244,15 +244,15 @@ def _build_swa(
                     page = ori_block_table[b, pos // ori_block_size]
                     brow = pos % ori_block_size
                     T.copy(ori_kv[page, brow, 0, :], kv_ub)
-                    T.copy(kv_ub, ws_kv[cid, row, :])
-                T.copy(ws_kv[cid, :, :], kv_l1)
+                    T.copy(kv_ub, workspace_kv[cid, row, :])
+                T.copy(workspace_kv[cid, :, :], kv_l1)
 
                 # ===== Cube: S = Q @ Kᵀ  (K = ori_kv window) =====
                 T.gemm_v0(q_l1, kv_l1, acc_s_l0c, transpose_B=True, init=True)
-                T.copy(acc_s_l0c, ws_s[cid, :, :])
+                T.copy(acc_s_l0c, workspace_s[cid, :, :])
 
                 # ===== Vector: scale + window mask + softmax (1 tile) =====
-                T.copy(ws_s[cid, vid * G2 : (vid + 1) * G2, :], s_ub)
+                T.copy(workspace_s[cid, vid * G2 : (vid + 1) * G2, :], s_ub)
                 T.tile.mul(s_ub, s_ub, softmax_scale)
                 # Window mask via the idiomatic compare+select (VSEL), the same
                 # pattern as example_sparse_flash_attn_mask.py -- NOT
@@ -286,15 +286,15 @@ def _build_swa(
                 T.tile.add(denom, denom, psink)
                 # P → half → workspace for the PV matmul (round, matching Ascend C)
                 T.tile.cast(p_half, s_ub, "CAST_ROUND", G2 * BI)
-                T.copy(p_half, ws_p[cid, vid * G2 : (vid + 1) * G2, :])
+                T.copy(p_half, workspace_p[cid, vid * G2 : (vid + 1) * G2, :])
 
                 # ===== Cube: O = P @ V  (V = same ori_kv window) =====
-                T.copy(ws_p[cid, :, :], p_l1)
+                T.copy(workspace_p[cid, :, :], p_l1)
                 T.gemm_v0(p_l1, kv_l1, acc_o_l0c, init=True)
-                T.copy(acc_o_l0c, ws_o[cid, :, :])
+                T.copy(acc_o_l0c, workspace_o[cid, :, :])
 
                 # ===== Vector: normalize, write Output + LSE =====
-                T.copy(ws_o[cid, vid * G2 : (vid + 1) * G2, :], o_ub)
+                T.copy(workspace_o[cid, vid * G2 : (vid + 1) * G2, :], o_ub)
                 T.tile.broadcast(den_2d, denom)
                 T.tile.div(o_ub, o_ub, den_2d)
                 T.tile.cast(o_half, o_ub, out_cast_mode, G2 * D)
