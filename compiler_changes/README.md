@@ -16,6 +16,6 @@
 | 编号 | 标题 | 编译器提交 / 分支 | 状态 |
 |---|---|---|---|
 | 001 | [Ascend codegen:整数 max/min 输出为三元表达式](001-ascend-codegen-integer-minmax-ternary.md) | `wip/ascend-codegen-int-minmax-ternary`（`0e53a8ad`，基于 `ascendc_pto`） | 已验证兼容;待独立合入 `ascendc_pto` |
-| 002 | [Ascend `gemm_v0`:增加 N 方向切分（对齐 Ascend C）](002-ascend-gemm-v0-n-tiling.md) | `wip/ascend-gemm-n-tiling`（`2c245573`，独立基于 `ascendc_pto`） | SWA 快测已过;待独立合入 `ascendc_pto` |
+| 002 | [Ascend `gemm_v0`:增加 N 方向切分（对齐 Ascend C）](002-ascend-gemm-v0-n-tiling.md) | `wip/ascend-gemm-n-tiling`（`26116e27`，独立基于 `ascendc_pto`） | SWA 快测已过;待独立合入 `ascendc_pto` |
 
 > 两处修改互不依赖（001 改 codegen、002 改 gemm 模板，文件不重叠），各自一个 commit、各自基于 `ascendc_pto`，**分两次独立合并**，每次合并都是一个自洽的修复。

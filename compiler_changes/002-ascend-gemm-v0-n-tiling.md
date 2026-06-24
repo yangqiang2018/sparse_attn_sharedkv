@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **编译器仓库** | `yangqiang2018/tilelang-ascend-2` |
-| **分支 / 提交** | `wip/ascend-gemm-n-tiling` · `2c245573`（**独立基于 `ascendc_pto`**，与 001 互不依赖，可单独合并） |
+| **分支 / 提交** | `wip/ascend-gemm-n-tiling` · `26116e27`（**独立基于 `ascendc_pto`**，与 001 互不依赖，可单独合并） |
 | **改动文件** | `src/tl_templates/ascend/common.h`（`gemm_v0` 模板） |
 | **是否必须** | 是 —— 不改的话 SWA 的 PV 矩阵乘要么溢出 L0B 崩溃，要么只能在内核里切 K 绕行（而绕行又引出同步/数值问题） |
 | **是否兼容** | 是 —— 小 N / `transpose_B` 路径逐字节不变；大 N `transpose_B=false` 原本会溢出（没有可用调用），只新增能力 |
@@ -71,6 +71,13 @@ bNOffset = nL0Idx * nTile * roundUp16(K);
 `GetTile(L0C, MakeCoord(0, nPart), …)` 逐 N-tile 写）等价。L0B slot 改为
 `pp * (nTile * kL0Size)`，配合 K 的 ping-pong，峰值 `2*nTile*kL0Size*2 = 64KB` 正好
 装下 L0B。
+
+**流水化（对齐 Ascend C 的 overlap，非串行）**：把 `(N-tile, K-tile)` 两层循环用
+一个 `tileIdx` 拍平，L0A/L0B 的 ping-pong **只 prime/drain 一次**、在整条 tile 序列
+上连续滚动 —— 当前 tile 的 mma 在执行时，下一个 tile 的 L1→L0 载入已经写进另一个
+ping-pong buffer，所以 N-tile 与 K 真正 overlap（最早一版「逐 N-tile drain」会把 tile
+串起来，是没逐指令复刻 Ascend C matmul 流水的，已改正）。`nL0split==1` 时
+`tileIdx==kL0Idx`，与原 K ping-pong 逐字节相同。
 
 ## 6. 为什么它是兼容性修改（及待验证项）
 
