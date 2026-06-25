@@ -231,6 +231,10 @@ def _build_swa(
                 ones_ub = T.alloc_ub([G2, 1], accum_dtype)
                 expmax_ub = T.alloc_ub([G2, 1], accum_dtype)
                 softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
+                # Contiguous [G2, win_align] score buffer: softmax_flash_v2 compacts
+                # s_ub[:, 0:win_align] here so the library runs in its win_align
+                # range (sized for the max win_align = BI).
+                softmax_cmp = T.alloc_ub([G2, BI], accum_dtype)
                 # [G2,8] Brcb scratch for the output row-broadcast div (faithful
                 # to Ascend C RowDivs -- no [G2,D] denom broadcast buffer).
                 brcb_d = T.alloc_ub([G2, BLK], accum_dtype)
@@ -257,6 +261,7 @@ def _build_swa(
                                     tok = q_prefix[b] + s
                                     s_global = act_kv - act_q + s
                                     ori_left = T.max(s_global - ori_win_left, 0)
+                                    win = s_global + 1 - ori_left
                                     T.copy(Q[tok, :, :], q_l1)
                                     T.barrier_all()
                                     T.copy_pa(
@@ -269,7 +274,7 @@ def _build_swa(
                                         ori_block_size * N2 * D,
                                         ori_table_len,
                                         D,
-                                        BI,
+                                        win,
                                         BI,
                                         b,
                                         0,
@@ -277,23 +282,23 @@ def _build_swa(
                                         0,
                                     )
                                     T.barrier_all()
-                                    # DIAGNOSTIC: QK over the full BI tile -- load BI
-                                    # KV rows and compute all BI columns, so every
-                                    # column of acc_s_l0c[0:BI] is finite Q@loaded-KV
-                                    # (no uninitialised [win_align:BI] region for the
-                                    # softmax exp to hit). softmax_flash_v2
-                                    # actual_col=winm and PV k_actual=winm still
-                                    # restrict attention to the real window, so this
-                                    # only changes whether the padding is finite. If
-                                    # the flaky NaN disappears, the cause was the
-                                    # uninitialised padding (next: faithful
-                                    # win_align-strided processing).
+                                    # QK = Q @ Kᵀ over the window; N rounds up to 16 to
+                                    # match Ascend C ComputeMm1 (nL1SizeAlign =
+                                    # SASAlign(window, 16)); copy_pa loads `win` KV
+                                    # rows. acc_s_l0c[0:win_align] is the score -- the
+                                    # [win:win_align] tail is Q@unloaded-KV, but the
+                                    # softmax compacts/processes win_align and the
+                                    # reduce/PV use winm, so it is excluded exactly as
+                                    # in the reference. [win_align:BI] stays
+                                    # uninitialised; the softmax never reads it.
+                                    win_align = (win + 15) // 16 * 16
                                     T.gemm_v0(
                                         q_l1,
                                         kv_l1,
                                         acc_s_l0c,
                                         transpose_B=True,
                                         init=True,
+                                        n_actual=win_align,
                                     )
                                     T.barrier_all()
                                     T.copy(acc_s_l0c, workspace_s[cid, buf, :, :])
@@ -377,9 +382,13 @@ def _build_swa(
                                     s_global = act_kv - act_q + s
                                     ori_left = T.max(s_global - ori_win_left, 0)
                                     # winm = window length (= Ascend C
-                                    # actualSingleProcessSInnerSize); softmax
-                                    # reduces exactly these valid columns.
+                                    # actualSingleProcessSInnerSize); win_align =
+                                    # winm rounded up to 16 (= actualSingleProcess
+                                    # SInnerSizeAlign / the QK mma N). softmax
+                                    # processes win_align columns (columnCount) and
+                                    # reduces only winm (actualColumnCount).
                                     winm = s_global + 1 - ori_left
+                                    win_align = (winm + 15) // 16 * 16
                                     T.copy(
                                         workspace_s[
                                             cid, buf, vid * G2 : (vid + 1) * G2, :
@@ -392,15 +401,16 @@ def _build_swa(
                                     T.barrier_all()
                                     # Faithful Ascend C SoftmaxFlashV2
                                     # (swa_block_vector.h SoftmaxFlashV2Compute):
-                                    # one call does the sink-seeded single-pass
-                                    # softmax over the winm valid columns. The
-                                    # SoftMaxShapeInfo {G2, BI, G2, winm} dual
-                                    # quantity makes the library ignore the
-                                    # out-of-window / alignment columns [winm:BI]
-                                    # -- no mask, no -inf fill. in_max = per-row
-                                    # sink seed, in_sum = 1.0; out_max/out_sum land
-                                    # in the carried m_i/denom (identical values
-                                    # to the old reduce_max/.../reduce_sum path).
+                                    # sink-seeded single-pass softmax. The primitive
+                                    # compacts s_ub[:, 0:win_align] into softmax_cmp,
+                                    # runs the library with SoftMaxShapeInfo {G2,
+                                    # win_align, G2, winm} (columnCount=win_align in
+                                    # its designed range, like Ascend C's win_align-
+                                    # strided mmResUb; actualColumnCount=winm reduces
+                                    # only the window), then scatters P back -- the
+                                    # uninitialised s_ub[win_align:BI] is never read.
+                                    # in_max = per-row sink, in_sum = 1.0;
+                                    # out_max/out_sum -> carried m_i/denom.
                                     T.tile.softmax_flash_v2(
                                         s_ub,
                                         denom[buf, :, :],
@@ -410,6 +420,8 @@ def _build_swa(
                                         ones_ub,
                                         sink_ub,
                                         softmax_tmp,
+                                        softmax_cmp,
+                                        win_align,
                                         winm,
                                     )
                                     T.barrier_all()
