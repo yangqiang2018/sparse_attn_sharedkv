@@ -156,6 +156,20 @@ def _build_swa(
     # tmpBuff1 = 32KB; ample for the [G2, BI] softmax block).
     SOFTMAX_TMP_BYTES = 32768
 
+    # ---- DIAGNOSTIC toggle for the faithful-cube build ----------------------
+    # The faithful QK joins PV on gemm_v0_fixp (multi-K unitFlag 0b10 accumulate
+    # + fused fixpipe + shared cL0 = ComputeMm1). That exact 0b10 accumulate hangs
+    # the cube (root cause unconfirmed; the template is invisible in the dump).
+    # DBG_BARRIER=True makes gemm_v0_fixp drain the M pipe with a PipeBarrier
+    # <PIPE_M> before each mma (= the working gemm_v0 path): it serialises the
+    # accumulating mmas so this build is the correctness/data check. Once it PASSES,
+    # flip to False to test the bare 0b10 mma->fixpipe overlap and localise the hang.
+    DBG_BARRIER = True
+    # DEBUG_SERIAL=True keeps the iteration-boundary barrier_all (current parity
+    # structure). The 3-slot KV ring / QP ring / zero-barrier come AFTER the gemm
+    # is proven; this flag stays True until then.
+    DEBUG_SERIAL = True
+
     accum_dtype = "float"
     idx_dtype = "int32"
     # Cast rounding modes, faithful to Ascend C: P->KV_T uses CAST_ROUND
@@ -222,14 +236,15 @@ def _build_swa(
                 q_l1 = T.alloc_L1([G, D], dtype)
                 kv_l1 = T.alloc_L1([2, BI, D], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
+                # STEP-1 DIAGNOSTIC: separate cL0 for QK and PV, to isolate the
+                # one new variable -- QK's multi-K (K=512, 4 tiles) unitFlag 0b10
+                # accumulate inside gemm_v0_fixp (the cube hang). acc_s_l0c = QK's
+                # 1-slot score L0C; acc_o_l0c = PV's 2-slot [2,G,BI] ping-pong
+                # (008, proven). The faithful SHARED cL0TensorPingPong (one buffer,
+                # continuous cl0_base across QK+PV) is layered on AFTER the multi-K
+                # gemm is proven -- it adds a QK->PV cross-call slot-reuse hazard
+                # that would confound this diagnostic.
                 acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
-                # PV uses gemm_v0_fixp: O[G,D] is fixpiped to GM one N-tile at a
-                # time (faithful to Ascend C ComputeMm2). The L0C accumulator is
-                # a 2-slot [2, G, BI] ping-pong (= cL0TensorPingPong): the two
-                # 32KB slots let fixpipe(N-tile i) overlap mma(N-tile i+1) via the
-                # hardware unitFlag. 2*32KB(acc_o) + 32KB(acc_s) = 96KB <= 128KB
-                # L0C. (The full [G,D]=128KB alone would fill L0C; the per-N-tile
-                # fixpipe is what keeps each slot to 32KB.)
                 acc_o_l0c = T.alloc_L0C([2, G, BI], accum_dtype)
                 # Vector UB scratch.
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
@@ -311,19 +326,25 @@ def _build_swa(
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
                                     T.wait_flag("mte2", "mte1", KV_QK_EV)
-                                    T.gemm_v0(
+                                    # Faithful QK = ComputeMm1: gemm_v0_fixp K-
+                                    # accumulates D=512 over 4 kL0 tiles into
+                                    # acc_s_l0c, unitFlag 0b10x3/0b11, then fuses the
+                                    # fixpipe straight to workspace_s (no resident
+                                    # L0C + separate copy). n_actual=win_align = the
+                                    # window width (the score's real columns).
+                                    # dbg_barrier serialises the accumulate to
+                                    # localise the multi-K 0b10 cube hang.
+                                    T.gemm_v0_fixp(
                                         q_l1,
                                         kv_l1[0, :, :],
                                         acc_s_l0c,
+                                        workspace_s[cid, buf, :, :],
+                                        k_actual=D,
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
+                                        dbg_barrier=DBG_BARRIER,
                                     )
-                                    # gemm_v0's internal M_FIX close (WaitFlag<M_FIX>)
-                                    # already orders this L0C->GM copy (FIX) after the
-                                    # mma; the FIX-tagged set_cross_flag below orders
-                                    # after the copy. No barrier_all needed.
-                                    T.copy(acc_s_l0c, workspace_s[cid, buf, :, :])
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
@@ -373,6 +394,12 @@ def _build_swa(
                                     # 0(masked P)*NaN(garbage V) would give NaN;
                                     # contracting only winm excludes them.
                                     T.wait_flag("mte2", "mte1", KV_PV_EV)
+                                    # PV = ComputeMm2 (008, proven): gemm_v0_fixp
+                                    # fixpipes O[G,D] per N-tile from its own 2-slot
+                                    # acc_o_l0c ping-pong. Single K tile (k_actual=
+                                    # winm<=128, unitFlag 0b11) -- no multi-K 0b10,
+                                    # so it is the unchanged proven baseline (no
+                                    # dbg_barrier) against which the QK change tests.
                                     T.gemm_v0_fixp(
                                         p_l1,
                                         kv_l1[1, :, :],
@@ -381,14 +408,14 @@ def _build_swa(
                                         k_actual=winm,
                                         init=True,
                                     )
-                                    # KEEP this barrier: the single iteration-boundary
-                                    # full drain. It protects every cross-iteration
-                                    # hazard the removed barriers covered -- q_l1/p_l1
-                                    # WAR, acc_s WAR, and the acc_o cL0 ping-pong
-                                    # cross-call reuse (008 §9). Removing it (for the
-                                    # cross-iteration overlap) needs those handled with
-                                    # fine-grained flags first.
-                                    T.barrier_all()
+                                    # Iteration-boundary full drain (kept while
+                                    # DEBUG_SERIAL): protects every cross-iteration
+                                    # hazard -- q_l1/p_l1 WAR, acc_s WAR, the acc_o
+                                    # cL0 ping-pong cross-iteration reuse. The 3-slot
+                                    # KV ring / QP ring / fine-grained flags that let
+                                    # this be removed come AFTER the gemm is proven.
+                                    if DEBUG_SERIAL:
+                                        T.barrier_all()
                             T.set_cross_flag("FIX", EV_PV)
 
                 # =========================== VECTOR ===========================
