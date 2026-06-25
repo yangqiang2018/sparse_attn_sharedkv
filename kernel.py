@@ -311,19 +311,23 @@ def _build_swa(
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
                                     T.wait_flag("mte2", "mte1", KV_QK_EV)
-                                    T.gemm_v0(
+                                    # QK via the unified fixp path (faithful Ascend C
+                                    # ComputeMm1): K-accumulate over D=512, then
+                                    # fixpipe the [G, win_align] score straight to
+                                    # workspace_s with unitFlag -- same fixp/unitFlag/
+                                    # cL0-ping-pong path as PV (ComputeMm2). Replaces
+                                    # the resident gemm_v0 + a separate L0C->GM copy.
+                                    # k_actual defaults to K=D=512 (full contraction);
+                                    # n_actual=win_align is the window column count.
+                                    T.gemm_v0_fixp(
                                         q_l1,
                                         kv_l1[0, :, :],
                                         acc_s_l0c,
+                                        workspace_s[cid, buf, :, :],
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
                                     )
-                                    # gemm_v0's internal M_FIX close (WaitFlag<M_FIX>)
-                                    # already orders this L0C->GM copy (FIX) after the
-                                    # mma; the FIX-tagged set_cross_flag below orders
-                                    # after the copy. No barrier_all needed.
-                                    T.copy(acc_s_l0c, workspace_s[cid, buf, :, :])
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
