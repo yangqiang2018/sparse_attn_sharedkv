@@ -156,21 +156,21 @@ def _build_swa(
     # tmpBuff1 = 32KB; ample for the [G2, BI] softmax block).
     SOFTMAX_TMP_BYTES = 32768
 
-    # ---- DIAGNOSTIC bitmask for the faithful-cube build ---------------------
-    # The faithful QK joins PV on gemm_v0_fixp (multi-K unitFlag 0b10 accumulate
-    # + fused fixpipe = ComputeMm1). That exact 0b10 accumulate hangs the cube.
-    # Confirmed on NPU: DBG_MODE=1 (PipeBarrier<PIPE_M> before each mma, full M-pipe
-    # serialise = the working gemm_v0 path) STILL hangs -> the hang is the unitFlag
-    # 0b10 VALUE itself, not pipe ordering (cmatrixSource is already false:
-    # gemm_v0's 0b00 multi-K accumulate is correct). 009 IS needed (cfa/scfa QK
-    # N=512 -> multi-N-tile -> resident L0C overflow -> per-N-tile fused fixpipe is
-    # capacity-mandatory), so we must crack 0b10. DBG_MODE bits (gemm_v0_fixp):
-    #   1 = PipeBarrier before each mma (known: doesn't help).
-    #   2 = intermediate K-tiles use 0b00 (no unit flag), only the last is 0b11 ->
-    #       last-mma(0b11)+fixpipe(0b11) pairs EXACTLY like the working PV; same
-    #       numeric result. THE PROBE: if 2 clears the hang, 0b00-intermediate is
-    #       the fix (a minimal forced deviation from the reference's 0b10).
-    DBG_MODE = 2
+    # ---- DIAGNOSTIC bitmask (kept off=0 for the FAITHFUL build) --------------
+    # The QK multi-K unitFlag 0b10 accumulate hung the cube. Both probes failed:
+    # DBG_MODE=1 (PipeBarrier before each mma) and DBG_MODE=2 (0b00 intermediate
+    # instead of 0b10) STILL hang -> the hang is NOT pipe ordering nor the 0b10
+    # value, it is the multi-K ACCUMULATE (cmatrixInitVal=false) + unitFlag path.
+    # ROOT CAUSE (faithfulness gap): our mma template never set
+    # mmadParams.cmatrixSource (the reference sets it false on every Mmad,
+    # block_cube.h:576); MmadParams leaves it uninitialised and the hardware reads
+    # it for accumulate mmas (cmatrixInitVal=false) -> garbage -> hang. Fixed in the
+    # mma template (compiler). So we now run the FAITHFUL path: DBG_MODE=0 (0b10
+    # intermediate, exactly the reference). The two probe bits stay only as
+    # diagnostics; default 0 = faithful.
+    #   1 = PipeBarrier<PIPE_M> before each mma (diagnostic; doesn't help).
+    #   2 = 0b00 intermediate unitFlag (workaround; abandoned, also hangs).
+    DBG_MODE = 0
     # DEBUG_SERIAL=True keeps the iteration-boundary barrier_all (current parity
     # structure). The 3-slot KV ring / QP ring / zero-barrier come AFTER the gemm
     # is proven; this flag stays True until then.
@@ -338,8 +338,9 @@ def _build_swa(
                                     # fixpipe straight to workspace_s (no resident
                                     # L0C + separate copy). n_actual=win_align = the
                                     # window width (the score's real columns).
-                                    # dbg_mode=2 makes the intermediate K-tiles use
-                                    # 0b00 (no unit flag) to dodge the 0b10 hang.
+                                    # dbg_mode=0 = faithful 0b10 intermediate; the
+                                    # multi-K accumulate hang was the mma template's
+                                    # missing cmatrixSource=false (now fixed).
                                     T.gemm_v0_fixp(
                                         q_l1,
                                         kv_l1[0, :, :],

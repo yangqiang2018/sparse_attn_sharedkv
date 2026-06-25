@@ -4,10 +4,10 @@
 |---|---|
 | **编译器仓库** | `yangqiang2018/tilelang-ascend-2` |
 | **分支** | `wip/gemm-v0-fixp-kaccum`（**独立基于 `ascendc_pto`**，含 001–008） |
-| **改动文件** | `src/tl_templates/ascend/common.h`(`gemm_v0_fixp`)、`tilelang/language/ascend.py`(绑定加 `n_actual`/`cl0_base`/`dbg_barrier`)、`src/target/codegen_ascend.cc`(`GemmFixpOpCodegen` 多发三参)、`src/op/ascend.cc`(`ascend_gemm_v0_fixp` `set_num_inputs` 7→10) |
+| **改动文件** | `src/tl_templates/ascend/common.h`(`gemm_v0_fixp` K-累加/n_actual/cl0_base/dbg_mode + **`mma` 模板补 `cmatrixSource=false`**)、`tilelang/language/ascend.py`(绑定加 `n_actual`/`cl0_base`/`dbg_mode`)、`src/target/codegen_ascend.cc`(`GemmFixpOpCodegen` 多发三参)、`src/op/ascend.cc`(`ascend_gemm_v0_fixp` `set_num_inputs` 7→10) |
 | **是否必须** | 是 —— 忠实复刻要求 QK(`ComputeMm1`)与 PV(`ComputeMm2`)走**同一套** matmul 结构(K-累加 → 融合 fixpipe → `unitFlag` → 共享 cL0),QK 不能再用 `gemm_v0` 留驻 + 单独拷的绕行 |
 | **是否兼容** | 是 —— PV/现有 caller:`K≤128`、`n_actual=N`、`cl0_base=0`、`dbg_barrier=false` 全默认 → 逐字节不变;回归两 example 不走 `gemm_v0_fixp`(SWA 专用) |
-| **状态** | ⏳ 调试中。**必要性已确认**:cfa/scfa 的 QK N=512(cmp 满块=s2BaseSize)→ 多 N-tile → resident L0C(M·N·4 ≤512KB)远超 128KB → **per-N-tile 融合 fixpipe 是容量功能必需**(非仅性能/保真),故 009 必做。**核心未决**:多-K `unitFlag`(0b10 累加)卡死;NPU 实测 `dbg_mode=1`(每 mma 前 PipeBarrier 全串行)**仍卡** → 排除 M 流水排序,病根 = `0b10` 值本身。现用 `dbg_mode=2`(0b00 中间)探。 |
+| **状态** | ⏳ 待 NPU 验证忠实修复。**必要性已确认**:cfa/scfa 的 QK N=512(cmp 满块=s2BaseSize)→ 多 N-tile → resident L0C(M·N·4 ≤512KB)远超 128KB → **per-N-tile 融合 fixpipe 是容量功能必需**。**卡死根因已定位 = 忠实性缺口**:`mma` 模板从未设 `mmadParams.cmatrixSource`(参考 cube.h:576 每个 Mmad 都显式设 false),`MmadParams` 不默认初始化该字段,硬件在累加 mma(`cmatrixInitVal=false`)时读它 → 垃圾值 → 配 unitFlag 挂死。NPU 实测 `dbg_mode=1`(M 全串行)、`dbg_mode=2`(0b00 中间)**都仍卡** → 排除 M 排序与 0b10 值本身 → 锁定到累加路径的 cmatrixSource。**修法 = `mma` 模板补 `cmatrixSource=false`(忠实、字节兼容)**,现走忠实 `dbg_mode=0`(0b10)验证。 |
 
 > 这是**回收编号后的新 009**。上一版 009(同名 K-累加,无 `dbg_barrier`)在单个 QK 调用内多-K
 > `unitFlag` 累加处卡死、远程无法定位(模板不在 dump 里),已废弃删分支。本版加 `dbg_barrier`
@@ -32,17 +32,18 @@
 `gemm_v0_fixp`(008)模板假设单 K-tile;`transpose_B` 路径没有运行期列数 `n_actual`;`cL0BufIter`
 每次调用从 0 起,QK 与 PV 各调一次 → cL0 旋转不接续。
 
-**★未决卡死(已逐步缩小)★**:把 QK 接上多-K `unitFlag` 累加(4 个 mma:0b10,0b10,0b10,0b11 +
-Fixpipe 0b11)后 NPU **卡死**,发生在**单个 QK 调用内部**。逐条排除:
+**★卡死根因 = 忠实性缺口(已定位)★**:QK 多-K `unitFlag` 累加(4 mma:0b10,0b10,0b10,0b11 +
+Fixpipe 0b11)NPU **卡死**,发生在**单个 QK 调用内部**。逐条排除后定位到一处不忠实:
 - 分开/共享 cL0 都卡、tiny-tile 屏障运行期化、所有 set/wait_flag 收支平衡 → 不是 cL0、不是 flag 死锁。
-- **NPU 实测 `dbg_mode=1`(每个 mma 前 `PipeBarrier<PIPE_M>` 全串行化 M 流水,= 能工作的 `gemm_v0` 做法)
-  仍卡** → **排除「缺 M 流水排序」**。
-- `cmatrixSource` **不是**病根:`gemm_v0` 用 0b00 做同样的多-K 累加且数值正确 → 默认 `cmatrixSource` 已是
-  `false`。
-剩下唯一变量:**`unitFlag=0b10` 这个值本身**。`gemm_v0`(0b00,工作)、PV 008(0b11 单 mma,工作)都不走
-0b10;QK 是唯一走 0b10 的。参考用 0b10 能跑 → 是咱们 catlass 对 0b10 的发射/硬件交互有问题。
-**当前探针 `dbg_mode=2`**:中间 K-tile 改 0b00(纯累加)、只末 tile 0b11+fixpipe,让「末 mma 0b11 +
-fixpipe 0b11」配对与已验证的 PV 完全一致,数值不变。若 dodge 掉卡死 → 0b00-中间 即为修法。
+- NPU 实测 `dbg_mode=1`(每 mma 前 `PipeBarrier<PIPE_M>` 全串行 M 流水)**仍卡** → 排除「缺 M 流水排序」。
+- NPU 实测 `dbg_mode=2`(中间 tile 用 0b00 代 0b10)**仍卡** → 排除「0b10 值本身」。这条是**绕行**尝试,
+  按"绝不绕行、先查忠实复刻"已弃。
+- 回头逐字段比对参考 `ComputeMm1` 的 `MmadParams`(cube.h:571-578)与我的 `mma` 模板,**唯一缺口**:
+  **参考 cube.h:576 `mmadParams.cmatrixSource = false;` 显式设,我的模板从未设**。`MmadParams` 不默认初始化
+  该字段;硬件**仅在 `cmatrixInitVal==false`(累加 mma,C 从 L0C source)时读它**。所以:`gemm_v0`(unitFlag
+  off,不走流水)不敏感、PV 008(单 K,`cmatrixInitVal=true` 不 source)不读它 → 都没暴露;**QK 多-K 的中间累加
+  mma(`cmatrixInitVal=false`)读到未初始化的 cmatrixSource 垃圾值 + unitFlag 流水 → 挂死**。这是个纯忠实性
+  缺口,补上 = 直接复刻参考。
 
 ## 4. 为什么不能在内核侧解决
 
@@ -51,6 +52,11 @@ fixpipe)在**模板内部的 kL0 循环**里;内核调不进去。`unitFlag` 是
 原语里发。诊断这个流水挂死也只能在原语里加屏障开关——模板不在 `SAS_DUMP_SRC` 的 dump 里,内核侧无从观测。
 
 ## 5. 修法
+
+**`mma` 模板(`common.h`)补 `mmadParams.cmatrixSource = false;`(卡死根因的忠实修复)**:逐字复刻参考
+cube.h:576。`MmadParams` 不默认初始化此字段,硬件在累加 mma(`cmatrixInitVal=false`)读它;不补就是垃圾值 +
+unitFlag → 挂死。补上后 = 参考行为。字节兼容:`gemm_v0`(unitFlag off)、PV(`cmatrixInitVal=true`)的语义
+本就是「从 L0C source」,显式写 false 不改其结果;回归 example 走 `gemm_v0`、不受影响。
 
 `gemm_v0_fixp`(`common.h`):
 - **去掉 `static_assert(K <= kL0Size)`**;`kL0` 循环真 K-累加:per-tile
