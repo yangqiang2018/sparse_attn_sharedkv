@@ -278,19 +278,23 @@ def _build_swa(
                                     )
                                     T.barrier_all()
                                     # QK = Q @ Kᵀ over the actual window only
-                                    # (n_actual=win): faithful to Ascend C
-                                    # ComputeMm1 N=actualWindow. acc_s_l0c[:,
-                                    # win:BI] stays unwritten -- the window mask
-                                    # below sets those columns to -inf, so the
-                                    # softmax ignores them (mask still required
-                                    # until softmax also runs over winm only).
+                                    # (faithful to Ascend C ComputeMm1
+                                    # N=actualWindow, not the padded BI). N rounds
+                                    # up to 16 to match the reference's aligned
+                                    # mma width (SASAlign(.,16)); the extra
+                                    # [win:align] cols and the unwritten
+                                    # [align:BI] cols are all set to -inf by the
+                                    # window mask below, so the softmax ignores
+                                    # them (mask still required until softmax also
+                                    # runs over winm only).
+                                    win_align = (win + 15) // 16 * 16
                                     T.gemm_v0(
                                         q_l1,
                                         kv_l1,
                                         acc_s_l0c,
                                         transpose_B=True,
                                         init=True,
-                                        n_actual=win,
+                                        n_actual=win_align,
                                     )
                                     T.barrier_all()
                                     T.copy(acc_s_l0c, workspace_s[cid, buf, :, :])
