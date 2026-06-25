@@ -222,15 +222,13 @@ def _build_swa(
                 q_l1 = T.alloc_L1([G, D], dtype)
                 kv_l1 = T.alloc_L1([2, BI, D], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
-                acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
-                # PV uses gemm_v0_fixp: O[G,D] is fixpiped to GM one N-tile at a
-                # time (faithful to Ascend C ComputeMm2). The L0C accumulator is
-                # a 2-slot [2, G, BI] ping-pong (= cL0TensorPingPong): the two
-                # 32KB slots let fixpipe(N-tile i) overlap mma(N-tile i+1) via the
-                # hardware unitFlag. 2*32KB(acc_o) + 32KB(acc_s) = 96KB <= 128KB
-                # L0C. (The full [G,D]=128KB alone would fill L0C; the per-N-tile
-                # fixpipe is what keeps each slot to 32KB.)
-                acc_o_l0c = T.alloc_L0C([2, G, BI], accum_dtype)
+                # ONE shared cL0 ping-pong for BOTH QK and PV (= Ascend C's single
+                # cL0TensorPingPong shared by ComputeMm1 + ComputeMm2): a 2-slot
+                # [2, G, BI] L0C (2*32KB=64KB). QK uses slot 0 (cl0_base=0, 1
+                # N-tile), PV continues from slot 1 (cl0_base=1, 4 N-tiles ->
+                # slots 1,0,1,0), so the unitFlag mma->fixpipe rotation is ONE
+                # continuous sequence across QK and PV, not two disjoint ping-pongs.
+                cl0 = T.alloc_L0C([2, G, BI], accum_dtype)
                 # Vector UB scratch.
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
                 p_half = T.alloc_ub([G2, BI], dtype)
@@ -322,11 +320,12 @@ def _build_swa(
                                     T.gemm_v0_fixp(
                                         q_l1,
                                         kv_l1[0, :, :],
-                                        acc_s_l0c,
+                                        cl0,
                                         workspace_s[cid, buf, :, :],
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
+                                        cl0_base=0,
                                     )
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
@@ -380,10 +379,11 @@ def _build_swa(
                                     T.gemm_v0_fixp(
                                         p_l1,
                                         kv_l1[1, :, :],
-                                        acc_o_l0c,
+                                        cl0,
                                         workspace_o[cid, bufm, :, :],
                                         k_actual=winm,
                                         init=True,
+                                        cl0_base=1,
                                     )
                                     # KEEP this barrier: the single iteration-boundary
                                     # full drain. It protects every cross-iteration
