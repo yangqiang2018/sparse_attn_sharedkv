@@ -24,12 +24,14 @@
 | 003 | [Ascend 新增 `copy_pa` 原语（分页 KV 直读进 L1）](003-ascend-copy-pa-paged-kv-load.md) | `Merge 003` `e4fc9e1c` | ✅ 已合入 `ascendc_pto`(SWA 正确 + 11050→5330us + 回归过) |
 | 004 | [Ascend 新增 `gemm_v0_fixp` 原语（按 N-tile 即时 fixpipe + 运行期 k_actual 变长 K，根治 PV 的 L0C 越界与 0×NaN）](004-ascend-gemm-v0-fixp-l0c.md) | `Merge 004` `44cd1d9e` | ✅ 已合入 `ascendc_pto`(SWA 快测 PASS + 回归过) |
 | 005 | [Ascend 新增 `row_expand_sub`/`row_expand_div` 原语（行广播 Sub/Div，消掉非忠实的 [M,N] 广播缓冲）](005-ascend-row-expand-sub-div.md) | `Merge 005` `cc98641d` | ✅ 已合入 `ascendc_pto` |
-| 006 | [Ascend `gemm_v0`/`mma` 增加运行期 `n_actual`（变长 N 输出列，= Ascend C `ComputeMm1` 窗口长 N）](006-ascend-gemm-v0-n-actual.md) | `wip/ascend-gemm-v0-nactual` `b255a071` | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
-| 007 | [Ascend 新增 `softmax_flash_v2` 原语（逐指令复刻 AscendC `SoftmaxFlashV2`，变长 N softmax 不掩码）](007-ascend-softmax-flash-v2.md) | `wip/ascend-softmax-flashv2`（基于 `ascendc_pto`） | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
+| 006 | [Ascend `gemm_v0`/`mma` 增加运行期 `n_actual`（变长 N 输出列，= Ascend C `ComputeMm1` 窗口长 N）](006-ascend-gemm-v0-n-actual.md) | `Merge 006` `2a7662a1`(原 `b255a071`) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归过) |
+| 007 | [Ascend 新增 `softmax_flash_v2` 原语（逐指令复刻 AscendC `SoftmaxFlashV2`，变长 N softmax 不掩码）](007-ascend-softmax-flash-v2.md) | `wip/ascend-softmax-flashv2` `cf38e5fa`(快进合入) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归过) |
+| 008 | [Ascend `gemm_v0_fixp` 2-slot L0C ping-pong + 接通 `unitFlag`（= Ascend C `cL0TensorPingPong`，fixpipe∥mma 核内重叠）](008-ascend-gemm-v0-fixp-l0c-pingpong.md) | `wip/gemm-v0-fixp-l0c-pingpong`（基于 `ascendc_pto`） | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
 
-> 001–005 均已各自独立合入 `ascendc_pto`(cc98641d)。006 起做「全链路变长 N」忠实复刻:006 让 QK
-> 按窗口长算(本步先保留掩码兜底);后续 007 让 softmax 也按 winm 缩列、去掉掩码三件套。006/007
-> 各自独立基于 ascendc_pto、可单独合入。当前只有 006 一个待验编译器改动,容器直接从
-> `wip/ascend-gemm-v0-nactual` 构建(= ascendc_pto + 006),无需集成分支。
+> 001–007 均已合入 `ascendc_pto`(`2a7662a1`)。006/007 做「全链路变长 N」忠实复刻(QK `n_actual=win_align`
+> + softmax `softmax_flash_v2` 去掩码)。008 起做 **cube 核内 overlap**:008 给 PV `gemm_v0_fixp` 加
+> `cL0TensorPingPong`(2-slot L0C + 硬件 `unitFlag`),让 fixpipe(N-tile i) 与 mma(N-tile i+1) 重叠
+> ——逐指令复刻 Ascend C `ComputeMm2`,正面收掉之前为求正确简化掉的单 slot 串行。008 独立基于
+> `ascendc_pto`、可单独合入;容器从 `wip/gemm-v0-fixp-l0c-pingpong` 构建(= ascendc_pto + 008)。
 
 > 各修改互不依赖、各自一个 commit、各自基于 `ascendc_pto`，**逐个独立合并**，每次合并都是一个自洽的修复。004 是 002（N 切分切 L0B）之上的忠实收尾（切 L0C + 即时搬出），但仍是独立的兼容性新增原语。
