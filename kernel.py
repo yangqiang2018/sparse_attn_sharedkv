@@ -257,7 +257,6 @@ def _build_swa(
                                     tok = q_prefix[b] + s
                                     s_global = act_kv - act_q + s
                                     ori_left = T.max(s_global - ori_win_left, 0)
-                                    win = s_global + 1 - ori_left
                                     T.copy(Q[tok, :, :], q_l1)
                                     T.barrier_all()
                                     T.copy_pa(
@@ -270,7 +269,7 @@ def _build_swa(
                                         ori_block_size * N2 * D,
                                         ori_table_len,
                                         D,
-                                        win,
+                                        BI,
                                         BI,
                                         b,
                                         0,
@@ -278,24 +277,23 @@ def _build_swa(
                                         0,
                                     )
                                     T.barrier_all()
-                                    # QK = Q @ Kᵀ over the actual window only
-                                    # (faithful to Ascend C ComputeMm1
-                                    # N=actualWindow, not the padded BI). N rounds
-                                    # up to 16 to match the reference's aligned
-                                    # mma width (SASAlign(.,16)); the extra
-                                    # [win:align] cols and the unwritten
-                                    # [align:BI] cols are all set to -inf by the
-                                    # window mask below, so the softmax ignores
-                                    # them (mask still required until softmax also
-                                    # runs over winm only).
-                                    win_align = (win + 15) // 16 * 16
+                                    # DIAGNOSTIC: QK over the full BI tile -- load BI
+                                    # KV rows and compute all BI columns, so every
+                                    # column of acc_s_l0c[0:BI] is finite Q@loaded-KV
+                                    # (no uninitialised [win_align:BI] region for the
+                                    # softmax exp to hit). softmax_flash_v2
+                                    # actual_col=winm and PV k_actual=winm still
+                                    # restrict attention to the real window, so this
+                                    # only changes whether the padding is finite. If
+                                    # the flaky NaN disappears, the cause was the
+                                    # uninitialised padding (next: faithful
+                                    # win_align-strided processing).
                                     T.gemm_v0(
                                         q_l1,
                                         kv_l1,
                                         acc_s_l0c,
                                         transpose_B=True,
                                         init=True,
-                                        n_actual=win_align,
                                     )
                                     T.barrier_all()
                                     T.copy(acc_s_l0c, workspace_s[cid, buf, :, :])
