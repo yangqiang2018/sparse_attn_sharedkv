@@ -277,12 +277,20 @@ def _build_swa(
                                         0,
                                     )
                                     T.barrier_all()
+                                    # QK = Q @ Kᵀ over the actual window only
+                                    # (n_actual=win): faithful to Ascend C
+                                    # ComputeMm1 N=actualWindow. acc_s_l0c[:,
+                                    # win:BI] stays unwritten -- the window mask
+                                    # below sets those columns to -inf, so the
+                                    # softmax ignores them (mask still required
+                                    # until softmax also runs over winm only).
                                     T.gemm_v0(
                                         q_l1,
                                         kv_l1,
                                         acc_s_l0c,
                                         transpose_B=True,
                                         init=True,
+                                        n_actual=win,
                                     )
                                     T.barrier_all()
                                     T.copy(acc_s_l0c, workspace_s[cid, buf, :, :])
