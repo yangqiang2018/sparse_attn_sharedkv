@@ -156,15 +156,21 @@ def _build_swa(
     # tmpBuff1 = 32KB; ample for the [G2, BI] softmax block).
     SOFTMAX_TMP_BYTES = 32768
 
-    # ---- DIAGNOSTIC toggle for the faithful-cube build ----------------------
+    # ---- DIAGNOSTIC bitmask for the faithful-cube build ---------------------
     # The faithful QK joins PV on gemm_v0_fixp (multi-K unitFlag 0b10 accumulate
-    # + fused fixpipe + shared cL0 = ComputeMm1). That exact 0b10 accumulate hangs
-    # the cube (root cause unconfirmed; the template is invisible in the dump).
-    # DBG_BARRIER=True makes gemm_v0_fixp drain the M pipe with a PipeBarrier
-    # <PIPE_M> before each mma (= the working gemm_v0 path): it serialises the
-    # accumulating mmas so this build is the correctness/data check. Once it PASSES,
-    # flip to False to test the bare 0b10 mma->fixpipe overlap and localise the hang.
-    DBG_BARRIER = True
+    # + fused fixpipe = ComputeMm1). That exact 0b10 accumulate hangs the cube.
+    # Confirmed on NPU: DBG_MODE=1 (PipeBarrier<PIPE_M> before each mma, full M-pipe
+    # serialise = the working gemm_v0 path) STILL hangs -> the hang is the unitFlag
+    # 0b10 VALUE itself, not pipe ordering (cmatrixSource is already false:
+    # gemm_v0's 0b00 multi-K accumulate is correct). 009 IS needed (cfa/scfa QK
+    # N=512 -> multi-N-tile -> resident L0C overflow -> per-N-tile fused fixpipe is
+    # capacity-mandatory), so we must crack 0b10. DBG_MODE bits (gemm_v0_fixp):
+    #   1 = PipeBarrier before each mma (known: doesn't help).
+    #   2 = intermediate K-tiles use 0b00 (no unit flag), only the last is 0b11 ->
+    #       last-mma(0b11)+fixpipe(0b11) pairs EXACTLY like the working PV; same
+    #       numeric result. THE PROBE: if 2 clears the hang, 0b00-intermediate is
+    #       the fix (a minimal forced deviation from the reference's 0b10).
+    DBG_MODE = 2
     # DEBUG_SERIAL=True keeps the iteration-boundary barrier_all (current parity
     # structure). The 3-slot KV ring / QP ring / zero-barrier come AFTER the gemm
     # is proven; this flag stays True until then.
@@ -332,8 +338,8 @@ def _build_swa(
                                     # fixpipe straight to workspace_s (no resident
                                     # L0C + separate copy). n_actual=win_align = the
                                     # window width (the score's real columns).
-                                    # dbg_barrier serialises the accumulate to
-                                    # localise the multi-K 0b10 cube hang.
+                                    # dbg_mode=2 makes the intermediate K-tiles use
+                                    # 0b00 (no unit flag) to dodge the 0b10 hang.
                                     T.gemm_v0_fixp(
                                         q_l1,
                                         kv_l1[0, :, :],
@@ -343,7 +349,7 @@ def _build_swa(
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
-                                        dbg_barrier=DBG_BARRIER,
+                                        dbg_mode=DBG_MODE,
                                     )
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
@@ -399,7 +405,7 @@ def _build_swa(
                                     # acc_o_l0c ping-pong. Single K tile (k_actual=
                                     # winm<=128, unitFlag 0b11) -- no multi-K 0b10,
                                     # so it is the unchanged proven baseline (no
-                                    # dbg_barrier) against which the QK change tests.
+                                    # dbg_mode) against which the QK change tests.
                                     T.gemm_v0_fixp(
                                         p_l1,
                                         kv_l1[1, :, :],

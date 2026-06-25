@@ -7,7 +7,7 @@
 | **改动文件** | `src/tl_templates/ascend/common.h`(`gemm_v0_fixp`)、`tilelang/language/ascend.py`(绑定加 `n_actual`/`cl0_base`/`dbg_barrier`)、`src/target/codegen_ascend.cc`(`GemmFixpOpCodegen` 多发三参)、`src/op/ascend.cc`(`ascend_gemm_v0_fixp` `set_num_inputs` 7→10) |
 | **是否必须** | 是 —— 忠实复刻要求 QK(`ComputeMm1`)与 PV(`ComputeMm2`)走**同一套** matmul 结构(K-累加 → 融合 fixpipe → `unitFlag` → 共享 cL0),QK 不能再用 `gemm_v0` 留驻 + 单独拷的绕行 |
 | **是否兼容** | 是 —— PV/现有 caller:`K≤128`、`n_actual=N`、`cl0_base=0`、`dbg_barrier=false` 全默认 → 逐字节不变;回归两 example 不走 `gemm_v0_fixp`(SWA 专用) |
-| **状态** | ⏳ 待 NPU 验证。**核心未决问题**:多-K `unitFlag`(0b10 累加)在 SWA QK 卡死(见 §3)。本版内置 `dbg_barrier` 诊断开关坐实病根。 |
+| **状态** | ⏳ 调试中。**必要性已确认**:cfa/scfa 的 QK N=512(cmp 满块=s2BaseSize)→ 多 N-tile → resident L0C(M·N·4 ≤512KB)远超 128KB → **per-N-tile 融合 fixpipe 是容量功能必需**(非仅性能/保真),故 009 必做。**核心未决**:多-K `unitFlag`(0b10 累加)卡死;NPU 实测 `dbg_mode=1`(每 mma 前 PipeBarrier 全串行)**仍卡** → 排除 M 流水排序,病根 = `0b10` 值本身。现用 `dbg_mode=2`(0b00 中间)探。 |
 
 > 这是**回收编号后的新 009**。上一版 009(同名 K-累加,无 `dbg_barrier`)在单个 QK 调用内多-K
 > `unitFlag` 累加处卡死、远程无法定位(模板不在 dump 里),已废弃删分支。本版加 `dbg_barrier`
@@ -32,13 +32,17 @@
 `gemm_v0_fixp`(008)模板假设单 K-tile;`transpose_B` 路径没有运行期列数 `n_actual`;`cL0BufIter`
 每次调用从 0 起,QK 与 PV 各调一次 → cL0 旋转不接续。
 
-**★未决卡死★**:把 QK 接上多-K `unitFlag` 累加(4 个 mma:0b10,0b10,0b10,0b11 + Fixpipe 0b11)后,
-SWA 在 NPU **卡死**。已排除:分开 cL0(也卡)、cL0 共享旋转、tiny-tile 屏障运行期化、所有
-set/wait_flag 收支平衡 → **是 unitFlag 硬件 mma→fixpipe 流水在等一个永不满足的条件**,且发生在
-**单个 QK 调用内部**(与周边结构、PV、cL0 共享都无关)。逐行又与参考 `ComputeMm1`(cube.h:562-605)
-一致。`gemm_v0`(能工作的 QK)与参考的差异只在:`gemm_v0` 每个 mma **前**有无条件 `PipeBarrier<PIPE_M>`
-(串行化 M 流水)、且 mma **无** unitFlag;参考无前置 barrier 但靠**全局 prime 一次的持续 `abL0BufIter`
-(M_MTE1 flag)**提供 M 流水排序。**`gemm_v0_fixp` 两者都没有** → 多-mma 累加缺 M 流水排序的嫌疑最大。
+**★未决卡死(已逐步缩小)★**:把 QK 接上多-K `unitFlag` 累加(4 个 mma:0b10,0b10,0b10,0b11 +
+Fixpipe 0b11)后 NPU **卡死**,发生在**单个 QK 调用内部**。逐条排除:
+- 分开/共享 cL0 都卡、tiny-tile 屏障运行期化、所有 set/wait_flag 收支平衡 → 不是 cL0、不是 flag 死锁。
+- **NPU 实测 `dbg_mode=1`(每个 mma 前 `PipeBarrier<PIPE_M>` 全串行化 M 流水,= 能工作的 `gemm_v0` 做法)
+  仍卡** → **排除「缺 M 流水排序」**。
+- `cmatrixSource` **不是**病根:`gemm_v0` 用 0b00 做同样的多-K 累加且数值正确 → 默认 `cmatrixSource` 已是
+  `false`。
+剩下唯一变量:**`unitFlag=0b10` 这个值本身**。`gemm_v0`(0b00,工作)、PV 008(0b11 单 mma,工作)都不走
+0b10;QK 是唯一走 0b10 的。参考用 0b10 能跑 → 是咱们 catlass 对 0b10 的发射/硬件交互有问题。
+**当前探针 `dbg_mode=2`**:中间 K-tile 改 0b00(纯累加)、只末 tile 0b11+fixpipe,让「末 mma 0b11 +
+fixpipe 0b11」配对与已验证的 PV 完全一致,数值不变。若 dodge 掉卡死 → 0b00-中间 即为修法。
 
 ## 4. 为什么不能在内核侧解决
 
@@ -59,10 +63,10 @@ fixpipe)在**模板内部的 kL0 循环**里;内核调不进去。`unitFlag` 是
   小窗口编译期 `nTile` 会漏屏障)。
 - **加 `uint32_t cl0_base = 0`**:`c_base = ((cl0_base + cL0BufIter) & 1) * (M*nTile)`,让 QK 与 PV
   共用一个 cL0 旋转(QK 传一个槽、PV 接续下一个槽),= 参考的单一 `cL0BufIter` 横跨 Mm1+Mm2。默认 0 = 原行为。
-- **加 `bool dbg_barrier = false`(诊断,非忠实特性)**:为 true 时在每个 mma **前**发 `PipeBarrier<PIPE_M>`
-  (= 能工作的 `gemm_v0` 做法),串行化累加 mma、排空 M 流水。用途:首测开它坐实「环 + 数据流正确」,
-  再关它测 0b10 的 mma→fixpipe overlap,从而把卡死定位到「缺 M 流水排序」还是「unitFlag/fixpipe 本身」。
-  默认关 = 字节不变。参考无此屏障(它靠持续 `abL0BufIter`)。
+- **加 `uint32_t dbg_mode = 0`(诊断位掩码,非忠实特性)**:位 0(1)= 每个 mma 前发 `PipeBarrier<PIPE_M>`
+  (= `gemm_v0` 做法,实测不解决卡死 → 排除 M 流水排序);位 1(2)= 中间 K-tile 用 `unitFlag=0b00`(纯累加、
+  不挂 unit flag),只末 tile `0b11`,使「末 mma+fixpipe」配对与已验证的 PV 一致、数值不变(用于 dodge 0b10
+  卡死)。默认 0 = 忠实(0b10 中间)、字节不变。`set_num_inputs` 7→10,arg [9]=dbg_mode。
 
 绑定/codegen/`set_num_inputs` 照既有范式透传(尾随默认参,arg [7]=n_actual、[8]=cl0_base、[9]=dbg_barrier;
 `set_num_inputs` 7→10)。
