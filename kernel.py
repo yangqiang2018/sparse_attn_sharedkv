@@ -222,13 +222,15 @@ def _build_swa(
                 q_l1 = T.alloc_L1([G, D], dtype)
                 kv_l1 = T.alloc_L1([2, BI, D], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
-                # ONE shared cL0 ping-pong for BOTH QK and PV (= Ascend C's single
-                # cL0TensorPingPong shared by ComputeMm1 + ComputeMm2): a 2-slot
-                # [2, G, BI] L0C (2*32KB=64KB). QK uses slot 0 (cl0_base=0, 1
-                # N-tile), PV continues from slot 1 (cl0_base=1, 4 N-tiles ->
-                # slots 1,0,1,0), so the unitFlag mma->fixpipe rotation is ONE
-                # continuous sequence across QK and PV, not two disjoint ping-pongs.
-                cl0 = T.alloc_L0C([2, G, BI], accum_dtype)
+                acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
+                # PV uses gemm_v0_fixp: O[G,D] is fixpiped to GM one N-tile at a
+                # time (faithful to Ascend C ComputeMm2). The L0C accumulator is
+                # a 2-slot [2, G, BI] ping-pong (= cL0TensorPingPong): the two
+                # 32KB slots let fixpipe(N-tile i) overlap mma(N-tile i+1) via the
+                # hardware unitFlag. 2*32KB(acc_o) + 32KB(acc_s) = 96KB <= 128KB
+                # L0C. (The full [G,D]=128KB alone would fill L0C; the per-N-tile
+                # fixpipe is what keeps each slot to 32KB.)
+                acc_o_l0c = T.alloc_L0C([2, G, BI], accum_dtype)
                 # Vector UB scratch.
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
                 p_half = T.alloc_ub([G2, BI], dtype)
@@ -309,24 +311,19 @@ def _build_swa(
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
                                     T.wait_flag("mte2", "mte1", KV_QK_EV)
-                                    # QK via the unified fixp path (faithful Ascend C
-                                    # ComputeMm1): K-accumulate over D=512, then
-                                    # fixpipe the [G, win_align] score straight to
-                                    # workspace_s with unitFlag -- same fixp/unitFlag/
-                                    # cL0-ping-pong path as PV (ComputeMm2). Replaces
-                                    # the resident gemm_v0 + a separate L0C->GM copy.
-                                    # k_actual defaults to K=D=512 (full contraction);
-                                    # n_actual=win_align is the window column count.
-                                    T.gemm_v0_fixp(
+                                    T.gemm_v0(
                                         q_l1,
                                         kv_l1[0, :, :],
-                                        cl0,
-                                        workspace_s[cid, buf, :, :],
+                                        acc_s_l0c,
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
-                                        cl0_base=0,
                                     )
+                                    # gemm_v0's internal M_FIX close (WaitFlag<M_FIX>)
+                                    # already orders this L0C->GM copy (FIX) after the
+                                    # mma; the FIX-tagged set_cross_flag below orders
+                                    # after the copy. No barrier_all needed.
+                                    T.copy(acc_s_l0c, workspace_s[cid, buf, :, :])
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
@@ -379,11 +376,10 @@ def _build_swa(
                                     T.gemm_v0_fixp(
                                         p_l1,
                                         kv_l1[1, :, :],
-                                        cl0,
+                                        acc_o_l0c,
                                         workspace_o[cid, bufm, :, :],
                                         k_actual=winm,
                                         init=True,
-                                        cl0_base=1,
                                     )
                                     # KEEP this barrier: the single iteration-boundary
                                     # full drain. It protects every cross-iteration
