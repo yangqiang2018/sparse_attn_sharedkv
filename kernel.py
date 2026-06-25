@@ -176,6 +176,14 @@ def _build_swa(
     EV_P = 1  # vector -> cube: softmax P (ws_p) ready
     EV_PV = 2  # cube -> vector: PV result (ws_o) ready
 
+    # Intra-cube MTE2->MTE1 pipe-flag event ids for the 2-buffer KV split
+    # (kv_l1[0]=QK, kv_l1[1]=PV). Separate MTE2_MTE1 id namespace; must avoid the
+    # gemm template's internal {0,1} (L0AB_EVENT). So {2,3}. These let PV's
+    # copy_pa (MTE2 into kv_l1[1]) overlap QK's gemm (M reading kv_l1[0]) instead
+    # of a full barrier_all -- faithful to the reference's per-slot KV flags.
+    KV_QK_EV = 2  # kv_l1[0] (QK) MTE2 done
+    KV_PV_EV = 3  # kv_l1[1] (PV) MTE2 done
+
     q_shape = [total_tokens, N1, D]
     ori_kv_shape = [ori_block_num, ori_block_size, N2, D]
     cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
@@ -205,11 +213,14 @@ def _build_swa(
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Allocations at kernel scope (never inside a conditional).
-                # Cube: single q_l1/kv_l1/p_l1 (kv reloaded for PV, faithful to
-                # the reference's DataCopyPA in both Mm1 and Mm2 -- avoids the
-                # gemm "no sliced operand" limit and kv double-buffering). ----
+                # Cube: q_l1, a 2-buffer KV split (kv_l1[0]=QK, kv_l1[1]=PV;
+                # kv reloaded for PV, faithful to the reference's DataCopyPA in
+                # both Mm1 and Mm2), p_l1. The two KV buffers let PV's copy_pa
+                # (MTE2) overlap QK's gemm (M) -- the reference's per-slot KV
+                # ring degenerated to depth-2 (only QK(j)/PV(j-1) ever live).
+                # 2*[BI,D] + [G,D] + [G,BI] = 256KB+64KB+16KB = 336KB < 512KB L1.
                 q_l1 = T.alloc_L1([G, D], dtype)
-                kv_l1 = T.alloc_L1([BI, D], dtype)
+                kv_l1 = T.alloc_L1([2, BI, D], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
                 acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
                 # PV uses gemm_v0_fixp: O[G,D] is fixpiped to GM one N-tile at a
@@ -265,9 +276,8 @@ def _build_swa(
                                     ori_left = T.max(s_global - ori_win_left, 0)
                                     win = s_global + 1 - ori_left
                                     T.copy(Q[tok, :, :], q_l1)
-                                    T.barrier_all()
                                     T.copy_pa(
-                                        kv_l1,
+                                        kv_l1[0, :, :],
                                         ori_kv,
                                         ori_block_table,
                                         ori_block_size,
@@ -283,7 +293,13 @@ def _build_swa(
                                         ori_left,
                                         0,
                                     )
-                                    T.barrier_all()
+                                    # kv_l1[0] loaded (and q_l1, earlier on the
+                                    # in-order MTE2 queue) -> tag MTE2 done so the
+                                    # gemm's MTE1 L1->L0 load waits on this point-to
+                                    # -point flag instead of a full barrier_all,
+                                    # letting PV's later copy_pa(kv_l1[1]) MTE2
+                                    # overlap this QK gemm's M pipe.
+                                    T.set_flag("mte2", "mte1", KV_QK_EV)
                                     # QK = Q @ Kᵀ over the window; N rounds up to 16 to
                                     # match Ascend C ComputeMm1 (nL1SizeAlign =
                                     # SASAlign(window, 16)); copy_pa loads `win` KV
@@ -294,22 +310,26 @@ def _build_swa(
                                     # in the reference. [win_align:BI] stays
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
+                                    T.wait_flag("mte2", "mte1", KV_QK_EV)
                                     T.gemm_v0(
                                         q_l1,
-                                        kv_l1,
+                                        kv_l1[0, :, :],
                                         acc_s_l0c,
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
                                     )
-                                    T.barrier_all()
+                                    # gemm_v0's internal M_FIX close (WaitFlag<M_FIX>)
+                                    # already orders this L0C->GM copy (FIX) after the
+                                    # mma; the FIX-tagged set_cross_flag below orders
+                                    # after the copy. No barrier_all needed.
                                     T.copy(acc_s_l0c, workspace_s[cid, buf, :, :])
-                                    T.barrier_all()
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
                             T.wait_cross_flag(EV_P)
-                            T.barrier_all()
+                            # wait_cross_flag(EV_P) already orders the cube after the
+                            # vector's ws_p (MTE3) write -- no barrier_all needed.
                             pidm = (j - 1) * core_num + cid
                             bufm = (j - 1) % 2
                             if pidm < block_num:
@@ -321,11 +341,10 @@ def _build_swa(
                                     ori_leftm = T.max(s_globalm - ori_win_left, 0)
                                     winm = s_globalm + 1 - ori_leftm
                                     T.copy(workspace_p[cid, bufm, :, :], p_l1)
-                                    T.barrier_all()
                                     # Reload the task j-1 KV window (faithful to
                                     # the reference reloading V in Mm2).
                                     T.copy_pa(
-                                        kv_l1,
+                                        kv_l1[1, :, :],
                                         ori_kv,
                                         ori_block_table,
                                         ori_block_size,
@@ -341,7 +360,10 @@ def _build_swa(
                                         ori_leftm,
                                         0,
                                     )
-                                    T.barrier_all()
+                                    # kv_l1[1] loaded (and p_l1, earlier on the
+                                    # in-order MTE2 queue) -> point-to-point flag
+                                    # instead of a full barrier_all.
+                                    T.set_flag("mte2", "mte1", KV_PV_EV)
                                     # PV = P @ V, fixpiped per N-tile straight to
                                     # workspace_o (L0C holds one [G,BI] tile).
                                     # k_actual=winm: contract only the real window
@@ -350,14 +372,22 @@ def _build_swa(
                                     # are uninitialised L1 -- summing them as
                                     # 0(masked P)*NaN(garbage V) would give NaN;
                                     # contracting only winm excludes them.
+                                    T.wait_flag("mte2", "mte1", KV_PV_EV)
                                     T.gemm_v0_fixp(
                                         p_l1,
-                                        kv_l1,
+                                        kv_l1[1, :, :],
                                         acc_o_l0c,
                                         workspace_o[cid, bufm, :, :],
                                         k_actual=winm,
                                         init=True,
                                     )
+                                    # KEEP this barrier: the single iteration-boundary
+                                    # full drain. It protects every cross-iteration
+                                    # hazard the removed barriers covered -- q_l1/p_l1
+                                    # WAR, acc_s WAR, and the acc_o cL0 ping-pong
+                                    # cross-call reuse (008 §9). Removing it (for the
+                                    # cross-iteration overlap) needs those handled with
+                                    # fine-grained flags first.
                                     T.barrier_all()
                             T.set_cross_flag("FIX", EV_PV)
 
