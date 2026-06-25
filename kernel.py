@@ -156,23 +156,19 @@ def _build_swa(
     # tmpBuff1 = 32KB; ample for the [G2, BI] softmax block).
     SOFTMAX_TMP_BYTES = 32768
 
-    # ---- DIAGNOSTIC bitmask -- LOCALISER run (DBG_MODE=8) --------------------
-    # The faithful QK-via-gemm_v0_fixp (multi-K 0b10 accumulate + fused fixpipe)
-    # hangs. Ruled out on NPU: DBG_MODE=1 (M-pipe serialise), DBG_MODE=2 (0b00
-    # intermediate), and the mma template's cmatrixSource=false fix -- ALL still
-    # hang. The gemm matches the reference ComputeMm1 instruction-by-instruction
-    # (MmadParams/flags/loads), so this run LOCALISES which part diverges instead of
-    # guessing:
-    #   8 = force a single K-tile -> QK does ONE mma (0b11) + fixpipe, EXACTLY like
-    #       the working PV (only difference: transpose_B). Result is a truncated-K
-    #       WRONG answer, so judge purely by HANG vs no-hang:
-    #         no-hang(FAIL) -> the MULTI-K accumulate is what hangs (-> faithfully
-    #                          replicate the reference's continuous-flow structure);
-    #         still-hang    -> the transpose_B fixpipe path hangs even single-K
-    #                          (-> faithful raw Fixpipe, drop the catlass wrapper).
+    # ---- DIAGNOSTIC bitmask (0 = FAITHFUL) ----------------------------------
+    # The QK-via-gemm_v0_fixp hang was LOCALISED: DBG_MODE=8 (single K-tile, QK =
+    # 1 mma + fixpipe like PV) STILL hung -> NOT the multi-K accumulate; the
+    # transpose_B fixpipe path itself hung. ROOT CAUSE (faithfulness gap): the
+    # fixpipe copied the full nTile columns, but QK's mma only wrote n_actual
+    # (window width < nTile); the reference keeps mmadParams.n == fixParams.nSize
+    # (== nL1SizeAlign), so the unitFlag fixpipe waited for cL0 columns no mma
+    # marked ready -> HANG. Fixed in the compiler: the fixpipe's nSize now = the
+    # mma's n (n_actual for transpose_B). Faithful path restored: DBG_MODE=0.
     #   1 = PipeBarrier before each mma (diagnostic; doesn't help).
     #   2 = 0b00 intermediate unitFlag (workaround; abandoned, also hangs).
-    DBG_MODE = 8
+    #   8 = single K-tile localiser (used to pin the transpose_B fixpipe).
+    DBG_MODE = 0
     # DEBUG_SERIAL=True keeps the iteration-boundary barrier_all (current parity
     # structure). The 3-slot KV ring / QP ring / zero-barrier come AFTER the gemm
     # is proven; this flag stays True until then.
@@ -340,9 +336,10 @@ def _build_swa(
                                     # fixpipe straight to workspace_s (no resident
                                     # L0C + separate copy). n_actual=win_align = the
                                     # window width (the score's real columns).
-                                    # dbg_mode=8 = LOCALISER: single K-tile (1 mma +
-                                    # fixpipe, like PV) to split the hang into
-                                    # multi-K-accumulate vs transpose_B-fixpipe.
+                                    # dbg_mode=0 = faithful. The hang was the fixpipe
+                                    # copying nTile cols while the mma wrote only
+                                    # n_actual (win_align); fixpipe nSize now = mma n
+                                    # (compiler fix), so unitFlag pairs correctly.
                                     T.gemm_v0_fixp(
                                         q_l1,
                                         kv_l1[0, :, :],
