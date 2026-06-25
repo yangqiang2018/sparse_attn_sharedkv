@@ -22,12 +22,13 @@
 | 001 | [Ascend codegen:整数 max/min 输出为三元表达式](001-ascend-codegen-integer-minmax-ternary.md) | `Merge 001` `11d28d8d`(原 `0e53a8ad`) | ✅ 已合入 `ascendc_pto` |
 | 002 | [Ascend `gemm_v0`:增加 N 方向切分（对齐 Ascend C）](002-ascend-gemm-v0-n-tiling.md) | `Merge 002` `2f146c1c`(原 `26116e27`) | ✅ 已合入 `ascendc_pto` |
 | 003 | [Ascend 新增 `copy_pa` 原语（分页 KV 直读进 L1）](003-ascend-copy-pa-paged-kv-load.md) | `Merge 003` `e4fc9e1c` | ✅ 已合入 `ascendc_pto`(SWA 正确 + 11050→5330us + 回归过) |
-| 004 | [Ascend 新增 `gemm_v0_fixp` 原语（按 N-tile 即时 fixpipe，根治 PV 的 L0C 越界）](004-ascend-gemm-v0-fixp-l0c.md) | `wip/ascend-gemm-v0-fixp` `03cc14b6` | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
-| 005 | [Ascend 新增 `row_expand_sub`/`row_expand_div` 原语（行广播 Sub/Div，消掉非忠实的 [M,N] 广播缓冲）](005-ascend-row-expand-sub-div.md) | `wip/ascend-row-expand` `c8a6920a` | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
+| 004 | [Ascend 新增 `gemm_v0_fixp` 原语（按 N-tile 即时 fixpipe + 运行期 k_actual 变长 K，根治 PV 的 L0C 越界与 0×NaN）](004-ascend-gemm-v0-fixp-l0c.md) | `Merge 004` `44cd1d9e` | ✅ 已合入 `ascendc_pto`(SWA 快测 PASS + 回归过) |
+| 005 | [Ascend 新增 `row_expand_sub`/`row_expand_div` 原语（行广播 Sub/Div，消掉非忠实的 [M,N] 广播缓冲）](005-ascend-row-expand-sub-div.md) | `Merge 005` `cc98641d` | ✅ 已合入 `ascendc_pto` |
+| 006 | [Ascend `gemm_v0`/`mma` 增加运行期 `n_actual`（变长 N 输出列，= Ascend C `ComputeMm1` 窗口长 N）](006-ascend-gemm-v0-n-actual.md) | `wip/ascend-gemm-v0-nactual` `b255a071` | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
 
-> **004 与 005 互不依赖**,各自独立基于 `ascendc_pto`,将作两次**独立合并**(如 001/002/003)。
-> 但 SWA 内核同时用到两者(004 修 L0C、005 修向量 UB),无法单独验证,故另备一个**仅供构建**
-> 的集成分支 `wip/swa-compiler-build`(= `ascendc_pto` + 004 + 005)供 NPU 联测;验证通过后,
-> 把 `wip/ascend-gemm-v0-fixp`(004)与 `wip/ascend-row-expand`(005)各自独立合入 `ascendc_pto`。
+> 001–005 均已各自独立合入 `ascendc_pto`(cc98641d)。006 起做「全链路变长 N」忠实复刻:006 让 QK
+> 按窗口长算(本步先保留掩码兜底);后续 007 让 softmax 也按 winm 缩列、去掉掩码三件套。006/007
+> 各自独立基于 ascendc_pto、可单独合入。当前只有 006 一个待验编译器改动,容器直接从
+> `wip/ascend-gemm-v0-nactual` 构建(= ascendc_pto + 006),无需集成分支。
 
 > 各修改互不依赖、各自一个 commit、各自基于 `ascendc_pto`，**逐个独立合并**，每次合并都是一个自洽的修复。004 是 002（N 切分切 L0B）之上的忠实收尾（切 L0C + 即时搬出），但仍是独立的兼容性新增原语。
