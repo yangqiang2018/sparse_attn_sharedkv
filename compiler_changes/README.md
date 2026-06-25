@@ -25,6 +25,7 @@
 | 004 | [Ascend 新增 `gemm_v0_fixp` 原语（按 N-tile 即时 fixpipe + 运行期 k_actual 变长 K，根治 PV 的 L0C 越界与 0×NaN）](004-ascend-gemm-v0-fixp-l0c.md) | `Merge 004` `44cd1d9e` | ✅ 已合入 `ascendc_pto`(SWA 快测 PASS + 回归过) |
 | 005 | [Ascend 新增 `row_expand_sub`/`row_expand_div` 原语（行广播 Sub/Div，消掉非忠实的 [M,N] 广播缓冲）](005-ascend-row-expand-sub-div.md) | `Merge 005` `cc98641d` | ✅ 已合入 `ascendc_pto` |
 | 006 | [Ascend `gemm_v0`/`mma` 增加运行期 `n_actual`（变长 N 输出列，= Ascend C `ComputeMm1` 窗口长 N）](006-ascend-gemm-v0-n-actual.md) | `wip/ascend-gemm-v0-nactual` `b255a071` | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
+| 007 | [Ascend 新增 `softmax_flash_v2` 原语（逐指令复刻 AscendC `SoftmaxFlashV2`，变长 N softmax 不掩码）](007-ascend-softmax-flash-v2.md) | `wip/ascend-softmax-flashv2`（基于 `ascendc_pto`） | ⏳ 待 NPU 验证后合入 `ascendc_pto` |
 
 > 001–005 均已各自独立合入 `ascendc_pto`(cc98641d)。006 起做「全链路变长 N」忠实复刻:006 让 QK
 > 按窗口长算(本步先保留掩码兜底);后续 007 让 softmax 也按 winm 缩列、去掉掩码三件套。006/007

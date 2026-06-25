@@ -152,6 +152,9 @@ def _build_swa(
     VEC_NUM = 2  # 2 vector cores per cube core
     G2 = G // VEC_NUM  # rows per vector core (= 32)
     BLK = 8  # FP32 elems per 32B block (Brcb fan-out width for row_expand)
+    # uint8 shared scratch for SoftmaxFlashV2 (mirrors Ascend C softmaxTmpUb /
+    # tmpBuff1 = 32KB; ample for the [G2, BI] softmax block).
+    SOFTMAX_TMP_BYTES = 32768
 
     accum_dtype = "float"
     idx_dtype = "int32"
@@ -220,19 +223,17 @@ def _build_swa(
                 p_half = T.alloc_ub([G2, BI], dtype)
                 o_ub = T.alloc_ub([G2, D], accum_dtype)
                 o_half = T.alloc_ub([G2, D], dtype)
-                m_raw = T.alloc_ub([G2, 1], accum_dtype)
                 sink_ub = T.alloc_ub([G2, 1], accum_dtype)
-                psink = T.alloc_ub([G2, 1], accum_dtype)
                 lse_ub = T.alloc_ub([G2, 1], accum_dtype)
-                # [G2,8] Brcb scratch for the row-broadcast sub/div (faithful to
-                # Ascend C RowDivs/RowMuls -- no [G2,N] broadcast buffer). Two:
-                # the softmax max-sub (task j) and the output div (task j-1) are
-                # live concurrently in the pipeline.
-                brcb_m = T.alloc_ub([G2, BLK], accum_dtype)
+                # SoftmaxFlashV2 state: in_sum seed (1.0), the unused flash
+                # rescale output (single-block softmax produces but ignores
+                # expmax), and the uint8 shared scratch (Ascend C softmaxTmpUb).
+                ones_ub = T.alloc_ub([G2, 1], accum_dtype)
+                expmax_ub = T.alloc_ub([G2, 1], accum_dtype)
+                softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
+                # [G2,8] Brcb scratch for the output row-broadcast div (faithful
+                # to Ascend C RowDivs -- no [G2,D] denom broadcast buffer).
                 brcb_d = T.alloc_ub([G2, BLK], accum_dtype)
-                col_idx = T.alloc_ub([BI], idx_dtype)
-                pos_ub = T.alloc_ub([BI], accum_dtype)
-                mask_ub = T.alloc_ub([BI // 8], "uint8")
                 # Carried softmax state, double-buffered by task parity so the
                 # output stage of task j-1 reads the denom/max from its own
                 # softmax (computed one iteration earlier).
@@ -358,6 +359,10 @@ def _build_swa(
                 # =========================== VECTOR ===========================
                 # iter j: softmax(task j) -> ws_p[j%2] ; output(task j-1)
                 with T.Scope("V"):
+                    # in_sum seed for SoftmaxFlashV2 = 1.0 (Ascend C R0); filled
+                    # once, read each task as the flash running-sum initial value.
+                    T.tile.fill(ones_ub, T.float32(1.0))
+                    T.barrier_all()
                     for j in T.serial(n_iter + 1):
                         # ---- softmax stage for task j ----
                         if j < n_iter:
@@ -373,6 +378,10 @@ def _build_swa(
                                     act_kv = seqused_kv[b]
                                     s_global = act_kv - act_q + s
                                     ori_left = T.max(s_global - ori_win_left, 0)
+                                    # winm = window length (= Ascend C
+                                    # actualSingleProcessSInnerSize); softmax
+                                    # reduces exactly these valid columns.
+                                    winm = s_global + 1 - ori_left
                                     T.copy(
                                         workspace_s[
                                             cid, buf, vid * G2 : (vid + 1) * G2, :
@@ -381,40 +390,29 @@ def _build_swa(
                                     )
                                     T.barrier_all()
                                     T.tile.mul(s_ub, s_ub, softmax_scale)
-                                    # window mask: col_idx[k]=ori_left+k (vector
-                                    # index primitive); in-window iff <= s_global
-                                    T.tile.createvecindex(col_idx, ori_left)
-                                    T.copy(col_idx, pos_ub)
-                                    T.tile.compare(
-                                        mask_ub, pos_ub, T.float32(s_global), "LE"
-                                    )
-                                    T.barrier_all()
-                                    for i in T.serial(G2):
-                                        T.tile.select(
-                                            s_ub[i, :],
-                                            mask_ub,
-                                            s_ub[i, :],
-                                            -T.infinity(accum_dtype),
-                                            "VSEL_TENSOR_SCALAR_MODE",
-                                        )
-                                    T.barrier_all()
                                     T.copy(sinks[vid * G2 : (vid + 1) * G2], sink_ub)
                                     T.barrier_all()
-                                    # sink-seeded single-pass softmax
-                                    T.reduce_max(s_ub, m_raw, dim=-1)
-                                    T.tile.max(m_i[buf, :, :], m_raw, sink_ub)
-                                    # s = s - rowmax via row broadcast (Brcb +
-                                    # Sub, src1RepStride=1) -- no [G2,BI] buffer,
-                                    # faithful to Ascend C's softmax max-sub.
-                                    T.tile.row_expand_sub(
-                                        s_ub, s_ub, m_i[buf, :, :], brcb_m
-                                    )
-                                    T.tile.exp(s_ub, s_ub)
-                                    T.reduce_sum(s_ub, denom[buf, :, :], dim=-1)
-                                    T.tile.sub(psink, sink_ub, m_i[buf, :, :])
-                                    T.tile.exp(psink, psink)
-                                    T.tile.add(
-                                        denom[buf, :, :], denom[buf, :, :], psink
+                                    # Faithful Ascend C SoftmaxFlashV2
+                                    # (swa_block_vector.h SoftmaxFlashV2Compute):
+                                    # one call does the sink-seeded single-pass
+                                    # softmax over the winm valid columns. The
+                                    # SoftMaxShapeInfo {G2, BI, G2, winm} dual
+                                    # quantity makes the library ignore the
+                                    # out-of-window / alignment columns [winm:BI]
+                                    # -- no mask, no -inf fill. in_max = per-row
+                                    # sink seed, in_sum = 1.0; out_max/out_sum land
+                                    # in the carried m_i/denom (identical values
+                                    # to the old reduce_max/.../reduce_sum path).
+                                    T.tile.softmax_flash_v2(
+                                        s_ub,
+                                        denom[buf, :, :],
+                                        m_i[buf, :, :],
+                                        expmax_ub,
+                                        s_ub,
+                                        ones_ub,
+                                        sink_ub,
+                                        softmax_tmp,
+                                        winm,
                                     )
                                     T.barrier_all()
                                     T.tile.cast(p_half, s_ub, "CAST_ROUND", G2 * BI)
