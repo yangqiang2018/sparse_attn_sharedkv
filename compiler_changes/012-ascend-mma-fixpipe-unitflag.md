@@ -98,5 +98,12 @@ fixpipe 之间**无软件 flag**。解构后的内核指令流与单体 `gemm_v0
 
 ## 状态
 
-⏳ 待合入 `ascendc_pto`(独立 wip 分支 → `--no-ff` merge);随后内核侧 PV 单缓冲解构 + `get_kernel_source`
-验「mma→fixpipe 之间无 set_flag/wait_flag/pipe_barrier」+ SWA 5/5 + 回归。
+✅ 已合入 `ascendc_pto`(`Merge 012` `64fd7752`,原 `f186706e`)。NPU 验证:
+- `get_kernel_source` dump 坐实 PV 解构后 mma(`mma<..64,128>(.., winm, 128, 3)`)与 fixpipe
+  (`copy_l0c_to_gm<..>(.., 512, 64, 128, 3)`)之间**只有给下一 tile L0AB 的 `SetFlag<M_MTE1>`、无 M→FIX flag**
+  → unitFlag 融合接通;
+- `copy_l1_to_l0a<..>(.., 64, winm)` / `copy_l1_to_l0b<..>(.., winm, 128)` 的 K-extent = winm(real_k 生效);
+- PV 单缓冲解构 SWA **5/5 稳定** + `paged_flash`/`sparse_flash` 回归字节兼容。
+
+(开发过程坐实了铁律:**L0 fractal 的 realK 必须 == mma 的 K** —— 全宽 K=128 载入 + k=winm 的 mma 读到不一致
+fractal → M-block/head 16-63 寻址错、winm<128 的 token 出错;这正是补 `real_k` 的动因。)
