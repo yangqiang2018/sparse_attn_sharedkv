@@ -235,16 +235,21 @@ def _build_swa(
                 # ---- Allocations at kernel scope (never inside a conditional).
                 # LAYER 1 (QK D-chunking): QK contracts D=512, which the reference
                 # loads as two 256-wide D-halves (ComputeMm1 kL1Loops=2,
-                # block_cube.h:341-450), each Q/K half into its own L1 slot, and
-                # accumulates both into one cL0 before a single Fixpipe. So Q and
-                # the QK-side K are now 2-slot D-half buffers; PV's V stays a whole
-                # [BI,D] buffer (its V D-slicing is Layer 2). q_l1[2,G,256] (Q halves)
-                # + kq_l1[2,BI,256] (K halves) + kv_l1[BI,D] (PV V) + p_l1[G,BI] =
-                # 64KB+128KB+128KB+16KB = 336KB < 512KB L1.
+                # block_cube.h:341-450), each Q/K half into its OWN L1 block, and
+                # accumulates both into one cL0 before a single Fixpipe. The two
+                # D-halves are TWO SEPARATE 2D buffers (= the reference's two L1
+                # blocks), not a [2,...] array: a 3D L1 buffer sliced as a T.copy
+                # destination (q_l1[0,:,:]) crashes LowerTileOp's BlockNode visitor
+                # (makeBufferWithLayout on the 3D-shape/2D-layout mismatch); whole
+                # 2D buffers are the proven copy-dest/gemm-operand form. PV's V stays
+                # a whole [BI,D] buffer (its V D-slicing is Layer 2). 2*[G,256]
+                # + 2*[BI,256] + [BI,D] + [G,BI] = 64+128+128+16 = 336KB < 512KB L1.
                 D2 = D // 2  # 256: the D-half (kL1) width
-                q_l1 = T.alloc_L1([2, G, D2], dtype)
-                kq_l1 = T.alloc_L1([2, BI, D2], dtype)
-                kv_l1 = T.alloc_L1([BI, D], dtype)
+                q_l1_0 = T.alloc_L1([G, D2], dtype)  # Q D-half 0 (D[0:256])
+                q_l1_1 = T.alloc_L1([G, D2], dtype)  # Q D-half 1 (D[256:512])
+                kq_l1_0 = T.alloc_L1([BI, D2], dtype)  # K D-half 0
+                kq_l1_1 = T.alloc_L1([BI, D2], dtype)  # K D-half 1
+                kv_l1 = T.alloc_L1([BI, D], dtype)  # PV's V (whole)
                 p_l1 = T.alloc_L1([G, BI], dtype)
                 # INCREMENT 1 (shared cL0 buffer): one cL0TensorPingPong shared by
                 # QK and PV, faithful to the reference's single cL0TensorPingPong
@@ -320,10 +325,10 @@ def _build_swa(
                                     # headSize=256); K half h = copy_pa with
                                     # act_head_dim=256, d_idx=h*256 (= DataCopyPA
                                     # startPos.dIdx=kL1*256, actHeadDim=256).
-                                    T.copy(Q[tok, :, 0:D2], q_l1[0, :, :])
-                                    T.copy(Q[tok, :, D2:D], q_l1[1, :, :])
+                                    T.copy(Q[tok, :, 0:D2], q_l1_0)
+                                    T.copy(Q[tok, :, D2:D], q_l1_1)
                                     T.copy_pa(
-                                        kq_l1[0, :, :],
+                                        kq_l1_0,
                                         ori_kv,
                                         ori_block_table,
                                         ori_block_size,
@@ -340,7 +345,7 @@ def _build_swa(
                                         0,
                                     )
                                     T.copy_pa(
-                                        kq_l1[1, :, :],
+                                        kq_l1_1,
                                         ori_kv,
                                         ori_block_table,
                                         ori_block_size,
@@ -356,7 +361,7 @@ def _build_swa(
                                         ori_left,
                                         D2,
                                     )
-                                    # q_l1[0/1] + kq_l1[0/1] loaded -> tag MTE2 done so
+                                    # q/kq D-halves loaded -> tag MTE2 done so
                                     # the gemm's MTE1 L1->L0 load waits on this point-to
                                     # -point flag instead of a full barrier_all,
                                     # letting PV's later copy_pa(kv_l1) MTE2 overlap
@@ -383,8 +388,8 @@ def _build_swa(
                                     # is each chunk's own contraction width;
                                     # n_actual=win_align = the score's real columns.
                                     T.gemm_v0_fixp(
-                                        q_l1[0, :, :],
-                                        kq_l1[0, :, :],
+                                        q_l1_0,
+                                        kq_l1_0,
                                         cL0,
                                         workspace_s[cid, buf, :, :],
                                         k_actual=D2,
@@ -397,8 +402,8 @@ def _build_swa(
                                         do_fixpipe=False,
                                     )
                                     T.gemm_v0_fixp(
-                                        q_l1[1, :, :],
-                                        kq_l1[1, :, :],
+                                        q_l1_1,
+                                        kq_l1_1,
                                         cL0,
                                         workspace_s[cid, buf, :, :],
                                         k_actual=D2,
