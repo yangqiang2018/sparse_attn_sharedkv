@@ -156,19 +156,6 @@ def _build_swa(
     # tmpBuff1 = 32KB; ample for the [G2, BI] softmax block).
     SOFTMAX_TMP_BYTES = 32768
 
-    # ---- DIAGNOSTIC bitmask (0 = FAITHFUL) ----------------------------------
-    # The QK-via-gemm_v0_fixp hang was LOCALISED: DBG_MODE=8 (single K-tile, QK =
-    # 1 mma + fixpipe like PV) STILL hung -> NOT the multi-K accumulate; the
-    # transpose_B fixpipe path itself hung. ROOT CAUSE (faithfulness gap): the
-    # fixpipe copied the full nTile columns, but QK's mma only wrote n_actual
-    # (window width < nTile); the reference keeps mmadParams.n == fixParams.nSize
-    # (== nL1SizeAlign), so the unitFlag fixpipe waited for cL0 columns no mma
-    # marked ready -> HANG. Fixed in the compiler: the fixpipe's nSize now = the
-    # mma's n (n_actual for transpose_B). Faithful path restored: DBG_MODE=0.
-    #   1 = PipeBarrier before each mma (diagnostic; doesn't help).
-    #   2 = 0b00 intermediate unitFlag (workaround; abandoned, also hangs).
-    #   8 = single K-tile localiser (used to pin the transpose_B fixpipe).
-    DBG_MODE = 0
     # DEBUG_SERIAL=True keeps the iteration-boundary barrier_all (current parity
     # structure). The 3-slot KV ring / QP ring / zero-barrier come AFTER the gemm
     # is proven; this flag stays True until then.
@@ -335,11 +322,10 @@ def _build_swa(
                                     # acc_s_l0c, unitFlag 0b10x3/0b11, then fuses the
                                     # fixpipe straight to workspace_s (no resident
                                     # L0C + separate copy). n_actual=win_align = the
-                                    # window width (the score's real columns).
-                                    # dbg_mode=0 = faithful. The hang was the fixpipe
-                                    # copying nTile cols while the mma wrote only
-                                    # n_actual (win_align); fixpipe nSize now = mma n
-                                    # (compiler fix), so unitFlag pairs correctly.
+                                    # window width (the score's real columns). The
+                                    # fixpipe's nSize == the mma's n (n_actual) inside
+                                    # the primitive, so the unitFlag mma->fixpipe pair
+                                    # matches (= the reference's nL1SizeAlign).
                                     T.gemm_v0_fixp(
                                         q_l1,
                                         kv_l1[0, :, :],
@@ -349,7 +335,6 @@ def _build_swa(
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
-                                        dbg_mode=DBG_MODE,
                                     )
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
@@ -403,9 +388,7 @@ def _build_swa(
                                     # PV = ComputeMm2 (008, proven): gemm_v0_fixp
                                     # fixpipes O[G,D] per N-tile from its own 2-slot
                                     # acc_o_l0c ping-pong. Single K tile (k_actual=
-                                    # winm<=128, unitFlag 0b11) -- no multi-K 0b10,
-                                    # so it is the unchanged proven baseline (no
-                                    # dbg_mode) against which the QK change tests.
+                                    # winm<=128, unitFlag 0b11) -- no multi-K 0b10.
                                     T.gemm_v0_fixp(
                                         p_l1,
                                         kv_l1[1, :, :],

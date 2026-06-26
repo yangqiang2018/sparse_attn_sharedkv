@@ -1,13 +1,13 @@
-# 009 · Ascend `gemm_v0_fixp` K-累加 + `n_actual` + `cl0_base` + `dbg_barrier`（QK 走统一 fixp 路径 = `ComputeMm1`，与 PV 共享 cL0；内置卡死诊断开关）
+# 009 · Ascend `gemm_v0_fixp` K-累加 + `n_actual` + `cl0_base` + `mma` 补 `cmatrixSource` + fixpipe `nSize`（QK 走统一 fixp 路径 = `ComputeMm1`，与 PV 共享 cL0）
 
 | | |
 |---|---|
 | **编译器仓库** | `yangqiang2018/tilelang-ascend-2` |
 | **分支** | `wip/gemm-v0-fixp-kaccum`（**独立基于 `ascendc_pto`**，含 001–008） |
-| **改动文件** | `src/tl_templates/ascend/common.h`(`gemm_v0_fixp` K-累加/n_actual/cl0_base/dbg_mode + **`mma` 模板补 `cmatrixSource=false`**)、`tilelang/language/ascend.py`(绑定加 `n_actual`/`cl0_base`/`dbg_mode`)、`src/target/codegen_ascend.cc`(`GemmFixpOpCodegen` 多发三参)、`src/op/ascend.cc`(`ascend_gemm_v0_fixp` `set_num_inputs` 7→10) |
+| **改动文件** | `src/tl_templates/ascend/common.h`(`gemm_v0_fixp` K-累加/n_actual/cl0_base/fixpipe `realTailN=mmaN` + **`mma` 模板补 `cmatrixSource=false`**)、`tilelang/language/ascend.py`(绑定加 `n_actual`/`cl0_base`)、`src/target/codegen_ascend.cc`(`GemmFixpOpCodegen` 多发两参)、`src/op/ascend.cc`(`ascend_gemm_v0_fixp` `set_num_inputs` 7→9) |
 | **是否必须** | 是 —— 忠实复刻要求 QK(`ComputeMm1`)与 PV(`ComputeMm2`)走**同一套** matmul 结构(K-累加 → 融合 fixpipe → `unitFlag` → 共享 cL0),QK 不能再用 `gemm_v0` 留驻 + 单独拷的绕行 |
-| **是否兼容** | 是 —— PV/现有 caller:`K≤128`、`n_actual=N`、`cl0_base=0`、`dbg_barrier=false` 全默认 → 逐字节不变;回归两 example 不走 `gemm_v0_fixp`(SWA 专用) |
-| **状态** | ⏳ 待 NPU 验证忠实修复(fixpipe nSize)。**必要性已确认**:cfa/scfa 的 QK N=512 → 多 N-tile → resident L0C 远超 128KB → **per-N-tile 融合 fixpipe 容量功能必需**。**卡死根因已定位 = fixpipe 的 nSize 与 mma 的 n 不一致(忠实性缺口)**:QK 的 mma 只算 `n_actual`(win_align<nTile)列,但 fixpipe 去搬 `nTile` 列 → unitFlag fixpipe 等 mma 从没标记 ready 的 [n_actual:nTile] 列 → 挂死。参考 cube.h 严格 `mmadParams.n == fixParams.nSize == nL1SizeAlign`。**定位过程**:`dbg_mode=1`(M 串行)/`=2`(0b00)/补 `cmatrixSource` 都仍卡 → `dbg_mode=8`(单 K-tile,QK=1 mma+fixpipe=PV)**仍卡** → 排除多-K 累加,锁定 transpose_B fixpipe。**修法 = fixpipe `realTailN = mmaN`(transpose_B 时 = n_actual)**,忠实、PV 不变。(`cmatrixSource=false` 也补了——同样是忠实缺口,留着。) |
+| **是否兼容** | 是 —— PV/现有 caller:`K≤128`、`n_actual=N`、`cl0_base=0` 全默认 → 逐字节不变;`cmatrixSource=false`/fixpipe `nSize` 改在共享处但对单-mma/非 transpose 是 no-op,待回归确认 |
+| **状态** | ✅ NPU 5/5 PASS + perf(prefill 持平 Ascend C、decode 1.65×);⏳ 待跑回归(兼容门槛)后合入 `ascendc_pto`。诊断脚手架 `dbg_mode`(抓卡死用)合入前已清。**必要性**:cfa/scfa 的 QK N=512 → 多 N-tile → resident L0C 远超 128KB → per-N-tile 融合 fixpipe 容量功能必需。 |
 
 > 这是**回收编号后的新 009**。上一版 009(同名 K-累加,无 `dbg_barrier`)在单个 QK 调用内多-K
 > `unitFlag` 累加处卡死、远程无法定位(模板不在 dump 里),已废弃删分支。本版加 `dbg_barrier`
@@ -69,13 +69,16 @@ unitFlag → 挂死。补上后 = 参考行为。字节兼容:`gemm_v0`(unitFlag
   小窗口编译期 `nTile` 会漏屏障)。
 - **加 `uint32_t cl0_base = 0`**:`c_base = ((cl0_base + cL0BufIter) & 1) * (M*nTile)`,让 QK 与 PV
   共用一个 cL0 旋转(QK 传一个槽、PV 接续下一个槽),= 参考的单一 `cL0BufIter` 横跨 Mm1+Mm2。默认 0 = 原行为。
-- **加 `uint32_t dbg_mode = 0`(诊断位掩码,非忠实特性)**:位 0(1)= 每个 mma 前发 `PipeBarrier<PIPE_M>`
-  (= `gemm_v0` 做法,实测不解决卡死 → 排除 M 流水排序);位 1(2)= 中间 K-tile 用 `unitFlag=0b00`(纯累加、
-  不挂 unit flag),只末 tile `0b11`,使「末 mma+fixpipe」配对与已验证的 PV 一致、数值不变(用于 dodge 0b10
-  卡死)。默认 0 = 忠实(0b10 中间)、字节不变。`set_num_inputs` 7→10,arg [9]=dbg_mode。
+- **fixpipe `realTailN = mmaN`(transpose_B 时 = `n_actual`)= QK 卡死的忠实修复**:参考严格保持
+  `mmadParams.n == fixParams.nSize == nL1SizeAlign`。QK 的 mma 只写 `n_actual`(win_align<nTile)列,若
+  fixpipe 仍搬 `nTile` 列,unitFlag fixpipe 会等 mma 从没标记 ready 的 `[n_actual:nTile]` 列 → 挂死。改 fixpipe
+  只搬 `mmaN` 列即与 mma 一致。PV(`mmaN==nTile`)逐字节不变。
+- **`mma` 模板补 `mmadParams.cmatrixSource = false`(忠实复刻参考 cube.h:576)**:`MmadParams` 不默认初始化
+  该字段,硬件在累加 mma(`cmatrixInitVal=false`)读它;单-mma caller(`gemm_v0` unitFlag off / PV
+  `cmatrixInitVal=true`)不读它故没暴露。字节兼容。
+- **诊断脚手架 `dbg_mode`(抓卡死时的临时探针:M 串行 / 0b00 中间 / 单 K-tile)合入前已删**,不进忠实路径。
 
-绑定/codegen/`set_num_inputs` 照既有范式透传(尾随默认参,arg [7]=n_actual、[8]=cl0_base、[9]=dbg_barrier;
-`set_num_inputs` 7→10)。
+绑定/codegen/`set_num_inputs` 照既有范式透传(尾随默认参,arg [7]=n_actual、[8]=cl0_base;`set_num_inputs` 7→9)。
 
 ## 6. 忠实性（对照 `block_cube.h` `ComputeMm1`/`ComputeMm2`）
 
