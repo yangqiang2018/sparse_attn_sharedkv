@@ -27,7 +27,7 @@
 | 006 | [Ascend `gemm_v0`/`mma` 增加运行期 `n_actual`（变长 N 输出列，= Ascend C `ComputeMm1` 窗口长 N）](006-ascend-gemm-v0-n-actual.md) | `Merge 006` `2a7662a1`(原 `b255a071`) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归过) |
 | 007 | [Ascend 新增 `softmax_flash_v2` 原语（逐指令复刻 AscendC `SoftmaxFlashV2`，变长 N softmax 不掩码）](007-ascend-softmax-flash-v2.md) | `wip/ascend-softmax-flashv2` `cf38e5fa`(快进合入) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归过) |
 | 008 | [Ascend `gemm_v0_fixp` 2-slot L0C ping-pong + 接通 `unitFlag`（= Ascend C `cL0TensorPingPong`，fixpipe∥mma 核内重叠）](008-ascend-gemm-v0-fixp-l0c-pingpong.md) | `Merge 008` `dddf3413`(原 `ca15c716`) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归 + 1.03× parity) |
-| 009 | [Ascend `gemm_v0_fixp` K-累加 + `n_actual` + `cl0_base` + `dbg_barrier`（QK 走统一 fixp 路径 = `ComputeMm1`，与 PV 共享 cL0；内置卡死诊断开关）](009-ascend-gemm-v0-fixp-kaccum.md) | `wip/gemm-v0-fixp-kaccum`（基于 `ascendc_pto` 含 001–008） | ⏳ 待 NPU 验证（核心未决=多-K `unitFlag` 0b10 卡死，用 `dbg_barrier` 诊断） |
+| 009 | [Ascend `gemm_v0_fixp` K-累加 + `n_actual` + `cl0_base` + `mma` 补 `cmatrixSource` + fixpipe `nSize`（QK 走统一 fixp 路径 = `ComputeMm1`，与 PV 共享 cL0）](009-ascend-gemm-v0-fixp-kaccum.md) | `Merge 009` `9e7300f7`（原 `d61b5127`） | ✅ 已合入 `ascendc_pto`(SWA 5/5 PASS + 回归 + prefill 持平/decode 1.65×) |
 
 > 001–008 均已合入 `ascendc_pto`(`dddf3413`)。006/007 做「全链路变长 N」忠实复刻;008 给 PV
 > `gemm_v0_fixp` 加 `cL0TensorPingPong`(2-slot L0C + 硬件 `unitFlag`,fixpipe∥mma 核内重叠,= `ComputeMm2`,
