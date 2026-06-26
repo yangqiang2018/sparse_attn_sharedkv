@@ -92,19 +92,12 @@ def build_sparse_attn_sharedkv(
     ``(Output, LSE)``. See module docstring for the SWA contract.
     """
     if scenario != 1:
-        raise NotImplementedError(
-            f"only SWA (scenario=1) is implemented; got scenario={scenario} "
-            "(SCFA/CFA pending)"
-        )
+        raise NotImplementedError(f"only SWA (scenario=1) is implemented; got scenario={scenario} (SCFA/CFA pending)")
     if n_kv_heads != 1 or n_heads != 64 or head_dim != 512:
-        raise ValueError(
-            f"SWA kernel assumes N1=64, N2=1, D=512 (got N1={n_heads}, "
-            f"N2={n_kv_heads}, D={head_dim})"
-        )
+        raise ValueError(f"SWA kernel assumes N1=64, N2=1, D=512 (got N1={n_heads}, N2={n_kv_heads}, D={head_dim})")
     if ori_win_left + 1 > DEFAULT_BLOCK_I:
         raise ValueError(
-            f"ori_win_left={ori_win_left} exceeds single-tile window "
-            f"(BI={DEFAULT_BLOCK_I}); multi-tile SWA not implemented yet"
+            f"ori_win_left={ori_win_left} exceeds single-tile window (BI={DEFAULT_BLOCK_I}); multi-tile SWA not implemented yet"
         )
 
     return _build_swa(
@@ -511,12 +504,15 @@ def _build_swa(
                                     # pp = nl&1 (0,1,0,1) = gemm tileIdx&1 -> L0AB
                                     # events {4,5}, L0A/L0B slots alternate. cs =
                                     # (1+nl)&1 = 1,0,1,0 (cl0_base=1, no collision with
-                                    # QK's slot 0). L0A/L0B are loaded full width; the
-                                    # mma contracts K=winm via k_actual=winm (full
-                                    # operands -- a symbolic [..,0:winm] slice operand
-                                    # makes access_ptr int(winm) a Var and fails; =
-                                    # gemm k_actual=winm; the [winm:] pad rows/cols are
-                                    # loaded but never contracted, so no 0*NaN).
+                                    # QK's slot 0). The L0A/L0B fractals are loaded
+                                    # with K=winm (real_k=winm) and the mma contracts
+                                    # K=winm (k_actual=winm) -- both MUST match: a full
+                                    # K=128 L0 load + a k=winm mma read mismatched
+                                    # fractals (M-block/head 16-63 wrong for winm<128).
+                                    # Full operands + the real_k/k_actual runtime args
+                                    # (NOT symbolic [..,0:winm] slices -- those make
+                                    # access_ptr int(winm) a Var and fail). = gemm's
+                                    # kSize=winm load + k_actual=winm contract.
                                     # winm<=128 single K tile -> unit_flag always 0b11.
                                     # (G/16)*(128/16)=32>=10 -> no PipeBarrier<PIPE_M>
                                     # (= gemm:944 gate). The per-tile M_MTE1(4/5) chain
@@ -526,10 +522,16 @@ def _build_swa(
                                         pp = nl % 2
                                         cs = (1 + nl) % 2
                                         T.wait_flag("m", "mte1", L0AB_EV0 + pp)
-                                        T.copy(p_l1[:, :], p_l0a[pp, :, :])
+                                        # real_k=winm: load the L0A/L0B fractals with
+                                        # K=winm (NOT the full 128) so they match the
+                                        # mma's k_actual=winm -- a full-width L0 load +
+                                        # a k=winm mma read mismatched fractals (M-block
+                                        # / head 16-63 addressing wrong for winm<128).
+                                        T.copy(p_l1[:, :], p_l0a[pp, :, :], real_k=winm)
                                         T.copy(
                                             kv_l1[:, nl * PV_NW : (nl + 1) * PV_NW],
                                             v_l0b[pp, :, :],
+                                            real_k=winm,
                                         )
                                         T.set_flag("mte1", "m", L0AB_EV0 + pp)
                                         T.wait_flag("mte1", "m", L0AB_EV0 + pp)
@@ -603,9 +605,7 @@ def _build_swa(
                                     winm = s_global + 1 - ori_left
                                     win_align = (winm + 15) // 16 * 16
                                     T.copy(
-                                        workspace_s[
-                                            cid, buf, vid * G2 : (vid + 1) * G2, :
-                                        ],
+                                        workspace_s[cid, buf, vid * G2 : (vid + 1) * G2, :],
                                         s_ub,
                                     )
                                     T.barrier_all()
@@ -641,9 +641,7 @@ def _build_swa(
                                     T.tile.cast(p_half, s_ub, "CAST_ROUND", G2 * BI)
                                     T.copy(
                                         p_half,
-                                        workspace_p[
-                                            cid, buf, vid * G2 : (vid + 1) * G2, :
-                                        ],
+                                        workspace_p[cid, buf, vid * G2 : (vid + 1) * G2, :],
                                     )
                                     T.barrier_all()
                             T.set_cross_flag("MTE3", EV_P)
@@ -659,9 +657,7 @@ def _build_swa(
                                 if sm < act_q_lens[bm]:
                                     tokm = q_prefix[bm] + sm
                                     T.copy(
-                                        workspace_o[
-                                            cid, bufm, vid * G2 : (vid + 1) * G2, :
-                                        ],
+                                        workspace_o[cid, bufm, vid * G2 : (vid + 1) * G2, :],
                                         o_ub,
                                     )
                                     T.barrier_all()
@@ -669,9 +665,7 @@ def _build_swa(
                                     # src1RepStride=1) over the full D -- no
                                     # [G2,D] denom buffer, faithful to Ascend C
                                     # RowDivs; processes headDim in one pass.
-                                    T.tile.row_expand_div(
-                                        o_ub, o_ub, denom[bufm, :, :], brcb_d
-                                    )
+                                    T.tile.row_expand_div(o_ub, o_ub, denom[bufm, :, :], brcb_d)
                                     T.tile.cast(o_half, o_ub, out_cast_mode, G2 * D)
                                     T.barrier_all()
                                     T.copy(

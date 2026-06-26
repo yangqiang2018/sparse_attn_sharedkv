@@ -62,6 +62,12 @@ flag 时)cL0 RAW 竞争(错)**。
 5. **`src/op/ascend.{h,cc}` `AscendCopy`** + **`codegen_ascend.cc` `CopyCodegen`**:`AscendCopy` 加 `PrimExpr unitFlag`
    成员(ctor 从可选 args[5] 解析,缺省 `Integer(0)`);`Lower` 的 l0c2gm 块把 `unitFlag` 作第 4 个 runtime 参
    push(在原 dead 参之前);`kCopyOpExtraArgs["copy_l0c_to_gm"] 3→4`。
+6. **`T.copy` 加 `real_k`(L1→L0 runtime K,= mma `k_actual` 的载入侧对应物)**:`copy_l1_to_l0a/b` 的 L0 fractal
+   layout = `MakeLayout(dstM, dstN)` 由**运行期** dstM/dstN 决定(common.h:155/177)。解构 PV 时全宽载入 L0
+   (realK=128)+ `k=winm` 的 mma 读到**不一致 fractal** → M-block(head 16-63)寻址错、winm<128 的 token 出错。
+   `npu_copy_v2` 加 `real_k`(位置 [6],`unit_flag` 固定 [5]);`AscendCopy` 加 `realK` 成员(解析 args[6],缺省 0);
+   `Lower` 的 `l0_dst_split` 按 dst scope 覆盖 K 位(`matrix_a→dstN`、`matrix_b→dstM`);`realK==0`(默认)→ 保持
+   `dst->shape`,现有 L1→L0 copy 字节不变。`CopyCodegen` 无需改(发的就是这两参)。
 
 ## 兼容性证据
 
