@@ -320,8 +320,8 @@ def _build_swa(
                                     # headSize=256); K half h = copy_pa with
                                     # act_head_dim=256, d_idx=h*256 (= DataCopyPA
                                     # startPos.dIdx=kL1*256, actHeadDim=256).
-                                    T.copy(Q[tok, :, 0:D2], q_l1[0])
-                                    T.copy(Q[tok, :, D2:D], q_l1[1])
+                                    T.copy(Q[tok, :, 0:D2], q_l1[0, :, :])
+                                    T.copy(Q[tok, :, D2:D], q_l1[1, :, :])
                                     for h in T.serial(2):
                                         T.copy_pa(
                                             kq_l1[h, :, :],
@@ -367,7 +367,7 @@ def _build_swa(
                                     # is each chunk's own contraction width;
                                     # n_actual=win_align = the score's real columns.
                                     T.gemm_v0_fixp(
-                                        q_l1[0],
+                                        q_l1[0, :, :],
                                         kq_l1[0, :, :],
                                         cL0,
                                         workspace_s[cid, buf, :, :],
@@ -381,7 +381,7 @@ def _build_swa(
                                         do_fixpipe=False,
                                     )
                                     T.gemm_v0_fixp(
-                                        q_l1[1],
+                                        q_l1[1, :, :],
                                         kq_l1[1, :, :],
                                         cL0,
                                         workspace_s[cid, buf, :, :],
