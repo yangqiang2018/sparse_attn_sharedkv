@@ -227,16 +227,19 @@ def _build_swa(
                 q_l1 = T.alloc_L1([G, D], dtype)
                 kv_l1 = T.alloc_L1([2, BI, D], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
-                # STEP-1 DIAGNOSTIC: separate cL0 for QK and PV, to isolate the
-                # one new variable -- QK's multi-K (K=512, 4 tiles) unitFlag 0b10
-                # accumulate inside gemm_v0_fixp (the cube hang). acc_s_l0c = QK's
-                # 1-slot score L0C; acc_o_l0c = PV's 2-slot [2,G,BI] ping-pong
-                # (008, proven). The faithful SHARED cL0TensorPingPong (one buffer,
-                # continuous cl0_base across QK+PV) is layered on AFTER the multi-K
-                # gemm is proven -- it adds a QK->PV cross-call slot-reuse hazard
-                # that would confound this diagnostic.
-                acc_s_l0c = T.alloc_L0C([G, BI], accum_dtype)
-                acc_o_l0c = T.alloc_L0C([2, G, BI], accum_dtype)
+                # INCREMENT 1 (shared cL0 buffer): one cL0TensorPingPong shared by
+                # QK and PV, faithful to the reference's single cL0TensorPingPong
+                # (block_cube.h:127/212 -- one tmpBufL0C.Get, both ComputeMm1:559
+                # and ComputeMm2:833 index it by cL0BufIter%2). [2,G,BI] = 2 slots
+                # of [64,128]fp32 = 64KB < 128KB L0C. QK uses slot 0 (cl0_base=0);
+                # PV rotates slots 1,0,1,0 (cl0_base=1, its 4 D-tiles ping-pong).
+                # The DEBUG_SERIAL barrier still drains each iteration, so the
+                # QK->PV->next-iter cL0 reuse is masked here -- this increment only
+                # merges the buffer (de-risking it in isolation). Continuous
+                # cross-call cL0BufIter + prime-once L0AB flags (removing the
+                # per-call M_MTE1 drain that still serialises QK/PV) come next, as
+                # compiler 010; deleting the barrier needs the L1 rings after that.
+                cL0 = T.alloc_L0C([2, G, BI], accum_dtype)
                 # Vector UB scratch.
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
                 p_half = T.alloc_ub([G2, BI], dtype)
@@ -309,7 +312,7 @@ def _build_swa(
                                     # QK = Q @ Kᵀ over the window; N rounds up to 16 to
                                     # match Ascend C ComputeMm1 (nL1SizeAlign =
                                     # SASAlign(window, 16)); copy_pa loads `win` KV
-                                    # rows. acc_s_l0c[0:win_align] is the score -- the
+                                    # rows. cL0[slot 0][0:win_align] is the score -- the
                                     # [win:win_align] tail is Q@unloaded-KV, but the
                                     # softmax compacts/processes win_align and the
                                     # reduce/PV use winm, so it is excluded exactly as
@@ -318,23 +321,25 @@ def _build_swa(
                                     win_align = (win + 15) // 16 * 16
                                     T.wait_flag("mte2", "mte1", KV_QK_EV)
                                     # Faithful QK = ComputeMm1: gemm_v0_fixp K-
-                                    # accumulates D=512 over 4 kL0 tiles into
-                                    # acc_s_l0c, unitFlag 0b10x3/0b11, then fuses the
-                                    # fixpipe straight to workspace_s (no resident
-                                    # L0C + separate copy). n_actual=win_align = the
-                                    # window width (the score's real columns). The
-                                    # fixpipe's nSize == the mma's n (n_actual) inside
-                                    # the primitive, so the unitFlag mma->fixpipe pair
-                                    # matches (= the reference's nL1SizeAlign).
+                                    # accumulates D=512 over 4 kL0 tiles into the
+                                    # shared cL0 (slot 0, cl0_base=0), unitFlag
+                                    # 0b10x3/0b11, then fuses the fixpipe straight to
+                                    # workspace_s (no resident L0C + separate copy).
+                                    # n_actual=win_align = the window width (the
+                                    # score's real columns). The fixpipe's nSize ==
+                                    # the mma's n (n_actual) inside the primitive, so
+                                    # the unitFlag mma->fixpipe pair matches (= the
+                                    # reference's nL1SizeAlign).
                                     T.gemm_v0_fixp(
                                         q_l1,
                                         kv_l1[0, :, :],
-                                        acc_s_l0c,
+                                        cL0,
                                         workspace_s[cid, buf, :, :],
                                         k_actual=D,
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
+                                        cl0_base=0,
                                     )
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
@@ -386,16 +391,20 @@ def _build_swa(
                                     # contracting only winm excludes them.
                                     T.wait_flag("mte2", "mte1", KV_PV_EV)
                                     # PV = ComputeMm2 (008, proven): gemm_v0_fixp
-                                    # fixpipes O[G,D] per N-tile from its own 2-slot
-                                    # acc_o_l0c ping-pong. Single K tile (k_actual=
-                                    # winm<=128, unitFlag 0b11) -- no multi-K 0b10.
+                                    # fixpipes O[G,D] per N-tile from the shared cL0
+                                    # ping-pong. cl0_base=1: its 4 D-tiles rotate
+                                    # slots 1,0,1,0 (QK held slot 0 this iteration,
+                                    # already drained by QK's per-call M_MTE1 wait).
+                                    # Single K tile (k_actual=winm<=128, unitFlag
+                                    # 0b11) -- no multi-K 0b10.
                                     T.gemm_v0_fixp(
                                         p_l1,
                                         kv_l1[1, :, :],
-                                        acc_o_l0c,
+                                        cL0,
                                         workspace_o[cid, bufm, :, :],
                                         k_actual=winm,
                                         init=True,
+                                        cl0_base=1,
                                     )
                                     # Iteration-boundary full drain (kept while
                                     # DEBUG_SERIAL): protects every cross-iteration
