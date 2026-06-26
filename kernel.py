@@ -378,15 +378,17 @@ def _build_swa(
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
                                     T.wait_flag("mte2", "mte1", KV_QK_EV)
-                                    # Faithful QK = ComputeMm1, per-D-chunk: each
-                                    # 256-wide D-half accumulates into the SAME shared
-                                    # cL0 slot (cl0_base=0); chunk 0 inits + holds
-                                    # (flush_last/do_fixpipe=False), chunk 1 flushes +
-                                    # fixpipes the fully-accumulated Q@Kᵀ to
-                                    # workspace_s (= the reference's single Fixpipe
-                                    # after both kL1 halves, cube.h:591). k_actual=D2
-                                    # is each chunk's own contraction width;
-                                    # n_actual=win_align = the score's real columns.
+                                    # PROBE (bisect the LowerTileOp segfault, loads vs
+                                    # gemm-accumulation): single gemm reading D-half 0
+                                    # only (k_actual=D2, normal flush+fixpipe). This is
+                                    # NUMERICALLY WRONG (only D[0:256] of the QK
+                                    # contraction) -- it only tests whether the loads +
+                                    # a single K=256 chunk gemm COMPILE past the
+                                    # segfault. If it compiles, the trigger is the 2nd
+                                    # gemm / no-flush chunk / two gemms to one cL0; if it
+                                    # still segfaults, the trigger is the loads (strided
+                                    # Q copy or partial copy_pa). Restore the 2-chunk
+                                    # accumulation once localised.
                                     T.gemm_v0_fixp(
                                         q_l1_0,
                                         kq_l1_0,
@@ -395,20 +397,6 @@ def _build_swa(
                                         k_actual=D2,
                                         transpose_B=True,
                                         init=True,
-                                        n_actual=win_align,
-                                        cl0_base=0,
-                                        prime_drain=False,
-                                        flush_last=False,
-                                        do_fixpipe=False,
-                                    )
-                                    T.gemm_v0_fixp(
-                                        q_l1_1,
-                                        kq_l1_1,
-                                        cL0,
-                                        workspace_s[cid, buf, :, :],
-                                        k_actual=D2,
-                                        transpose_B=True,
-                                        init=False,
                                         n_actual=win_align,
                                         cl0_base=0,
                                         prime_drain=False,
