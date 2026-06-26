@@ -153,6 +153,8 @@ def _build_swa(
     # then appears as a non-IntImm buffer dim ([BI, D2]) and SIGSEGVs LowerTileOp's
     # makeBufferWithLayout (it assumes static shapes for the L1 fractal layout).
     D2 = D // 2  # 256: the QK D-chunk (kL1) width
+    PV_NT = 128  # PV output-D tile width (= ref N_SPLIT_SIZE = gemm nMaxByL0B)
+    PV_NUM = D // PV_NT  # 4: PV output-D tiles (ComputeMm2 nL1Loops)
     G = N1 // N2  # GQA group = block_M rows handled per task (= 64)
     BI = DEFAULT_BLOCK_I  # kv window tile (= 128)
     VEC_NUM = 2  # 2 vector cores per cube core
@@ -188,13 +190,13 @@ def _build_swa(
     EV_PV = 2  # cube -> vector: PV result (ws_o) ready
 
     # Intra-cube MTE2->MTE1 pipe-flag event ids for the QK/PV KV buffers
-    # (kq_l1=QK's K D-halves, kv_l1=PV's V). Separate MTE2_MTE1 id namespace; must
-    # avoid the gemm template's internal {0,1} (L0AB_EVENT) and the L0AB M_MTE1
-    # {4,5}. So {2,3}. These let PV's copy_pa (MTE2 into kv_l1) overlap QK's gemm
-    # (M reading kq_l1) instead of a full barrier_all -- faithful to the
+    # (kq_l1=QK's K D-halves, v_l1=PV's V output-D slices). Separate MTE2_MTE1 id
+    # namespace; must avoid the gemm template's internal {0,1} (L0AB_EVENT) and the
+    # L0AB M_MTE1 {4,5}. So {2,3}. These let PV's copy_pa (MTE2 into v_l1) overlap
+    # QK's gemm (M reading kq_l1) instead of a full barrier_all -- faithful to the
     # reference's per-slot KV flags.
     KV_QK_EV = 2  # kq_l1 (QK K halves) MTE2 done
-    KV_PV_EV = 3  # kv_l1 (PV V) MTE2 done
+    KV_PV_EV = 3  # v_l1 (PV V slices) MTE2 done
 
     # L0AB M_MTE1 ping-pong flags. These match the gemm_v0_fixp template's
     # DEDICATED shared-mode base L0AB_MM_EVENT (=4) and +1 (=5) -- NOT the default
@@ -239,23 +241,21 @@ def _build_swa(
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Allocations at kernel scope (never inside a conditional).
-                # LAYER 1 (QK D-chunking): QK contracts D=512, which the reference
-                # loads as two 256-wide D-halves (ComputeMm1 kL1Loops=2,
-                # block_cube.h:341-450), each Q/K half into its OWN L1 block, and
-                # accumulates both into one cL0 before a single Fixpipe. The two
-                # D-halves are TWO SEPARATE 2D buffers (= the reference's two L1
-                # blocks), not a [2,...] array: a 3D L1 buffer sliced as a T.copy
-                # destination (q_l1[0,:,:]) crashes LowerTileOp's BlockNode visitor
-                # (makeBufferWithLayout on the 3D-shape/2D-layout mismatch); whole
-                # 2D buffers are the proven copy-dest/gemm-operand form. PV's V stays
-                # a whole [BI,D] buffer (its V D-slicing is Layer 2). 2*[G,256]
-                # + 2*[BI,256] + [BI,D] + [G,BI] = 64+128+128+16 = 336KB < 512KB L1.
-                # (D2 is a function-scope Python int -- see the note at its def.)
+                # LAYER 1 (QK D-chunking): QK contracts D=512, loaded as two 256-wide
+                # D-halves (ComputeMm1 kL1Loops=2, block_cube.h:341-450), each Q/K
+                # half into its own L1 block, accumulated into one cL0 before a single
+                # Fixpipe. Q/K halves are separate 2D buffers (= the reference's L1
+                # blocks). LAYER 2 (PV D-tiling): PV's V is loaded as PV_NUM=4 output-D
+                # slices [BI,128] (ComputeMm2 nL1Loops=4, each V slice -> one output
+                # tile), in a [PV_NUM,BI,128] array (3D-slice by a CONST index is fine
+                # for copy_pa dest / gemm B -- the earlier LowerTileOp segfault was a
+                # SYMBOLIC buffer dim `D2`, not 3D slicing; see D2's def note). 2*[G,256]
+                # + 2*[BI,256] + [4,BI,128] + [G,BI] = 64+128+128+16 = 336KB < 512KB L1.
                 q_l1_0 = T.alloc_L1([G, D2], dtype)  # Q D-half 0 (D[0:256])
                 q_l1_1 = T.alloc_L1([G, D2], dtype)  # Q D-half 1 (D[256:512])
                 kq_l1_0 = T.alloc_L1([BI, D2], dtype)  # K D-half 0
                 kq_l1_1 = T.alloc_L1([BI, D2], dtype)  # K D-half 1
-                kv_l1 = T.alloc_L1([BI, D], dtype)  # PV's V (whole)
+                v_l1 = T.alloc_L1([PV_NUM, BI, PV_NT], dtype)  # PV V, 4 output-D slices
                 p_l1 = T.alloc_L1([G, BI], dtype)
                 # INCREMENT 1 (shared cL0 buffer): one cL0TensorPingPong shared by
                 # QK and PV, faithful to the reference's single cL0TensorPingPong
@@ -370,7 +370,7 @@ def _build_swa(
                                     # q/kq D-halves loaded -> tag MTE2 done so
                                     # the gemm's MTE1 L1->L0 load waits on this point-to
                                     # -point flag instead of a full barrier_all,
-                                    # letting PV's later copy_pa(kv_l1) MTE2 overlap
+                                    # letting PV's later copy_pa(v_l1) MTE2 overlap
                                     # this QK gemm's M pipe.
                                     T.set_flag("mte2", "mte1", KV_QK_EV)
                                     # QK = Q @ Kᵀ over the window; N rounds up to 16 to
@@ -438,61 +438,71 @@ def _build_swa(
                                     ori_leftm = T.max(s_globalm - ori_win_left, 0)
                                     winm = s_globalm + 1 - ori_leftm
                                     T.copy(workspace_p[cid, bufm, :, :], p_l1)
-                                    # Reload the task j-1 KV window (faithful to
-                                    # the reference reloading V in Mm2). PV's V is
-                                    # still loaded whole [BI,D] here; its faithful
-                                    # per-output-D 4-slice load is Layer 2.
-                                    T.copy_pa(
-                                        kv_l1[:, :],
-                                        ori_kv,
-                                        ori_block_table,
-                                        ori_block_size,
-                                        N2,
-                                        D,
-                                        ori_block_size * N2 * D,
-                                        ori_table_len,
-                                        D,
-                                        winm,
-                                        BI,
-                                        bm,
-                                        0,
-                                        ori_leftm,
-                                        0,
-                                    )
-                                    # kv_l1 loaded (and p_l1, earlier on the
-                                    # in-order MTE2 queue) -> point-to-point flag
-                                    # instead of a full barrier_all.
+                                    # LAYER 2 (PV D-tiling) = ComputeMm2 nL1 loop:
+                                    # reload V as PV_NUM=4 output-D slices, each
+                                    # [winm,128] = the i-th 128 of headDim, via copy_pa
+                                    # act_head_dim=PV_NT, d_idx=i*PV_NT, into its own L1
+                                    # block v_l1[i] (faithful to the reference loading
+                                    # each nL1's V slice into a fresh KV ring slot; the
+                                    # 3-slot ring + reverse flags are Layer 3). The pad
+                                    # rows v_l1[i][winm:BI] are uninitialised -- the gemm
+                                    # contracts only k_actual=winm so 0(masked P)*NaN is
+                                    # excluded (= ComputeMm2 kSize=window).
+                                    for i in range(PV_NUM):
+                                        T.copy_pa(
+                                            v_l1[i, :, :],
+                                            ori_kv,
+                                            ori_block_table,
+                                            ori_block_size,
+                                            N2,
+                                            D,
+                                            ori_block_size * N2 * D,
+                                            ori_table_len,
+                                            PV_NT,
+                                            winm,
+                                            BI,
+                                            bm,
+                                            0,
+                                            ori_leftm,
+                                            i * PV_NT,
+                                        )
+                                    # v_l1[*] loaded (and p_l1, earlier on the in-order
+                                    # MTE2 queue) -> point-to-point flag instead of a
+                                    # full barrier_all.
                                     T.set_flag("mte2", "mte1", KV_PV_EV)
-                                    # PV = P @ V, fixpiped per N-tile straight to
-                                    # workspace_o (L0C holds one [G,BI] tile).
-                                    # k_actual=winm: contract only the real window
-                                    # rows (faithful to Ascend C ComputeMm2's
-                                    # kSize=window). The pad rows kv_l1[winm:BI]
-                                    # are uninitialised L1 -- summing them as
-                                    # 0(masked P)*NaN(garbage V) would give NaN;
-                                    # contracting only winm excludes them.
                                     T.wait_flag("mte2", "mte1", KV_PV_EV)
-                                    # PV = ComputeMm2 (008, proven): gemm_v0_fixp
-                                    # fixpipes O[G,D] per N-tile from the shared cL0
-                                    # ping-pong. cl0_base=1: its 4 D-tiles rotate
-                                    # slots 1,0,1,0 (QK held slot 0 this iteration,
-                                    # already drained by QK's per-call M_MTE1 wait).
-                                    # Single K tile (k_actual=winm<=128, unitFlag
-                                    # 0b11) -- no multi-K 0b10.
-                                    T.gemm_v0_fixp(
-                                        p_l1,
-                                        kv_l1[:, :],
-                                        cL0,
-                                        workspace_o[cid, bufm, :, :],
-                                        k_actual=winm,
-                                        init=True,
-                                        cl0_base=1,
-                                        prime_drain=False,
-                                    )
+                                    # PV = ComputeMm2, kernel-driven per output-D tile
+                                    # (nL1): each [winm,128] V slice -> one [G,128]
+                                    # output tile, fixpiped to workspace_o[:, i*128:..].
+                                    # dst_row_stride=D keeps GM rows striding by the full
+                                    # 512 (= ref dstStride=nSize, block_cube.h:930). Each
+                                    # tile its own fixpipe (init=True, single K tile
+                                    # k_actual=winm, unitFlag 0b11). cl0_base=i+1 -> cL0
+                                    # slots 1,0,1,0 = the 008 ping-pong across the 4
+                                    # tiles (fixpipe(i)∥mma(i+1) via unitFlag). (ab L0A/B
+                                    # slot is local 0 for every call here -- continuous
+                                    # abL0BufIter ping-pong is Layer 4.)
+                                    for i in range(PV_NUM):
+                                        T.gemm_v0_fixp(
+                                            p_l1,
+                                            v_l1[i, :, :],
+                                            cL0,
+                                            workspace_o[
+                                                cid,
+                                                bufm,
+                                                :,
+                                                i * PV_NT : (i + 1) * PV_NT,
+                                            ],
+                                            k_actual=winm,
+                                            init=True,
+                                            cl0_base=i + 1,
+                                            prime_drain=False,
+                                            dst_row_stride=D,
+                                        )
                                     # Iteration-boundary full drain (kept while
                                     # DEBUG_SERIAL): PipeBarrier<PIPE_ALL> drains
                                     # every pipe, so it still covers all cross-
-                                    # iteration hazards -- q_l1/p_l1/kv_l1 WAR and
+                                    # iteration hazards -- q_l1/p_l1/v_l1 WAR and
                                     # the shared cL0 ping-pong cross-iteration reuse
                                     # (which is why the L0AB flags can be primed once
                                     # with only local per-call iterators here). The
