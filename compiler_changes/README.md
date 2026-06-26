@@ -30,6 +30,7 @@
 | 009 | [Ascend `gemm_v0_fixp` K-累加 + `n_actual` + `cl0_base` + `mma` 补 `cmatrixSource` + fixpipe `nSize`（QK 走统一 fixp 路径 = `ComputeMm1`，与 PV 共享 cL0）](009-ascend-gemm-v0-fixp-kaccum.md) | `Merge 009` `9e7300f7`（原 `d61b5127`） | ✅ 已合入 `ascendc_pto`(SWA 5/5 PASS + 回归 + prefill 持平/decode 1.65×) |
 | 010 | [Ascend `gemm_v0_fixp` 加 `prime_drain`：L0AB `M_MTE1` flag 一次 prime（= `AllocEventID`/`FreeEventID`）+ 专属 event id（`L0AB_MM_EVENT`，根治常驻 flag 冲突）](010-ascend-gemm-v0-fixp-prime-once.md) | `Merge 010` `2c7e32d8`（原 `9c024295`） | ✅ 已合入 `ascendc_pto`(SWA 5/5 PASS + 回归过) |
 | 011 | [Ascend `gemm_v0_fixp` 加 `flush_last`/`do_fixpipe`：per-K-chunk 累加（内核驱动 GM→L1 链式切块 = `ComputeMm1` kL1 切分）](011-ascend-gemm-v0-fixp-kchunk.md) | `Merge 011` `a191c7d7`（原 `d1f9e516`） | ✅ 已合入 `ascendc_pto`(SWA 5/5 PASS + 回归过；算子 Layer① QK D-切块 5/5) |
+| 012 | [Ascend `T.mma`/`T.copy` 接通 `unitFlag` + `k_actual` + `real_k`（内核驱动 cube 拆分原语：载入 real_k / mma k_actual / fixpipe unit_flag）](012-ascend-mma-fixpipe-unitflag.md) | `Merge 012` `64fd7752`（原 `f186706e`） | ✅ 已合入 `ascendc_pto`（PV 单缓冲解构 SWA 5/5 + 回归过） |
 
 > 001–008 均已合入 `ascendc_pto`(`dddf3413`)。006/007 做「全链路变长 N」忠实复刻;008 给 PV
 > `gemm_v0_fixp` 加 `cL0TensorPingPong`(2-slot L0C + 硬件 `unitFlag`,fixpipe∥mma 核内重叠,= `ComputeMm2`,
