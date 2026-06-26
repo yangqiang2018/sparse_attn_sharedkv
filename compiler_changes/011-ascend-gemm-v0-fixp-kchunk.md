@@ -7,7 +7,9 @@
 | **改动文件** | `src/tl_templates/ascend/common.h`（`gemm_v0_fixp` 加 `flush_last`/`do_fixpipe` + `kL0split` 改运行期 `k_actual`）、`tilelang/language/ascend.py`（绑定加 2 参）、`src/target/codegen_ascend.cc`（`GemmFixpOpCodegen` emit args[10][11]）、`src/op/ascend.cc`（`ascend_gemm_v0_fixp` `set_num_inputs` 10→12） |
 | **是否必须** | 是 —— 用户拍板「全切块」忠实复刻：参考的 `ComputeMm1` 把 QK 的收缩轴 D=512 切成 2 个 256 的 kL1 D-半，**逐半 GM→L1 载入不同 L1 环槽、累加进同一 cL0 后单次 Fixpipe**（block_cube.h:341-450/575-604）。要让内核驱动这条「载一个 D-chunk → 调 gemm 累加」，`gemm_v0_fixp` 必须能 per-K-chunk 调用：非末 chunk 不 flush/不 fixpipe、续累加 |
 | **是否兼容** | 是 —— `flush_last=true`/`do_fixpipe=true` 默认 → 现有 caller 单次调用逐字节不变；`kL0split` 改用运行期 `k_actual`，但现 caller `k_actual==K` 故 `kL0split` 不变 |
-| **状态** | ⏳ 待 NPU 验证（SWA 5/5 + 回归）后合入 `ascendc_pto`。这是「全切块/环感知 cube」**Layer ①**（QK 的 Q/K 各切 256+256 + per-chunk gemm 累加）；Layer ②(PV V 4 切片)③(反向 flag)④(持久迭代器)⑤(删 barrier)续做 |
+| **状态** | ✅ 已合入 `ascendc_pto`（`Merge 011` `a191c7d7`）：NPU SWA 快测 5/5 PASS + 回归（paged_flash_attn_bhsd + sparse_flash_attn_developer）全过。这是「全切块/环感知 cube」**Layer ①**（QK 的 Q/K 各切 256+256 + per-chunk gemm 累加），已 5/5；Layer ②(PV V 4 切片)③(反向 flag)④(持久迭代器)⑤(删 barrier)续做 |
+
+> **踩坑备忘（合入过程）**：算子侧 Layer① 调试时撞上 `LowerTileOp` 编译期 SIGSEGV，根因**不在本编译器改动**，而是内核把 `D2 = D//2` 写在了 `@T.prim_func` body 内 → TVMScript 变符号 `Var` → 用作 L1 buffer 维（非 IntImm）→ `makeBufferWithLayout` 裸解引用崩。修法 = 把 `D2` 挪到 prim_func 外层闭包常量。定位用 RelWithDebInfo build + gdb + `std::cerr`（`LOG(INFO)` 被静默）+ `pytest -s`（否则崩时捕获丢失）。已沉淀进 tilelang 插件 skills（pitfalls + debugging）。**编译器侧 `makeBufferWithLayout` 对非 IntImm 维应 ICHECK 而非 segfault，留作独立健壮性硬化。**
 
 ---
 
