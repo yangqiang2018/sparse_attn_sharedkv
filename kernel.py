@@ -189,6 +189,20 @@ def _build_swa(
     KV_QK_EV = 2  # kv_l1[0] (QK) MTE2 done
     KV_PV_EV = 3  # kv_l1[1] (PV) MTE2 done
 
+    # L0AB M_MTE1 ping-pong flags. These match the gemm_v0_fixp template's
+    # DEDICATED shared-mode base L0AB_MM_EVENT (=4) and +1 (=5) -- NOT the default
+    # L0AB_EVENT (=0). The shared (prime_drain=False) gemm holds these two M_MTE1
+    # flags SET across the whole cube loop, so they must be disjoint from the
+    # template's per-call MTE2_MTE1/MTE1_MTE2 self-pair fences (which stay on
+    # {0,1}) and from the KV pipe-flags ({2,3}); {4,5} is the free pair (faithful
+    # to the reference, which puts M_MTE1 on its own EVENT_ID3/4 disjoint from the
+    # L1 flags). Primed ONCE before the cube loop (= AllocEventID,
+    # block_cube.h:225-226) and drained ONCE after it (= FreeEventID, :239-240);
+    # the gemm calls consume/re-arm them per tile rather than re-priming at every
+    # QK/PV boundary.
+    L0AB_EV0 = 4
+    L0AB_EV1 = 5
+
     q_shape = [total_tokens, N1, D]
     ori_kv_shape = [ori_block_num, ori_block_size, N2, D]
     cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
@@ -269,6 +283,15 @@ def _build_swa(
                 # ============================ CUBE ============================
                 # iter j: QK(task j) -> ws_s[j%2] ; PV(task j-1) -> ws_o[(j-1)%2]
                 with T.Scope("C"):
+                    # AllocEventID (block_cube.h:225-226): prime the two L0AB
+                    # M_MTE1 ping-pong flags ONCE for the whole cube loop. The
+                    # shared QK/PV gemm_v0_fixp calls (prime_drain=False) consume
+                    # and re-arm these per tile instead of self-priming+draining
+                    # the L0AB ring at every call boundary -- faithful to the
+                    # reference, where ComputeMm1/Mm2 never touch the L0AB flag
+                    # lifecycle (only the per-slot Wait/Set inside the tile loop).
+                    T.set_flag("m", "mte1", L0AB_EV0)
+                    T.set_flag("m", "mte1", L0AB_EV1)
                     for j in T.serial(n_iter + 1):
                         # ---- QK stage for task j ----
                         if j < n_iter:
@@ -340,6 +363,7 @@ def _build_swa(
                                         init=True,
                                         n_actual=win_align,
                                         cl0_base=0,
+                                        prime_drain=False,
                                     )
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
@@ -405,16 +429,27 @@ def _build_swa(
                                         k_actual=winm,
                                         init=True,
                                         cl0_base=1,
+                                        prime_drain=False,
                                     )
                                     # Iteration-boundary full drain (kept while
-                                    # DEBUG_SERIAL): protects every cross-iteration
-                                    # hazard -- q_l1/p_l1 WAR, acc_s WAR, the acc_o
-                                    # cL0 ping-pong cross-iteration reuse. The 3-slot
-                                    # KV ring / QP ring / fine-grained flags that let
-                                    # this be removed come AFTER the gemm is proven.
+                                    # DEBUG_SERIAL): PipeBarrier<PIPE_ALL> drains
+                                    # every pipe, so it still covers all cross-
+                                    # iteration hazards -- q_l1/p_l1/kv_l1 WAR and
+                                    # the shared cL0 ping-pong cross-iteration reuse
+                                    # (which is why the L0AB flags can be primed once
+                                    # with only local per-call iterators here). The
+                                    # 3-slot KV ring / 4-slot QP ring / persistent
+                                    # cL0BufIter that let this be removed come next
+                                    # (increment 3).
                                     if DEBUG_SERIAL:
                                         T.barrier_all()
                             T.set_cross_flag("FIX", EV_PV)
+                    # FreeEventID (block_cube.h:239-240): drain the two L0AB
+                    # M_MTE1 flags ONCE after the whole cube loop, balancing the
+                    # AllocEventID prime above (the shared gemm calls left them
+                    # armed instead of self-draining at each call boundary).
+                    T.wait_flag("m", "mte1", L0AB_EV0)
+                    T.wait_flag("m", "mte1", L0AB_EV1)
 
                 # =========================== VECTOR ===========================
                 # iter j: softmax(task j) -> ws_p[j%2] ; output(task j-1)
