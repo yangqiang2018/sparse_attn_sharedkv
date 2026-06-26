@@ -27,14 +27,16 @@
 | 006 | [Ascend `gemm_v0`/`mma` 增加运行期 `n_actual`（变长 N 输出列，= Ascend C `ComputeMm1` 窗口长 N）](006-ascend-gemm-v0-n-actual.md) | `Merge 006` `2a7662a1`(原 `b255a071`) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归过) |
 | 007 | [Ascend 新增 `softmax_flash_v2` 原语（逐指令复刻 AscendC `SoftmaxFlashV2`，变长 N softmax 不掩码）](007-ascend-softmax-flash-v2.md) | `wip/ascend-softmax-flashv2` `cf38e5fa`(快进合入) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归过) |
 | 008 | [Ascend `gemm_v0_fixp` 2-slot L0C ping-pong + 接通 `unitFlag`（= Ascend C `cL0TensorPingPong`，fixpipe∥mma 核内重叠）](008-ascend-gemm-v0-fixp-l0c-pingpong.md) | `Merge 008` `dddf3413`(原 `ca15c716`) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归 + 1.03× parity) |
+| 009 | [Ascend `gemm_v0_fixp` K-累加 + `n_actual` + `cl0_base` + `mma` 补 `cmatrixSource` + fixpipe `nSize`（QK 走统一 fixp 路径 = `ComputeMm1`，与 PV 共享 cL0）](009-ascend-gemm-v0-fixp-kaccum.md) | `Merge 009` `9e7300f7`（原 `d61b5127`） | ✅ 已合入 `ascendc_pto`(SWA 5/5 PASS + 回归 + prefill 持平/decode 1.65×) |
 
 > 001–008 均已合入 `ascendc_pto`(`dddf3413`)。006/007 做「全链路变长 N」忠实复刻;008 给 PV
 > `gemm_v0_fixp` 加 `cL0TensorPingPong`(2-slot L0C + 硬件 `unitFlag`,fixpipe∥mma 核内重叠,= `ComputeMm2`,
 > NPU 验证 1.03× parity)。
 >
-> **下一步:整条忠实 cube 流水**(退回 parity 8061a9e 重建)。采「环感知 gemm」:扩展出 per-K-chunk 的
-> matmul 变体(内核驱动 3-slot KV 环 + 子块化 + QP 环 + 共享持久 cL0 + 持久 `abL0BufIter` + 零 barrier,
-> = 参考 `ComputeMm1`/`ComputeMm2` 的连续流)。该编译器改动将作为**新的 009**。
-> （曾有一版 009「`gemm_v0_fixp` 单调 K-累加」在单个 QK 调用内多-K `unitFlag` 累加处卡死、已废弃,编号回收。）
+> **009 = 整条忠实 cube 流水的 matmul 基础**(退回 parity 8061a9e 重建):给 `gemm_v0_fixp` 加 K-累加 +
+> `n_actual` + `cl0_base`,让 QK 也走同一 fused-fixpipe / `unitFlag` / 共享 cL0 路径(= `ComputeMm1`);
+> 并内置 `dbg_barrier` 诊断开关坐实「多-K `unitFlag`(0b10)在单个 QK 调用内卡死」的病根。内核侧 3-slot
+> KV 环 + 子块化 + QP 环 + 共享 cL0 + 零 barrier 在此原语之上做。（注:这是回收编号后的新 009;同名旧版
+> 无 `dbg_barrier`、卡死无法定位已删。）
 
 > 各修改互不依赖、各自一个 commit、各自基于 `ascendc_pto`，**逐个独立合并**，每次合并都是一个自洽的修复。004 是 002（N 切分切 L0B）之上的忠实收尾（切 L0C + 即时搬出），但仍是独立的兼容性新增原语。
