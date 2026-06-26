@@ -181,13 +181,14 @@ def _build_swa(
     EV_P = 1  # vector -> cube: softmax P (ws_p) ready
     EV_PV = 2  # cube -> vector: PV result (ws_o) ready
 
-    # Intra-cube MTE2->MTE1 pipe-flag event ids for the 2-buffer KV split
-    # (kv_l1[0]=QK, kv_l1[1]=PV). Separate MTE2_MTE1 id namespace; must avoid the
-    # gemm template's internal {0,1} (L0AB_EVENT). So {2,3}. These let PV's
-    # copy_pa (MTE2 into kv_l1[1]) overlap QK's gemm (M reading kv_l1[0]) instead
-    # of a full barrier_all -- faithful to the reference's per-slot KV flags.
-    KV_QK_EV = 2  # kv_l1[0] (QK) MTE2 done
-    KV_PV_EV = 3  # kv_l1[1] (PV) MTE2 done
+    # Intra-cube MTE2->MTE1 pipe-flag event ids for the QK/PV KV buffers
+    # (kq_l1=QK's K D-halves, kv_l1=PV's V). Separate MTE2_MTE1 id namespace; must
+    # avoid the gemm template's internal {0,1} (L0AB_EVENT) and the L0AB M_MTE1
+    # {4,5}. So {2,3}. These let PV's copy_pa (MTE2 into kv_l1) overlap QK's gemm
+    # (M reading kq_l1) instead of a full barrier_all -- faithful to the
+    # reference's per-slot KV flags.
+    KV_QK_EV = 2  # kq_l1 (QK K halves) MTE2 done
+    KV_PV_EV = 3  # kv_l1 (PV V) MTE2 done
 
     # L0AB M_MTE1 ping-pong flags. These match the gemm_v0_fixp template's
     # DEDICATED shared-mode base L0AB_MM_EVENT (=4) and +1 (=5) -- NOT the default
@@ -232,14 +233,18 @@ def _build_swa(
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Allocations at kernel scope (never inside a conditional).
-                # Cube: q_l1, a 2-buffer KV split (kv_l1[0]=QK, kv_l1[1]=PV;
-                # kv reloaded for PV, faithful to the reference's DataCopyPA in
-                # both Mm1 and Mm2), p_l1. The two KV buffers let PV's copy_pa
-                # (MTE2) overlap QK's gemm (M) -- the reference's per-slot KV
-                # ring degenerated to depth-2 (only QK(j)/PV(j-1) ever live).
-                # 2*[BI,D] + [G,D] + [G,BI] = 256KB+64KB+16KB = 336KB < 512KB L1.
-                q_l1 = T.alloc_L1([G, D], dtype)
-                kv_l1 = T.alloc_L1([2, BI, D], dtype)
+                # LAYER 1 (QK D-chunking): QK contracts D=512, which the reference
+                # loads as two 256-wide D-halves (ComputeMm1 kL1Loops=2,
+                # block_cube.h:341-450), each Q/K half into its own L1 slot, and
+                # accumulates both into one cL0 before a single Fixpipe. So Q and
+                # the QK-side K are now 2-slot D-half buffers; PV's V stays a whole
+                # [BI,D] buffer (its V D-slicing is Layer 2). q_l1[2,G,256] (Q halves)
+                # + kq_l1[2,BI,256] (K halves) + kv_l1[BI,D] (PV V) + p_l1[G,BI] =
+                # 64KB+128KB+128KB+16KB = 336KB < 512KB L1.
+                D2 = D // 2  # 256: the D-half (kL1) width
+                q_l1 = T.alloc_L1([2, G, D2], dtype)
+                kq_l1 = T.alloc_L1([2, BI, D2], dtype)
+                kv_l1 = T.alloc_L1([BI, D], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
                 # INCREMENT 1 (shared cL0 buffer): one cL0TensorPingPong shared by
                 # QK and PV, faithful to the reference's single cL0TensorPingPong
@@ -307,30 +312,39 @@ def _build_swa(
                                     s_global = act_kv - act_q + s
                                     ori_left = T.max(s_global - ori_win_left, 0)
                                     win = s_global + 1 - ori_left
-                                    T.copy(Q[tok, :, :], q_l1)
-                                    T.copy_pa(
-                                        kv_l1[0, :, :],
-                                        ori_kv,
-                                        ori_block_table,
-                                        ori_block_size,
-                                        N2,
-                                        D,
-                                        ori_block_size * N2 * D,
-                                        ori_table_len,
-                                        D,
-                                        win,
-                                        BI,
-                                        b,
-                                        0,
-                                        ori_left,
-                                        0,
-                                    )
-                                    # kv_l1[0] loaded (and q_l1, earlier on the
-                                    # in-order MTE2 queue) -> tag MTE2 done so the
-                                    # gemm's MTE1 L1->L0 load waits on this point-to
+                                    # QK D-chunking (faithful ComputeMm1 kL1Loops=2,
+                                    # block_cube.h:341-450/545-557): load Q and K as
+                                    # two 256-wide D-halves into their own L1 slots.
+                                    # Q half h = Q[tok, :, h*256:(h+1)*256] (a strided
+                                    # GM slice, = CopyInMm1AToL1 headOffset=h*256,
+                                    # headSize=256); K half h = copy_pa with
+                                    # act_head_dim=256, d_idx=h*256 (= DataCopyPA
+                                    # startPos.dIdx=kL1*256, actHeadDim=256).
+                                    T.copy(Q[tok, :, 0:D2], q_l1[0])
+                                    T.copy(Q[tok, :, D2:D], q_l1[1])
+                                    for h in T.serial(2):
+                                        T.copy_pa(
+                                            kq_l1[h, :, :],
+                                            ori_kv,
+                                            ori_block_table,
+                                            ori_block_size,
+                                            N2,
+                                            D,
+                                            ori_block_size * N2 * D,
+                                            ori_table_len,
+                                            D2,
+                                            win,
+                                            BI,
+                                            b,
+                                            0,
+                                            ori_left,
+                                            h * D2,
+                                        )
+                                    # q_l1[0/1] + kq_l1[0/1] loaded -> tag MTE2 done so
+                                    # the gemm's MTE1 L1->L0 load waits on this point-to
                                     # -point flag instead of a full barrier_all,
-                                    # letting PV's later copy_pa(kv_l1[1]) MTE2
-                                    # overlap this QK gemm's M pipe.
+                                    # letting PV's later copy_pa(kv_l1) MTE2 overlap
+                                    # this QK gemm's M pipe.
                                     T.set_flag("mte2", "mte1", KV_QK_EV)
                                     # QK = Q @ Kᵀ over the window; N rounds up to 16 to
                                     # match Ascend C ComputeMm1 (nL1SizeAlign =
@@ -343,27 +357,42 @@ def _build_swa(
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
                                     T.wait_flag("mte2", "mte1", KV_QK_EV)
-                                    # Faithful QK = ComputeMm1: gemm_v0_fixp K-
-                                    # accumulates D=512 over 4 kL0 tiles into the
-                                    # shared cL0 (slot 0, cl0_base=0), unitFlag
-                                    # 0b10x3/0b11, then fuses the fixpipe straight to
-                                    # workspace_s (no resident L0C + separate copy).
-                                    # n_actual=win_align = the window width (the
-                                    # score's real columns). The fixpipe's nSize ==
-                                    # the mma's n (n_actual) inside the primitive, so
-                                    # the unitFlag mma->fixpipe pair matches (= the
-                                    # reference's nL1SizeAlign).
+                                    # Faithful QK = ComputeMm1, per-D-chunk: each
+                                    # 256-wide D-half accumulates into the SAME shared
+                                    # cL0 slot (cl0_base=0); chunk 0 inits + holds
+                                    # (flush_last/do_fixpipe=False), chunk 1 flushes +
+                                    # fixpipes the fully-accumulated Q@Kᵀ to
+                                    # workspace_s (= the reference's single Fixpipe
+                                    # after both kL1 halves, cube.h:591). k_actual=D2
+                                    # is each chunk's own contraction width;
+                                    # n_actual=win_align = the score's real columns.
                                     T.gemm_v0_fixp(
-                                        q_l1,
-                                        kv_l1[0, :, :],
+                                        q_l1[0],
+                                        kq_l1[0, :, :],
                                         cL0,
                                         workspace_s[cid, buf, :, :],
-                                        k_actual=D,
+                                        k_actual=D2,
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
                                         cl0_base=0,
                                         prime_drain=False,
+                                        flush_last=False,
+                                        do_fixpipe=False,
+                                    )
+                                    T.gemm_v0_fixp(
+                                        q_l1[1],
+                                        kq_l1[1, :, :],
+                                        cL0,
+                                        workspace_s[cid, buf, :, :],
+                                        k_actual=D2,
+                                        transpose_B=True,
+                                        init=False,
+                                        n_actual=win_align,
+                                        cl0_base=0,
+                                        prime_drain=False,
+                                        flush_last=True,
+                                        do_fixpipe=True,
                                     )
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
@@ -383,9 +412,11 @@ def _build_swa(
                                     winm = s_globalm + 1 - ori_leftm
                                     T.copy(workspace_p[cid, bufm, :, :], p_l1)
                                     # Reload the task j-1 KV window (faithful to
-                                    # the reference reloading V in Mm2).
+                                    # the reference reloading V in Mm2). PV's V is
+                                    # still loaded whole [BI,D] here; its faithful
+                                    # per-output-D 4-slice load is Layer 2.
                                     T.copy_pa(
-                                        kv_l1[1, :, :],
+                                        kv_l1[:, :],
                                         ori_kv,
                                         ori_block_table,
                                         ori_block_size,
@@ -401,7 +432,7 @@ def _build_swa(
                                         ori_leftm,
                                         0,
                                     )
-                                    # kv_l1[1] loaded (and p_l1, earlier on the
+                                    # kv_l1 loaded (and p_l1, earlier on the
                                     # in-order MTE2 queue) -> point-to-point flag
                                     # instead of a full barrier_all.
                                     T.set_flag("mte2", "mte1", KV_PV_EV)
@@ -423,7 +454,7 @@ def _build_swa(
                                     # 0b11) -- no multi-K 0b10.
                                     T.gemm_v0_fixp(
                                         p_l1,
-                                        kv_l1[1, :, :],
+                                        kv_l1[:, :],
                                         cL0,
                                         workspace_o[cid, bufm, :, :],
                                         k_actual=winm,
