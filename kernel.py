@@ -512,9 +512,11 @@ def _build_swa(
                                     # events {4,5}, L0A/L0B slots alternate. cs =
                                     # (1+nl)&1 = 1,0,1,0 (cl0_base=1, no collision with
                                     # QK's slot 0). L0A/L0B are loaded full width; the
-                                    # mma contracts K=winm via the [..,0:winm] slice
-                                    # (= gemm k_actual=winm; the [winm:] pad rows/cols
-                                    # are loaded but never contracted, so no 0*NaN).
+                                    # mma contracts K=winm via k_actual=winm (full
+                                    # operands -- a symbolic [..,0:winm] slice operand
+                                    # makes access_ptr int(winm) a Var and fails; =
+                                    # gemm k_actual=winm; the [winm:] pad rows/cols are
+                                    # loaded but never contracted, so no 0*NaN).
                                     # winm<=128 single K tile -> unit_flag always 0b11.
                                     # (G/16)*(128/16)=32>=10 -> no PipeBarrier<PIPE_M>
                                     # (= gemm:944 gate). The per-tile M_MTE1(4/5) chain
@@ -532,10 +534,11 @@ def _build_swa(
                                         T.set_flag("mte1", "m", L0AB_EV0 + pp)
                                         T.wait_flag("mte1", "m", L0AB_EV0 + pp)
                                         T.mma(
-                                            p_l0a[pp, :, 0:winm],
-                                            v_l0b[pp, 0:winm, :],
+                                            p_l0a[pp, :, :],
+                                            v_l0b[pp, :, :],
                                             cL0[cs, :, :],
                                             init=True,
+                                            k_actual=winm,
                                             unit_flag=0b11,
                                         )
                                         T.set_flag("m", "mte1", L0AB_EV0 + pp)

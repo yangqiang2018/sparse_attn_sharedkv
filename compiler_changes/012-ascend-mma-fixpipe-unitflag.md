@@ -50,6 +50,10 @@ flag 时)cL0 RAW 竞争(错)**。
 
 1. **`tilelang/language/customize.py` `npu_gemm`(= `T.mma`)**:加 `n_actual=None, unit_flag=None`;两者皆 `None`
    时发 legacy 6 参 `mma<...>(A,B,C,init,K)`(现有 examples 调用方字节不变),否则补 `(n_actual or N, unit_flag or 0)`。
+   **另加 `k_actual=None`**:覆盖从 `A` 末维推的 runtime `K`(操作数保持整块,只收缩 `k_actual` 列)。修
+   `T.mma(p_l0a[pp,:,0:winm], …)` 的 `int() argument must be … not 'Var'` —— 符号切片操作数让 `access_ptr` 对
+   `winm` 调 `int(Var)`;改传整块 + `k_actual=winm`(= `gemm_v0_fixp` 的 `kSize`/`k_actual`)。纯 Python(`K` 本
+   就在 codegen 的 `args[5]` runtime 位,无需改 codegen),默认 `None` 保持现有调用方不变。
 2. **`src/op/ascend.cc` `ascend_mma`**:`set_num_inputs(6)→(-1)`(变参,容 6 或 8)。
 3. **`src/target/codegen_ascend.cc` `MmaCodegen`**:发完 args[4]/[5] 后,`for i in [6, args.size())` 续发尾参
    (6 参调用方无尾参 → 不变)。
