@@ -147,6 +147,12 @@ def _build_swa(
     N1 = n_heads  # query heads (= 64)
     N2 = 1  # kv heads
     D = head_dim  # head dim (= 512)
+    # D-half (kL1) width = 256. MUST be defined here at function scope (a captured
+    # Python int), NOT inside the @T.prim_func body: a `D2 = D // 2` statement
+    # inside the prim_func becomes a TVMScript Let-bound symbolic tir.Var, which
+    # then appears as a non-IntImm buffer dim ([BI, D2]) and SIGSEGVs LowerTileOp's
+    # makeBufferWithLayout (it assumes static shapes for the L1 fractal layout).
+    D2 = D // 2  # 256: the QK D-chunk (kL1) width
     G = N1 // N2  # GQA group = block_M rows handled per task (= 64)
     BI = DEFAULT_BLOCK_I  # kv window tile (= 128)
     VEC_NUM = 2  # 2 vector cores per cube core
@@ -244,7 +250,7 @@ def _build_swa(
                 # 2D buffers are the proven copy-dest/gemm-operand form. PV's V stays
                 # a whole [BI,D] buffer (its V D-slicing is Layer 2). 2*[G,256]
                 # + 2*[BI,256] + [BI,D] + [G,BI] = 64+128+128+16 = 336KB < 512KB L1.
-                D2 = D // 2  # 256: the D-half (kL1) width
+                # (D2 is a function-scope Python int -- see the note at its def.)
                 q_l1_0 = T.alloc_L1([G, D2], dtype)  # Q D-half 0 (D[0:256])
                 q_l1_1 = T.alloc_L1([G, D2], dtype)  # Q D-half 1 (D[256:512])
                 kq_l1_0 = T.alloc_L1([BI, D2], dtype)  # K D-half 0
