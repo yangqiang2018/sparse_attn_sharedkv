@@ -322,24 +322,40 @@ def _build_swa(
                                     # startPos.dIdx=kL1*256, actHeadDim=256).
                                     T.copy(Q[tok, :, 0:D2], q_l1[0, :, :])
                                     T.copy(Q[tok, :, D2:D], q_l1[1, :, :])
-                                    for h in T.serial(2):
-                                        T.copy_pa(
-                                            kq_l1[h, :, :],
-                                            ori_kv,
-                                            ori_block_table,
-                                            ori_block_size,
-                                            N2,
-                                            D,
-                                            ori_block_size * N2 * D,
-                                            ori_table_len,
-                                            D2,
-                                            win,
-                                            BI,
-                                            b,
-                                            0,
-                                            ori_left,
-                                            h * D2,
-                                        )
+                                    T.copy_pa(
+                                        kq_l1[0, :, :],
+                                        ori_kv,
+                                        ori_block_table,
+                                        ori_block_size,
+                                        N2,
+                                        D,
+                                        ori_block_size * N2 * D,
+                                        ori_table_len,
+                                        D2,
+                                        win,
+                                        BI,
+                                        b,
+                                        0,
+                                        ori_left,
+                                        0,
+                                    )
+                                    T.copy_pa(
+                                        kq_l1[1, :, :],
+                                        ori_kv,
+                                        ori_block_table,
+                                        ori_block_size,
+                                        N2,
+                                        D,
+                                        ori_block_size * N2 * D,
+                                        ori_table_len,
+                                        D2,
+                                        win,
+                                        BI,
+                                        b,
+                                        0,
+                                        ori_left,
+                                        D2,
+                                    )
                                     # q_l1[0/1] + kq_l1[0/1] loaded -> tag MTE2 done so
                                     # the gemm's MTE1 L1->L0 load waits on this point-to
                                     # -point flag instead of a full barrier_all,
