@@ -3,11 +3,11 @@
 | | |
 |---|---|
 | **编译器仓库** | `yangqiang2018/tilelang-ascend-2` |
-| **分支** | `wip/gemm-v0-fixp-prime-once`（**独立基于 `ascendc_pto`**，含 001–009） |
+| **分支** | `wip/gemm-v0-fixp-prime-once`（**独立基于 `ascendc_pto`**，含 001–009）→ `Merge 010` `2c7e32d8`（已合入，wip 分支已删） |
 | **改动文件** | `src/tl_templates/ascend/common.h`（`gemm_v0_fixp` 加 `bool prime_drain=true`，M_MTE1 prime/drain gate 在 `if(prime_drain)`）、`tilelang/language/ascend.py`（绑定加 `prime_drain`）、`src/target/codegen_ascend.cc`（`GemmFixpOpCodegen` emit args[9]）、`src/op/ascend.cc`（`ascend_gemm_v0_fixp` `set_num_inputs` 9→10） |
 | **是否必须** | 是 —— 忠实复刻要求 QK/PV 的 L0AB ping-pong flag 由调用方在整条 cube 循环**一次** prime（= `AllocEventID`）、**一次** drain（= `FreeEventID`），而不是每个 `gemm_v0_fixp` 调用自 prime/drain；这是删 `DEBUG_SERIAL` barrier、拿回跨调用/跨迭代 fixpipe∥mma 重叠的前置 |
 | **是否兼容** | 是 —— `prime_drain=true` 默认 → PV（008）及一切现有 caller 逐字节不变（仍自 prime/drain）；回归 example 走 `gemm_v0`（非 fixp），不受影响 |
-| **状态** | ⏳ 待 NPU 验证（SWA 5/5 + 回归两 example）后合入 `ascendc_pto`。这是「忠实 cube 续做」增量 2（增量 1 = 合并共享 cL0，已 5/5 PASS，纯内核无编译器改动） |
+| **状态** | ✅ 已合入 `ascendc_pto`（`Merge 010` `2c7e32d8`）：NPU SWA 快测 5/5 PASS + 回归（paged_flash_attn_bhsd + sparse_flash_attn_developer）全过。这是「忠实 cube 续做」增量 2（增量 1 = 合并共享 cL0，已 5/5 PASS，纯内核无编译器改动） |
 
 ---
 
