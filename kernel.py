@@ -155,6 +155,13 @@ def _build_swa(
     D2 = D // 2  # 256: the QK D-chunk (kL1) width
     G = N1 // N2  # GQA group = block_M rows handled per task (= 64)
     BI = DEFAULT_BLOCK_I  # kv window tile (= 128)
+    # PV output-D tiling (= ComputeMm2 nL1Loops): D=512 -> 4 tiles of 128. The
+    # decomposed PV drives these 4 tiles itself (kernel-driven mma + fused fixpipe
+    # = gemm_v0_fixp internal nL0split=4), so the V D-slices can later enter the
+    # 3-slot KV ring per tile. Function-scope Python ints (NOT prim_func body --
+    # see the D2 note: a body-level const becomes a symbolic Var and SIGSEGVs).
+    PV_NT = D // BI  # 4 output-D tiles
+    PV_NW = BI  # 128: each output-D tile's column width (= mma n / fixpipe nSize)
     VEC_NUM = 2  # 2 vector cores per cube core
     G2 = G // VEC_NUM  # rows per vector core (= 32)
     BLK = 8  # FP32 elems per 32B block (Brcb fan-out width for row_expand)
@@ -243,14 +250,15 @@ def _build_swa(
                 # loads as two 256-wide D-halves (ComputeMm1 kL1Loops=2,
                 # block_cube.h:341-450), each Q/K half into its OWN L1 block, and
                 # accumulates both into one cL0 before a single Fixpipe. The two
-                # D-halves are TWO SEPARATE 2D buffers (= the reference's two L1
-                # blocks), not a [2,...] array: a 3D L1 buffer sliced as a T.copy
-                # destination (q_l1[0,:,:]) crashes LowerTileOp's BlockNode visitor
-                # (makeBufferWithLayout on the 3D-shape/2D-layout mismatch); whole
-                # 2D buffers are the proven copy-dest/gemm-operand form. PV's V stays
-                # a whole [BI,D] buffer (its V D-slicing is Layer 2). 2*[G,256]
+                # D-halves are separate 2D buffers (= the reference's two L1 blocks);
+                # a [2,...] 3D array sliced by a const index would work too (3D-slice
+                # is fine -- the earlier LowerTileOp segfault was a SYMBOLIC buffer
+                # dim D2, not 3D slicing; see D2's def note). PV's V stays a whole
+                # [BI,D] buffer: the whole-V gemm_v0_fixp already does the faithful
+                # per-output-D-tile fused fixpipe + cL0 ping-pong internally
+                # (nL0split=4 = ComputeMm2 nL1Loops); V into separate ring slots is
+                # an OVERLAP concern, deferred to the KV/QP ring (Layer 3). 2*[G,256]
                 # + 2*[BI,256] + [BI,D] + [G,BI] = 64+128+128+16 = 336KB < 512KB L1.
-                # (D2 is a function-scope Python int -- see the note at its def.)
                 q_l1_0 = T.alloc_L1([G, D2], dtype)  # Q D-half 0 (D[0:256])
                 q_l1_1 = T.alloc_L1([G, D2], dtype)  # Q D-half 1 (D[256:512])
                 kq_l1_0 = T.alloc_L1([BI, D2], dtype)  # K D-half 0
@@ -270,6 +278,16 @@ def _build_swa(
                 # per-call M_MTE1 drain that still serialises QK/PV) come next, as
                 # compiler 010; deleting the barrier needs the L1 rings after that.
                 cL0 = T.alloc_L0C([2, G, BI], accum_dtype)
+                # PV decomposition L0A/L0B ping-pong (kernel-driven per-tile mma).
+                # P[G,winm] -> p_l0a, V tile [winm,128] -> v_l0b, alternating slot
+                # pp = nl&1 (= gemm_v0_fixp tileIdx&1 = 0,1,0,1 for the 4 tiles).
+                # These are OFFSET-0 views of the same A2/B2 space QK's gemm_v0_fixp
+                # uses whole; the per-tile M_MTE1(4/5) flag chain orders QK's L0 use
+                # before PV writes here (QK's last mma SetFlag<M_MTE1> -> PV's first
+                # WaitFlag<M_MTE1>), so the address overlap is safe. p_l0a [2,64,128]
+                # =32KB, v_l0b [2,128,128]=64KB (within the 64KB A2/B2 each).
+                p_l0a = T.alloc_L0A([2, G, BI], dtype)  # P activations
+                v_l0b = T.alloc_L0B([2, BI, BI], dtype)  # V tile (K=winm, N=128)
                 # Vector UB scratch.
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
                 p_half = T.alloc_ub([G2, BI], dtype)
@@ -472,23 +490,65 @@ def _build_swa(
                                     # 0(masked P)*NaN(garbage V) would give NaN;
                                     # contracting only winm excludes them.
                                     T.wait_flag("mte2", "mte1", KV_PV_EV)
-                                    # PV = ComputeMm2 (008, proven): gemm_v0_fixp
-                                    # fixpipes O[G,D] per N-tile from the shared cL0
-                                    # ping-pong. cl0_base=1: its 4 D-tiles rotate
-                                    # slots 1,0,1,0 (QK held slot 0 this iteration,
-                                    # already drained by QK's per-call M_MTE1 wait).
-                                    # Single K tile (k_actual=winm<=128, unitFlag
-                                    # 0b11) -- no multi-K 0b10.
-                                    T.gemm_v0_fixp(
-                                        p_l1,
-                                        kv_l1[:, :],
-                                        cL0,
-                                        workspace_o[cid, bufm, :, :],
-                                        k_actual=winm,
-                                        init=True,
-                                        cl0_base=1,
-                                        prime_drain=False,
-                                    )
+                                    # PV = ComputeMm2, DECOMPOSED to kernel-driven
+                                    # per-output-D-tile mma + fused fixpipe (= the
+                                    # gemm_v0_fixp internal nL0split=4 loop lifted
+                                    # into the kernel, so each V D-slice can enter the
+                                    # 3-slot KV ring next). Replaces the single
+                                    # gemm_v0_fixp(p_l1, kv_l1, cL0, ws_o, k_actual=
+                                    # winm, init, cl0_base=1, prime_drain=False).
+                                    #
+                                    # Each of the 4 tiles (Python-unrolled so nl/pp/cs
+                                    # are literals -- avoids symbolic flag ids):
+                                    #   wait L0AB slot -> load P->L0A, V D-tile->L0B
+                                    #   -> L0-loaded fence -> mma into cL0 ping-pong
+                                    #   slot -> free L0AB -> fixpipe to ws_o column
+                                    #   band, FUSED via unit_flag=0b11 (NO software
+                                    #   M_FIX flag between mma and fixpipe = the
+                                    #   hardware mma->fixpipe pipeline, gemm:951-967;
+                                    #   the AscendSyncInsert pass is off by default so
+                                    #   nothing is auto-inserted between them).
+                                    # pp = nl&1 (0,1,0,1) = gemm tileIdx&1 -> L0AB
+                                    # events {4,5}, L0A/L0B slots alternate. cs =
+                                    # (1+nl)&1 = 1,0,1,0 (cl0_base=1, no collision with
+                                    # QK's slot 0). L0A/L0B are loaded full width; the
+                                    # mma contracts K=winm via the [..,0:winm] slice
+                                    # (= gemm k_actual=winm; the [winm:] pad rows/cols
+                                    # are loaded but never contracted, so no 0*NaN).
+                                    # winm<=128 single K tile -> unit_flag always 0b11.
+                                    # (G/16)*(128/16)=32>=10 -> no PipeBarrier<PIPE_M>
+                                    # (= gemm:944 gate). The per-tile M_MTE1(4/5) chain
+                                    # also orders QK's whole-L0 use before these loads,
+                                    # so p_l0a/v_l0b sharing QK's A2/B2 space is safe.
+                                    for nl in range(PV_NT):
+                                        pp = nl % 2
+                                        cs = (1 + nl) % 2
+                                        T.wait_flag("m", "mte1", L0AB_EV0 + pp)
+                                        T.copy(p_l1[:, :], p_l0a[pp, :, :])
+                                        T.copy(
+                                            kv_l1[:, nl * PV_NW : (nl + 1) * PV_NW],
+                                            v_l0b[pp, :, :],
+                                        )
+                                        T.set_flag("mte1", "m", L0AB_EV0 + pp)
+                                        T.wait_flag("mte1", "m", L0AB_EV0 + pp)
+                                        T.mma(
+                                            p_l0a[pp, :, 0:winm],
+                                            v_l0b[pp, 0:winm, :],
+                                            cL0[cs, :, :],
+                                            init=True,
+                                            unit_flag=0b11,
+                                        )
+                                        T.set_flag("m", "mte1", L0AB_EV0 + pp)
+                                        T.copy(
+                                            cL0[cs, :, :],
+                                            workspace_o[
+                                                cid,
+                                                bufm,
+                                                :,
+                                                nl * PV_NW : (nl + 1) * PV_NW,
+                                            ],
+                                            unit_flag=0b11,
+                                        )
                                     # Iteration-boundary full drain (kept while
                                     # DEBUG_SERIAL): PipeBarrier<PIPE_ALL> drains
                                     # every pipe, so it still covers all cross-
