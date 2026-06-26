@@ -29,6 +29,7 @@
 | 008 | [Ascend `gemm_v0_fixp` 2-slot L0C ping-pong + 接通 `unitFlag`（= Ascend C `cL0TensorPingPong`，fixpipe∥mma 核内重叠）](008-ascend-gemm-v0-fixp-l0c-pingpong.md) | `Merge 008` `dddf3413`(原 `ca15c716`) | ✅ 已合入 `ascendc_pto`(NPU 5/5 PASS + 回归 + 1.03× parity) |
 | 009 | [Ascend `gemm_v0_fixp` K-累加 + `n_actual` + `cl0_base` + `mma` 补 `cmatrixSource` + fixpipe `nSize`（QK 走统一 fixp 路径 = `ComputeMm1`，与 PV 共享 cL0）](009-ascend-gemm-v0-fixp-kaccum.md) | `Merge 009` `9e7300f7`（原 `d61b5127`） | ✅ 已合入 `ascendc_pto`(SWA 5/5 PASS + 回归 + prefill 持平/decode 1.65×) |
 | 010 | [Ascend `gemm_v0_fixp` 加 `prime_drain`：L0AB `M_MTE1` flag 一次 prime（= `AllocEventID`/`FreeEventID`）+ 专属 event id（`L0AB_MM_EVENT`，根治常驻 flag 冲突）](010-ascend-gemm-v0-fixp-prime-once.md) | `Merge 010` `2c7e32d8`（原 `9c024295`） | ✅ 已合入 `ascendc_pto`(SWA 5/5 PASS + 回归过) |
+| 011 | [Ascend `gemm_v0_fixp` 加 `flush_last`/`do_fixpipe`：per-K-chunk 累加（内核驱动 GM→L1 链式切块 = `ComputeMm1` kL1 切分）](011-ascend-gemm-v0-fixp-kchunk.md) | `Merge 011` `a191c7d7`（原 `d1f9e516`） | ✅ 已合入 `ascendc_pto`(SWA 5/5 PASS + 回归过；算子 Layer① QK D-切块 5/5) |
 
 > 001–008 均已合入 `ascendc_pto`(`dddf3413`)。006/007 做「全链路变长 N」忠实复刻;008 给 PV
 > `gemm_v0_fixp` 加 `cL0TensorPingPong`(2-slot L0C + 硬件 `unitFlag`,fixpipe∥mma 核内重叠,= `ComputeMm2`,
