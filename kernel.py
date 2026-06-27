@@ -260,7 +260,7 @@ def _build_cfa(
     cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
     cmp_idx_shape = [total_tokens, N2, DEFAULT_BLOCK_I]
 
-    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16])
+    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16, 17])
     def kernel():
         @T.prim_func
         def sparse_attn_sharedkv_cfa(
@@ -283,6 +283,14 @@ def _build_cfa(
             workspace_o: T.Tensor([core_num, 2, G, D], accum_dtype),  # 15 PV (raw)
             # running online-softmax PV accumulator (= reference vec2ResGm):
             workspace_acc: T.Tensor([core_num, 2, G, D], accum_dtype),  # 16
+            # QK fixpipe scratch: gemm_v0_fixp's dst must be a FULL-slice BufferRegion
+            # (its _retrieve_shape rejects the BufferLoad that a bounded column slice
+            # ws_s[cid,buf,:,a:b] parses to). So each 128-col QK band fixpipes to this
+            # [G, BI] scratch (full-slice dst), then a T.copy scatters it into the
+            # band of the contiguous ws_s (T.copy accepts the BufferLoad dst).
+            workspace_qk: T.Tensor(
+                [core_num, G, BI], accum_dtype
+            ),  # 17 QK band scratch
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Cube L1/L0 allocations (kernel scope). ----
@@ -314,10 +322,13 @@ def _build_cfa(
                 )  # Brcb scratch (row_expand)
                 softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
                 # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
-                # by tile g%PRELOAD over the FULL G2 rows (m-chunks slice into them).
-                m_i = T.alloc_ub([2, G2, 1], accum_dtype)  # running max
-                denom = T.alloc_ub([2, G2, 1], accum_dtype)  # running sum
-                expmax = T.alloc_ub([2, G2, 1], accum_dtype)  # flash rescale factor
+                # [tile g%2, m-chunk, row, 1]. The m-chunk is a SEPARATE dim (not a
+                # bounded row-slice of [2,G2,1]) so a per-chunk view ring[slot, mc, :, :]
+                # is a FULL-slice BufferRegion the tile primitives accept (a bounded
+                # slice ring[slot, mc*M:(mc+1)*M, :] parses to a BufferLoad they reject).
+                m_i = T.alloc_ub([2, NMC, M_CHUNK, 1], accum_dtype)  # running max
+                denom = T.alloc_ub([2, NMC, M_CHUNK, 1], accum_dtype)  # running sum
+                expmax = T.alloc_ub([2, NMC, M_CHUNK, 1], accum_dtype)  # flash rescale
 
                 # ============================ CUBE ============================
                 with T.Scope("C"):
@@ -406,17 +417,14 @@ def _build_cfa(
                                                         )
                                                 T.barrier_all()
                                                 # 2 D-halves accumulate into cL0[0] then
-                                                # fixpipe this 128-col band to ws_s.
+                                                # fixpipe to the [G,BI] scratch (full-slice
+                                                # dst the gemm accepts), then scatter into
+                                                # this 128-col band of the contiguous ws_s.
                                                 T.gemm_v0_fixp(
                                                     q_l1[0, :, :],
                                                     k_l1[0, :, :],
                                                     cL0,
-                                                    workspace_s[
-                                                        cid,
-                                                        buf,
-                                                        :,
-                                                        cb * BI : (cb + 1) * BI,
-                                                    ],
+                                                    workspace_qk[cid, :, :],
                                                     k_actual=D2,
                                                     transpose_B=True,
                                                     init=True,
@@ -430,12 +438,7 @@ def _build_cfa(
                                                     q_l1[1, :, :],
                                                     k_l1[1, :, :],
                                                     cL0,
-                                                    workspace_s[
-                                                        cid,
-                                                        buf,
-                                                        :,
-                                                        cb * BI : (cb + 1) * BI,
-                                                    ],
+                                                    workspace_qk[cid, :, :],
                                                     k_actual=D2,
                                                     transpose_B=True,
                                                     init=False,
@@ -444,6 +447,16 @@ def _build_cfa(
                                                     prime_drain=True,
                                                     flush_last=True,
                                                     do_fixpipe=True,
+                                                )
+                                                T.barrier_all()
+                                                T.copy(
+                                                    workspace_qk[cid, :, :],
+                                                    workspace_s[
+                                                        cid,
+                                                        buf,
+                                                        :,
+                                                        cb * BI : (cb + 1) * BI,
+                                                    ],
                                                 )
                                                 T.barrier_all()
                             # fire every g<GLOOP (incl. invalid tiles) to keep the
@@ -617,6 +630,9 @@ def _build_cfa(
                                         tw_a = (tw + 15) // 16 * 16
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
+                                            # copy this m-chunk's [M_CHUNK, 512] score
+                                            # row from the contiguous ws_s (dst s_ub is a
+                                            # full Buffer, so T.copy deduces the extent).
                                             T.copy(
                                                 workspace_s[
                                                     cid,
@@ -633,13 +649,12 @@ def _build_cfa(
                                             T.barrier_all()
                                             T.tile.mul(s_ub, s_ub, softmax_scale)
                                             T.barrier_all()
-                                            mr0 = mc * M_CHUNK
                                             if is_first:
                                                 T.tile.softmax_flash_v2(
                                                     s_ub,
-                                                    denom[buf, mr0 : mr0 + M_CHUNK, :],
-                                                    m_i[buf, mr0 : mr0 + M_CHUNK, :],
-                                                    expmax[buf, mr0 : mr0 + M_CHUNK, :],
+                                                    denom[buf, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                    expmax[buf, mc, :, :],
                                                     s_ub,
                                                     ones_ub,
                                                     sink_ub,
@@ -651,12 +666,12 @@ def _build_cfa(
                                             else:
                                                 T.tile.softmax_flash_v2(
                                                     s_ub,
-                                                    denom[buf, mr0 : mr0 + M_CHUNK, :],
-                                                    m_i[buf, mr0 : mr0 + M_CHUNK, :],
-                                                    expmax[buf, mr0 : mr0 + M_CHUNK, :],
+                                                    denom[buf, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                    expmax[buf, mc, :, :],
                                                     s_ub,
-                                                    denom[prev, mr0 : mr0 + M_CHUNK, :],
-                                                    m_i[prev, mr0 : mr0 + M_CHUNK, :],
+                                                    denom[prev, mc, :, :],
+                                                    m_i[prev, mc, :, :],
                                                     softmax_tmp,
                                                     softmax_cmp,
                                                     tw_a,
@@ -670,8 +685,11 @@ def _build_cfa(
                                                 M_CHUNK * S2_BASE,
                                             )
                                             T.barrier_all()
+                                            # src p_half is a full Buffer (extent
+                                            # deducible) -> dst ws_p slice may be a
+                                            # BufferLoad (T.copy needs one side w/ extent).
                                             T.copy(
-                                                p_half[:, 0:S2_BASE],
+                                                p_half,
                                                 workspace_p[
                                                     cid,
                                                     buf,
@@ -706,7 +724,6 @@ def _build_cfa(
                                         tok = q_prefix[b] + s
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
-                                            mr0 = mc * M_CHUNK
                                             T.copy(
                                                 workspace_o[
                                                     cid, bufo, r0 : r0 + M_CHUNK, :
@@ -726,9 +743,7 @@ def _build_cfa(
                                                 T.tile.row_expand_mul_nd(
                                                     acc_pre,
                                                     acc_pre,
-                                                    expmax[
-                                                        bufo, mr0 : mr0 + M_CHUNK, :
-                                                    ],
+                                                    expmax[bufo, mc, :, :],
                                                     brcb_d,
                                                 )
                                                 T.barrier_all()
@@ -739,7 +754,7 @@ def _build_cfa(
                                                 T.tile.row_expand_div(
                                                     o_ub,
                                                     o_ub,
-                                                    denom[bufo, mr0 : mr0 + M_CHUNK, :],
+                                                    denom[bufo, mc, :, :],
                                                     brcb_d,
                                                 )
                                                 T.barrier_all()
@@ -756,12 +771,12 @@ def _build_cfa(
                                                 )
                                                 T.tile.ln(
                                                     lse_ub,
-                                                    denom[bufo, mr0 : mr0 + M_CHUNK, :],
+                                                    denom[bufo, mc, :, :],
                                                 )
                                                 T.tile.add(
                                                     lse_ub,
                                                     lse_ub,
-                                                    m_i[bufo, mr0 : mr0 + M_CHUNK, :],
+                                                    m_i[bufo, mc, :, :],
                                                 )
                                                 T.copy(
                                                     lse_ub, LSE[tok, r0 : r0 + M_CHUNK]
