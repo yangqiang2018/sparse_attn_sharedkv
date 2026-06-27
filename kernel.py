@@ -7,10 +7,11 @@ This module is the kernel half of the op whose host wrapper lives in
 function with 11 positional tensors (``out_idx=[11, 12]`` ⇒ returns
 ``(Output, LSE)``; workspaces are auto-allocated via ``workspace_idx``).
 
-Scope of THIS file so far: the **SWA** (sliding-window attention,
-``scenario == 1``) path only -- a faithful TileLang port of the Ascend C
-``SparseAttnSharedkvSwa`` kernel (op_kernel/arch32/sparse_attn_sharedkv_swa_*).
-SCFA/CFA (``scenario`` 2/3) are not implemented yet and raise.
+Scope of THIS file: **SWA** (``scenario == 1``, :func:`_build_swa`) and **CFA**
+(``scenario == 2``, :func:`_build_cfa`) -- faithful TileLang ports of the Ascend C
+``SparseAttnSharedkvSwa`` kernel (op_kernel/arch32/sparse_attn_sharedkv_swa_*); CFA
+is the same class's ``CFA_TEMPLATE`` multi-KV-tile online-softmax path. SCFA
+(``scenario == 3``) is not implemented yet and raises.
 
 Faithful mapping to the Ascend C SWA (per query row ``s`` of batch ``b``):
 
@@ -95,20 +96,45 @@ def build_sparse_attn_sharedkv(
     Returns a callable taking the 11 input tensors and returning
     ``(Output, LSE)``. See module docstring for the SWA contract.
     """
-    if scenario != 1:
+    if scenario not in (1, 2):
         raise NotImplementedError(
-            f"only SWA (scenario=1) is implemented; got scenario={scenario} (SCFA/CFA pending)"
+            f"only SWA (scenario=1) and CFA (scenario=2) are implemented; got scenario={scenario} (SCFA=3 pending)"
         )
     if n_kv_heads != 1 or n_heads != 64 or head_dim != 512:
         raise ValueError(
-            f"SWA kernel assumes N1=64, N2=1, D=512 (got N1={n_heads}, N2={n_kv_heads}, D={head_dim})"
+            f"kernel assumes N1=64, N2=1, D=512 (got N1={n_heads}, N2={n_kv_heads}, D={head_dim})"
         )
     if ori_win_left + 1 > DEFAULT_BLOCK_I:
         raise ValueError(
-            f"ori_win_left={ori_win_left} exceeds single-tile window (BI={DEFAULT_BLOCK_I}); multi-tile SWA not implemented yet"
+            f"ori_win_left={ori_win_left} exceeds single-tile window (BI={DEFAULT_BLOCK_I}); the ori window is one tile for both SWA and CFA"
         )
 
-    return _build_swa(
+    if scenario == 1:
+        # SWA: single ori KV-tile (window <= 128), degenerate online softmax.
+        return _build_swa(
+            batch=batch,
+            max_seq=max_seq,
+            total_tokens=total_tokens,
+            ori_block_num=ori_block_num,
+            ori_block_size=ori_block_size,
+            ori_table_len=ori_table_len,
+            cmp_block_num=cmp_block_num,
+            cmp_block_size=cmp_block_size,
+            cmp_table_len=cmp_table_len,
+            n_heads=n_heads,
+            head_dim=head_dim,
+            ori_win_left=ori_win_left,
+            softmax_scale=float(softmax_scale),
+            dtype=dtype,
+            core_num=core_num,
+        )
+
+    # CFA (scenario 2): the reference's SWA class with templateMode==CFA_TEMPLATE.
+    # = SWA + a cmp KV segment (read sequentially via copy_pa, no topk/gather) →
+    # multi-tile s2 sequence (ori tiles + cmp tiles) threaded by one online-softmax
+    # flash-accumulation chain + PV rescale. cmp segment length per task =
+    # actCmpS2Size = (cmpMaskRight + s1EndIdx + 1) / cmp_ratio (swa_kernel.h:378-381).
+    return _build_cfa(
         batch=batch,
         max_seq=max_seq,
         total_tokens=total_tokens,
@@ -121,10 +147,649 @@ def build_sparse_attn_sharedkv(
         n_heads=n_heads,
         head_dim=head_dim,
         ori_win_left=ori_win_left,
+        cmp_ratio=cmp_ratio,
         softmax_scale=float(softmax_scale),
         dtype=dtype,
         core_num=core_num,
     )
+
+
+def _build_cfa(
+    *,
+    batch,
+    max_seq,
+    total_tokens,
+    ori_block_num,
+    ori_block_size,
+    ori_table_len,
+    cmp_block_num,
+    cmp_block_size,
+    cmp_table_len,
+    n_heads,
+    head_dim,
+    ori_win_left,
+    cmp_ratio,
+    softmax_scale,
+    dtype,
+    core_num,
+):
+    """CFA (scenario 2) = the reference SWA class's CFA_TEMPLATE path: SWA + a cmp
+    KV segment read sequentially via copy_pa (NO topk / NO gather -- that is SCFA).
+
+    Reverse-degenerates our SWA single-tile kernel back to the reference's
+    multi-KV-tile online softmax. Instruction-level faithful (verified): every op
+    maps to an existing primitive emitting the exact reference instruction
+    (copy_pa->DataCopyPA, gemm_v0_fixp->Mmad/Fixpipe, softmax_flash_v2->SoftmaxFlashV2,
+    row_expand_div->RowDivs, row_expand_mul_nd[013]->RowMuls, T.copy->DataCopyPad,
+    T.set_flag->MTE3_MTE2 fence); the rest is pure kernel structure mirroring
+    ProcessBalance / SoftmaxFlashV2Compute / DealBmm2ResBaseBlock.
+
+    STRUCTURE (verified against swa_kernel.h:728-769 ProcessBalance/PreloadPipeline):
+    the reference flattens (bN2, gS1, s2) into a single ``gloop`` that advances PER
+    s2-TILE; its 3-stage preload is, at iteration g, cube QK(g)+PV(g-1) and vector
+    softmax(g-1)+output(g-2) -- IDENTICAL to our SWA depth-3 pipeline with the loop
+    unit changed from "task j" to "global tile g". So this is _build_swa generalised:
+    ``for g`` over ``n_iter * MAX_TILES`` flattened tiles (task = g//MAX_TILES, tile =
+    g%MAX_TILES; padding tiles beyond a task's s2LoopTimes are skipped by isValid, the
+    same way SWA skips invalid tasks), per-tile (ori/cmp) scalar decode, online softmax
+    chaining via the g%preLoadNum ring, and the PV rescale.
+
+    cmp tiles are up to s2BaseSize=512 columns (vs ori <=128): QK loops 128-col blocks
+    (ComputeMm1 nL1Loops, block_cube.h:353), PV K-accumulates 128-row sub-blocks into
+    one cL0 then fixpipes (ComputeMm2 kL1/kL0, :638-672), and the vector m-chunks rows
+    (DealBmm1/2 mSplit) so a [<=16,512] tile fits UB.
+
+    STAGE 1 (this build = correctness-first): the multi-tile MATH (column-block QK,
+    K-accumulate PV, online softmax chaining, PV rescale, vec2ResGm accumulator, m
+    chunking) under COARSE barriers (T.barrier_all between every cube load/compute and
+    vector stage; gemm_v0_fixp prime_drain=True self-contained) -- mirroring SWA's own
+    DEBUG_SERIAL bring-up. STAGE 2 (perf, after correctness): swap barriers for the KV
+    3-ring + directional pipe flags + cross-task gloop overlap, exactly like SWA's
+    Layer 3/4/5. The cube<->vector cross-flags (EV_QK/EV_P/EV_PV) keep the depth-3
+    overlap and fire every g (even invalid) to stay count-balanced, as in SWA.
+
+    Watch (high risk): ring slot off-by-one (softmax in=(g-2)%2 if !isFirst else sink,
+    out=(g-1)%2; rescale prev=vec2ResGm[(g-3)%2], expmax=(g-2)%2 -- verified consistent
+    with mod-2 under the depth-3 lag); cmp tile width 512 vs ori <=128; UB budget.
+    """
+    N1 = n_heads  # query heads (= 64)
+    N2 = 1  # kv heads
+    D = head_dim  # head dim (= 512)
+    D2 = D // 2  # 256: QK D-chunk (kL1) width -- function-scope int (see _build_swa)
+    G = N1 // N2  # GQA group = rows per task (= 64)
+    BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
+    PV_NT = D // BI  # 4 output-D tiles (= ComputeMm2 nL1Loops)
+    PV_NW = BI  # 128: each output-D tile width
+    VEC_NUM = 2  # 2 vector cores per cube core
+    G2 = G // VEC_NUM  # 32: rows per vector core
+    BLK = 8  # FP32 elems per 32B block (Brcb fan-out for row_expand)
+    S2_BASE = 512  # cmp tile width = reference s2BaseSize (metadata.py:319)
+    MAX_COLBLK = S2_BASE // BI  # 4: max 128-col QK blocks per (cmp) tile
+    # preLoadNum = 2 (online-softmax ring depth); the rings are [2, ...] / g%2.
+    # Vector m-chunk: a [M_CHUNK, 512] fp32 tile must fit UB alongside the rescale
+    # buffers. M_CHUNK=8 -> NMC=4 chunks; conservative for Stage 1 (Stage 2 may widen
+    # to 16 = the reference's mSplit for columnCount=512).
+    M_CHUNK = 8
+    NMC = G2 // M_CHUNK  # 4 m-chunks per vector core
+
+    accum_dtype = "float"
+    idx_dtype = "int32"
+    out_cast_mode = "CAST_RINT" if dtype == "bfloat16" else "CAST_ROUND"
+    # SoftmaxFlashV2 shared scratch (= Ascend C softmaxTmpUb / tmpBuff1).
+    SOFTMAX_TMP_BYTES = 32768
+
+    # Max cmp tiles per task (compile-time upper bound). cmp length per task =
+    # (s_global+1)//cmp_ratio <= max_seq//cmp_ratio; tiled at S2_BASE.
+    max_cmp_len = (max_seq + cmp_ratio - 1) // cmp_ratio
+    MAX_CMP_TILES = (max_cmp_len + S2_BASE - 1) // S2_BASE
+    MAX_TILES = 1 + MAX_CMP_TILES  # 1 ori tile + cmp tiles
+
+    block_num = batch * max_seq
+    n_iter = (block_num + core_num - 1) // core_num  # tasks per core (ceil)
+    # Flattened per-core tile iterations: each task occupies MAX_TILES g-slots
+    # (padding tiles skipped via isValid). gloop advances per tile, g%PRELOAD rings.
+    GLOOP = n_iter * MAX_TILES
+
+    # Cube<->vector cross-core handshake event ids (= reference syncC1V1/V1C2/C2V2).
+    EV_QK = 0  # cube -> vector: QK score (ws_s) ready
+    EV_P = 1  # vector -> cube: softmax P (ws_p) ready
+    EV_PV = 2  # cube -> vector: PV result (ws_o) ready
+
+    q_shape = [total_tokens, N1, D]
+    ori_kv_shape = [ori_block_num, ori_block_size, N2, D]
+    cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
+    cmp_idx_shape = [total_tokens, N2, DEFAULT_BLOCK_I]
+
+    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16])
+    def kernel():
+        @T.prim_func
+        def sparse_attn_sharedkv_cfa(
+            Q: T.Tensor(q_shape, dtype),  # 0
+            ori_kv: T.Tensor(ori_kv_shape, dtype),  # 1  (ori shared K & V)
+            ori_block_table: T.Tensor([batch, ori_table_len], idx_dtype),  # 2
+            cmp_kv: T.Tensor(cmp_kv_shape, dtype),  # 3  (cmp shared K & V)
+            cmp_block_table: T.Tensor([batch, cmp_table_len], idx_dtype),  # 4
+            cmp_indices: T.Tensor(cmp_idx_shape, idx_dtype),  # 5  (unused, CFA = dense)
+            q_prefix: T.Tensor([batch], idx_dtype),  # 6  flat-token base
+            act_q_lens: T.Tensor([batch], idx_dtype),  # 7  per-batch q len
+            seqused_kv: T.Tensor([batch], idx_dtype),  # 8  per-batch ori kv len
+            sinks: T.Tensor([N1], accum_dtype),  # 9  per-head sink
+            metadata: T.Tensor([SAS_META_SIZE], idx_dtype),  # 10 (unused, v1)
+            Output: T.Tensor(q_shape, dtype),  # 11 out
+            LSE: T.Tensor([total_tokens, N1], accum_dtype),  # 12 out
+            # cube<->vector workspaces, per core, ring-buffered (dim 1 = g%2):
+            workspace_s: T.Tensor([core_num, 2, G, S2_BASE], accum_dtype),  # 13 QKᵀ
+            workspace_p: T.Tensor([core_num, 2, G, S2_BASE], dtype),  # 14 softmax P
+            workspace_o: T.Tensor([core_num, 2, G, D], accum_dtype),  # 15 PV (raw)
+            # running online-softmax PV accumulator (= reference vec2ResGm):
+            workspace_acc: T.Tensor([core_num, 2, G, D], accum_dtype),  # 16
+        ):
+            with T.Kernel(core_num, is_npu=True) as (cid, vid):
+                # ---- Cube L1/L0 allocations (kernel scope). ----
+                # Q/K as two 256-wide D-halves (ComputeMm1 kL1Loops=2). For Stage 1
+                # K uses dedicated buffers + barriers (no KV ring -- that is Stage 2).
+                q_l1 = T.alloc_L1([2, G, D2], dtype)  # Q D-halves
+                k_l1 = T.alloc_L1([2, BI, D2], dtype)  # K D-halves (one 128-col block)
+                p_l1 = T.alloc_L1([G, S2_BASE], dtype)  # P (up to 512 wide)
+                v_l1 = T.alloc_L1([BI, D2], dtype)  # V tile [krows<=128, 128]
+                cL0 = T.alloc_L0C([2, G, BI], accum_dtype)  # shared QK/PV L0C
+                p_l0a = T.alloc_L0A([G, BI], dtype)  # P activations (PV)
+                v_l0b = T.alloc_L0B([BI, BI], dtype)  # V tile (PV, K=krows, N=128)
+                # ---- Vector UB allocations (m-chunked to M_CHUNK rows). ----
+                s_ub = T.alloc_ub(
+                    [M_CHUNK, S2_BASE], accum_dtype
+                )  # score / P (in-place)
+                softmax_cmp = T.alloc_ub([M_CHUNK, S2_BASE], accum_dtype)  # compaction
+                p_half = T.alloc_ub([M_CHUNK, S2_BASE], dtype)  # cast P for cube
+                o_ub = T.alloc_ub([M_CHUNK, D], accum_dtype)  # PV partial / accumulator
+                acc_pre = T.alloc_ub(
+                    [M_CHUNK, D], accum_dtype
+                )  # prev accumulator (rescale)
+                o_half = T.alloc_ub([M_CHUNK, D], dtype)  # cast output
+                sink_ub = T.alloc_ub([M_CHUNK, 1], accum_dtype)
+                lse_ub = T.alloc_ub([M_CHUNK, 1], accum_dtype)
+                ones_ub = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # in_sum seed (1.0)
+                brcb_d = T.alloc_ub(
+                    [M_CHUNK, BLK], accum_dtype
+                )  # Brcb scratch (row_expand)
+                softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
+                # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
+                # by tile g%PRELOAD over the FULL G2 rows (m-chunks slice into them).
+                m_i = T.alloc_ub([2, G2, 1], accum_dtype)  # running max
+                denom = T.alloc_ub([2, G2, 1], accum_dtype)  # running sum
+                expmax = T.alloc_ub([2, G2, 1], accum_dtype)  # flash rescale factor
+
+                # ============================ CUBE ============================
+                with T.Scope("C"):
+                    for g in T.serial(GLOOP + 1):
+                        # ---- QK for tile g ----
+                        if g < GLOOP:
+                            buf = g % 2
+                            task = g // MAX_TILES
+                            tile = g % MAX_TILES
+                            pid = task * core_num + cid
+                            if pid < block_num:
+                                b = T.cast(pid // max_seq, "int32")
+                                s = T.cast(pid % max_seq, "int32")
+                                act_q = act_q_lens[b]
+                                if s < act_q:
+                                    act_kv = seqused_kv[b]
+                                    s_global = act_kv - act_q + s
+                                    act_cmp = (s_global + 1) // cmp_ratio
+                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    s2lt = 1 + cmp_tiles
+                                    if tile < s2lt:
+                                        is_ori = tile == 0
+                                        ori_left = T.max(s_global - ori_win_left, 0)
+                                        win = s_global + 1 - ori_left
+                                        rel = tile - 1
+                                        is_last = tile == s2lt - 1
+                                        # tile column width (ori<=128 / cmp<=512 tail).
+                                        tw = T.if_then_else(
+                                            is_ori,
+                                            win,
+                                            T.if_then_else(
+                                                is_last,
+                                                act_cmp - rel * S2_BASE,
+                                                S2_BASE,
+                                            ),
+                                        )
+                                        s2base = T.if_then_else(
+                                            is_ori, ori_left, rel * S2_BASE
+                                        )
+                                        tok = q_prefix[b] + s
+                                        # load Q D-halves (whole G rows, both halves).
+                                        T.copy(Q[tok, :, 0:D2], q_l1[0, :, :])
+                                        T.copy(Q[tok, :, D2:D], q_l1[1, :, :])
+                                        T.barrier_all()
+                                        # QK over 128-col blocks (ComputeMm1 nL1Loops).
+                                        for cb in range(MAX_COLBLK):
+                                            if cb * BI < tw:
+                                                ncols = T.min(BI, tw - cb * BI)
+                                                ncols_a = (ncols + 15) // 16 * 16
+                                                for h in range(2):
+                                                    if is_ori:
+                                                        T.copy_pa(
+                                                            k_l1[h, :, :],
+                                                            ori_kv,
+                                                            ori_block_table,
+                                                            ori_block_size,
+                                                            N2,
+                                                            D,
+                                                            ori_block_size * N2 * D,
+                                                            ori_table_len,
+                                                            D2,
+                                                            ncols,
+                                                            BI,
+                                                            b,
+                                                            0,
+                                                            s2base + cb * BI,
+                                                            h * D2,
+                                                        )
+                                                    else:
+                                                        T.copy_pa(
+                                                            k_l1[h, :, :],
+                                                            cmp_kv,
+                                                            cmp_block_table,
+                                                            cmp_block_size,
+                                                            N2,
+                                                            D,
+                                                            cmp_block_size * N2 * D,
+                                                            cmp_table_len,
+                                                            D2,
+                                                            ncols,
+                                                            BI,
+                                                            b,
+                                                            0,
+                                                            s2base + cb * BI,
+                                                            h * D2,
+                                                        )
+                                                T.barrier_all()
+                                                # 2 D-halves accumulate into cL0[0] then
+                                                # fixpipe this 128-col band to ws_s.
+                                                T.gemm_v0_fixp(
+                                                    q_l1[0, :, :],
+                                                    k_l1[0, :, :],
+                                                    cL0,
+                                                    workspace_s[
+                                                        cid,
+                                                        buf,
+                                                        :,
+                                                        cb * BI : (cb + 1) * BI,
+                                                    ],
+                                                    k_actual=D2,
+                                                    transpose_B=True,
+                                                    init=True,
+                                                    n_actual=ncols_a,
+                                                    cl0_base=0,
+                                                    prime_drain=True,
+                                                    flush_last=False,
+                                                    do_fixpipe=False,
+                                                )
+                                                T.gemm_v0_fixp(
+                                                    q_l1[1, :, :],
+                                                    k_l1[1, :, :],
+                                                    cL0,
+                                                    workspace_s[
+                                                        cid,
+                                                        buf,
+                                                        :,
+                                                        cb * BI : (cb + 1) * BI,
+                                                    ],
+                                                    k_actual=D2,
+                                                    transpose_B=True,
+                                                    init=False,
+                                                    n_actual=ncols_a,
+                                                    cl0_base=0,
+                                                    prime_drain=True,
+                                                    flush_last=True,
+                                                    do_fixpipe=True,
+                                                )
+                                                T.barrier_all()
+                            # fire every g<GLOOP (incl. invalid tiles) to keep the
+                            # cross-flag count balanced with the vector's waits.
+                            T.set_cross_flag("FIX", EV_QK)
+                        # ---- PV for tile g-1 ----
+                        if g >= 1:
+                            T.wait_cross_flag(EV_P)
+                            gm = g - 1
+                            bufm = gm % 2
+                            taskm = gm // MAX_TILES
+                            tilem = gm % MAX_TILES
+                            pidm = taskm * core_num + cid
+                            if pidm < block_num:
+                                bm = T.cast(pidm // max_seq, "int32")
+                                sm = T.cast(pidm % max_seq, "int32")
+                                if sm < act_q_lens[bm]:
+                                    act_kvm = seqused_kv[bm]
+                                    s_globalm = act_kvm - act_q_lens[bm] + sm
+                                    act_cmpm = (s_globalm + 1) // cmp_ratio
+                                    cmp_tilesm = (act_cmpm + S2_BASE - 1) // S2_BASE
+                                    s2ltm = 1 + cmp_tilesm
+                                    if tilem < s2ltm:
+                                        is_orim = tilem == 0
+                                        ori_leftm = T.max(s_globalm - ori_win_left, 0)
+                                        winm = s_globalm + 1 - ori_leftm
+                                        relm = tilem - 1
+                                        is_lastm = tilem == s2ltm - 1
+                                        twm = T.if_then_else(
+                                            is_orim,
+                                            winm,
+                                            T.if_then_else(
+                                                is_lastm,
+                                                act_cmpm - relm * S2_BASE,
+                                                S2_BASE,
+                                            ),
+                                        )
+                                        s2basem = T.if_then_else(
+                                            is_orim, ori_leftm, relm * S2_BASE
+                                        )
+                                        # load P [G, twm] from ws_p into p_l1.
+                                        T.copy(
+                                            workspace_p[cid, bufm, :, 0:S2_BASE],
+                                            p_l1[:, :],
+                                        )
+                                        T.barrier_all()
+                                        # PV: 4 output-D tiles, each K-accumulating the
+                                        # 128-row sub-blocks of the tile into one cL0.
+                                        for nl in range(PV_NT):
+                                            for ks in range(MAX_COLBLK):
+                                                if ks * BI < twm:
+                                                    krows = T.min(BI, twm - ks * BI)
+                                                    is_first_ks = ks == 0
+                                                    if is_orim:
+                                                        T.copy_pa(
+                                                            v_l1[:, :],
+                                                            ori_kv,
+                                                            ori_block_table,
+                                                            ori_block_size,
+                                                            N2,
+                                                            D,
+                                                            ori_block_size * N2 * D,
+                                                            ori_table_len,
+                                                            PV_NW,
+                                                            krows,
+                                                            BI,
+                                                            bm,
+                                                            0,
+                                                            s2basem + ks * BI,
+                                                            nl * PV_NW,
+                                                        )
+                                                    else:
+                                                        T.copy_pa(
+                                                            v_l1[:, :],
+                                                            cmp_kv,
+                                                            cmp_block_table,
+                                                            cmp_block_size,
+                                                            N2,
+                                                            D,
+                                                            cmp_block_size * N2 * D,
+                                                            cmp_table_len,
+                                                            PV_NW,
+                                                            krows,
+                                                            BI,
+                                                            bm,
+                                                            0,
+                                                            s2basem + ks * BI,
+                                                            nl * PV_NW,
+                                                        )
+                                                    T.barrier_all()
+                                                    T.copy(
+                                                        p_l1[
+                                                            :, ks * BI : (ks + 1) * BI
+                                                        ],
+                                                        p_l0a,
+                                                        real_k=krows,
+                                                    )
+                                                    T.copy(
+                                                        v_l1[:, 0:PV_NW],
+                                                        v_l0b,
+                                                        real_k=krows,
+                                                    )
+                                                    T.barrier_all()
+                                                    # unit_flag=0 sets the field (no
+                                                    # uninit-read hang on accumulate)
+                                                    # and skips the mma->fixpipe fusion
+                                                    # -- correct under the Stage-1
+                                                    # barriers (no fused fixpipe pairing).
+                                                    T.mma(
+                                                        p_l0a,
+                                                        v_l0b,
+                                                        cL0[0, :, :],
+                                                        init=is_first_ks,
+                                                        k_actual=krows,
+                                                        unit_flag=0,
+                                                    )
+                                                    T.barrier_all()
+                                            # standalone fixpipe (unitFlag=0) cL0[0] ->
+                                            # this output-D band (no fusion under barriers).
+                                            T.copy(
+                                                cL0[0, :, :],
+                                                workspace_o[
+                                                    cid,
+                                                    bufm,
+                                                    :,
+                                                    nl * PV_NW : (nl + 1) * PV_NW,
+                                                ],
+                                            )
+                                            T.barrier_all()
+                            # fire every g>=1 (incl. invalid) for count balance.
+                            T.set_cross_flag("FIX", EV_PV)
+
+                # =========================== VECTOR ===========================
+                with T.Scope("V"):
+                    T.tile.fill(ones_ub, T.float32(1.0))
+                    for g in T.serial(1, GLOOP + 2):
+                        # ---- softmax for tile g-1 ----
+                        if g < GLOOP + 1:
+                            T.wait_cross_flag(EV_QK)
+                            gs = g - 1
+                            buf = gs % 2
+                            prev = (gs - 1) % 2
+                            task = gs // MAX_TILES
+                            tile = gs % MAX_TILES
+                            pid = task * core_num + cid
+                            if pid < block_num:
+                                b = T.cast(pid // max_seq, "int32")
+                                s = T.cast(pid % max_seq, "int32")
+                                act_q = act_q_lens[b]
+                                if s < act_q:
+                                    act_kv = seqused_kv[b]
+                                    s_global = act_kv - act_q + s
+                                    act_cmp = (s_global + 1) // cmp_ratio
+                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    s2lt = 1 + cmp_tiles
+                                    if tile < s2lt:
+                                        is_first = tile == 0
+                                        ori_left = T.max(s_global - ori_win_left, 0)
+                                        win = s_global + 1 - ori_left
+                                        rel = tile - 1
+                                        is_last = tile == s2lt - 1
+                                        tw = T.if_then_else(
+                                            tile == 0,
+                                            win,
+                                            T.if_then_else(
+                                                is_last,
+                                                act_cmp - rel * S2_BASE,
+                                                S2_BASE,
+                                            ),
+                                        )
+                                        tw_a = (tw + 15) // 16 * 16
+                                        for mc in range(NMC):
+                                            r0 = vid * G2 + mc * M_CHUNK
+                                            T.copy(
+                                                workspace_s[
+                                                    cid,
+                                                    buf,
+                                                    r0 : r0 + M_CHUNK,
+                                                    0:S2_BASE,
+                                                ],
+                                                s_ub[:, :],
+                                            )
+                                            T.copy(
+                                                sinks[r0 : r0 + M_CHUNK],
+                                                sink_ub,
+                                            )
+                                            T.barrier_all()
+                                            T.tile.mul(s_ub, s_ub, softmax_scale)
+                                            T.barrier_all()
+                                            mr0 = mc * M_CHUNK
+                                            if is_first:
+                                                T.tile.softmax_flash_v2(
+                                                    s_ub,
+                                                    denom[buf, mr0 : mr0 + M_CHUNK, :],
+                                                    m_i[buf, mr0 : mr0 + M_CHUNK, :],
+                                                    expmax[buf, mr0 : mr0 + M_CHUNK, :],
+                                                    s_ub,
+                                                    ones_ub,
+                                                    sink_ub,
+                                                    softmax_tmp,
+                                                    softmax_cmp,
+                                                    tw_a,
+                                                    tw,
+                                                )
+                                            else:
+                                                T.tile.softmax_flash_v2(
+                                                    s_ub,
+                                                    denom[buf, mr0 : mr0 + M_CHUNK, :],
+                                                    m_i[buf, mr0 : mr0 + M_CHUNK, :],
+                                                    expmax[buf, mr0 : mr0 + M_CHUNK, :],
+                                                    s_ub,
+                                                    denom[prev, mr0 : mr0 + M_CHUNK, :],
+                                                    m_i[prev, mr0 : mr0 + M_CHUNK, :],
+                                                    softmax_tmp,
+                                                    softmax_cmp,
+                                                    tw_a,
+                                                    tw,
+                                                )
+                                            T.barrier_all()
+                                            T.tile.cast(
+                                                p_half,
+                                                s_ub,
+                                                "CAST_ROUND",
+                                                M_CHUNK * S2_BASE,
+                                            )
+                                            T.barrier_all()
+                                            T.copy(
+                                                p_half[:, 0:S2_BASE],
+                                                workspace_p[
+                                                    cid,
+                                                    buf,
+                                                    r0 : r0 + M_CHUNK,
+                                                    0:S2_BASE,
+                                                ],
+                                            )
+                                            T.barrier_all()
+                            T.set_cross_flag("MTE3", EV_P)
+                        # ---- output for tile g-2 ----
+                        if g >= 2:
+                            T.wait_cross_flag(EV_PV)
+                            go = g - 2
+                            bufo = go % 2
+                            prevo = (go - 1) % 2
+                            task = go // MAX_TILES
+                            tile = go % MAX_TILES
+                            pid = task * core_num + cid
+                            if pid < block_num:
+                                b = T.cast(pid // max_seq, "int32")
+                                s = T.cast(pid % max_seq, "int32")
+                                act_q = act_q_lens[b]
+                                if s < act_q:
+                                    act_kv = seqused_kv[b]
+                                    s_global = act_kv - act_q + s
+                                    act_cmp = (s_global + 1) // cmp_ratio
+                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    s2lt = 1 + cmp_tiles
+                                    if tile < s2lt:
+                                        not_first = tile != 0
+                                        is_last = tile == s2lt - 1
+                                        tok = q_prefix[b] + s
+                                        for mc in range(NMC):
+                                            r0 = vid * G2 + mc * M_CHUNK
+                                            mr0 = mc * M_CHUNK
+                                            T.copy(
+                                                workspace_o[
+                                                    cid, bufo, r0 : r0 + M_CHUNK, :
+                                                ],
+                                                o_ub,
+                                            )
+                                            T.barrier_all()
+                                            if not_first:
+                                                # rescale prev accumulator + add.
+                                                T.copy(
+                                                    workspace_acc[
+                                                        cid, prevo, r0 : r0 + M_CHUNK, :
+                                                    ],
+                                                    acc_pre,
+                                                )
+                                                T.barrier_all()
+                                                T.tile.row_expand_mul_nd(
+                                                    acc_pre,
+                                                    acc_pre,
+                                                    expmax[
+                                                        bufo, mr0 : mr0 + M_CHUNK, :
+                                                    ],
+                                                    brcb_d,
+                                                )
+                                                T.barrier_all()
+                                                T.tile.add(o_ub, o_ub, acc_pre)
+                                                T.barrier_all()
+                                            if is_last:
+                                                # normalize, cast, write out + LSE.
+                                                T.tile.row_expand_div(
+                                                    o_ub,
+                                                    o_ub,
+                                                    denom[bufo, mr0 : mr0 + M_CHUNK, :],
+                                                    brcb_d,
+                                                )
+                                                T.barrier_all()
+                                                T.tile.cast(
+                                                    o_half,
+                                                    o_ub,
+                                                    out_cast_mode,
+                                                    M_CHUNK * D,
+                                                )
+                                                T.barrier_all()
+                                                T.copy(
+                                                    o_half,
+                                                    Output[tok, r0 : r0 + M_CHUNK, :],
+                                                )
+                                                T.tile.ln(
+                                                    lse_ub,
+                                                    denom[bufo, mr0 : mr0 + M_CHUNK, :],
+                                                )
+                                                T.tile.add(
+                                                    lse_ub,
+                                                    lse_ub,
+                                                    m_i[bufo, mr0 : mr0 + M_CHUNK, :],
+                                                )
+                                                T.copy(
+                                                    lse_ub, LSE[tok, r0 : r0 + M_CHUNK]
+                                                )
+                                                T.barrier_all()
+                                            else:
+                                                # stash accumulator for the next tile.
+                                                T.copy(
+                                                    o_ub,
+                                                    workspace_acc[
+                                                        cid, bufo, r0 : r0 + M_CHUNK, :
+                                                    ],
+                                                )
+                                                T.barrier_all()
+                            T.set_cross_flag("MTE3", EV_PV)
+
+        return sparse_attn_sharedkv_cfa
+
+    func = kernel()
+    if os.environ.get("SAS_DUMP_SRC"):
+        try:
+            src = func.get_kernel_source()
+            with open("/tmp/cfa_gen.cpp", "w") as fh:
+                fh.write(src)
+            print(f"[SAS_DUMP_SRC] wrote {len(src)} chars to /tmp/cfa_gen.cpp")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[SAS_DUMP_SRC] get_kernel_source failed: {exc!r}")
+    return func
 
 
 def _build_swa(
