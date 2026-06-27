@@ -37,14 +37,18 @@ software-pipelined loop. Cube and vector are split MANUALLY with
 cube and vector overlap across tasks:
 
   cube   iter j:  QK(task j) -> ws_s          ||  PV(task j-1) -> ws_o
-  vector iter j:  softmax(task j) -> ws_p     ||  output(task j-1)
+  vector iter j:  softmax(task j-1) -> ws_p   ||  output(task j-2)
 
-In steady state ``cube PV(j-1) ∥ vector softmax(j)`` and
-``cube QK(j+1) ∥ vector output(j-1)`` run concurrently -- the 3-stage
-``SAS_PRELOAD_TASK_CACHE_SIZE``/``PRELOAD_NUM`` preload pipeline of the
-reference. The cube↔vector workspaces (ws_s/ws_p/ws_o) and the carried
-softmax state (denom/m_i) are double-buffered by ``j % 2`` so task j+1's
-cube does not clobber task j's data while the vector still reads it.
+This is the reference's depth-3 preload (PreloadPipeline / extraInfo0/2/1 =
+task loop/loop-1/loop-2, swa_kernel.h:745-768): the vector lags the cube by
+one task, so ``cube QK(j) ∥ vector softmax(j-1)`` and
+``cube PV(j-1) ∥ vector output(j-2)`` run concurrently and the vector never
+stalls on the cube's CURRENT QK/PV (its inputs were produced a cube-iter
+earlier). The cube↔vector workspaces (ws_s/ws_p/ws_o) and the carried
+softmax state (denom/m_i) are double-buffered by ``task % 2``; the cube's
+PV-after-softmax dependency (via the ws_p cross-flag) keeps QK(loop) ordered
+after softmax(loop-2), so a buffer's prior reader is always done before it
+is reused (mod-2 suffices at this depth).
 The reference's metadata-driven per-core balance becomes a static even
 split here (exact for the uniform fast test; cost-based balance TODO).
 """
@@ -639,19 +643,31 @@ def _build_swa(
                     T.wait_flag("mte1", "mte2", P_EV)
 
                 # =========================== VECTOR ===========================
-                # iter j: softmax(task j) -> ws_p[j%2] ; output(task j-1)
+                # DEPTH-3 (= reference PreloadPipeline, swa_kernel.h:745-768): the
+                # vector lags the cube by one task. iter j does softmax(task j-1)
+                # and output(task j-2), while the cube does QK(task j) and
+                # PV(task j-1). So softmax(j-1) reads QK(j-1)'s ws_s (set in the
+                # PREVIOUS cube iter) and runs CONCURRENT with the cube's current
+                # QK(j) -- the deeper preload of the reference's extraInfo0/2/1 =
+                # task loop / loop-1 / loop-2. Cross-flag counts stay balanced
+                # (EV_QK/EV_P/EV_PV each n_iter sets == n_iter waits); ws_s/ws_p/
+                # ws_o + m_i/denom stay mod-2 double-buffered (the cube's PV-after-
+                # softmax chain via EV_P keeps QK(loop) after softmax(loop-2), so
+                # the prior reader is done before the buffer is reused).
                 with T.Scope("V"):
                     # in_sum seed for SoftmaxFlashV2 = 1.0 (Ascend C R0); filled
                     # once, read each task as the flash running-sum initial value.
                     T.tile.fill(ones_ub, T.float32(1.0))
                     T.barrier_all()
-                    for j in T.serial(n_iter + 1):
-                        # ---- softmax stage for task j ----
-                        if j < n_iter:
+                    # j in [1, n_iter+1]: softmax(j-1) for j in [1,n_iter], output
+                    # (j-2) for j in [2,n_iter+1] -- both single-comparison guards.
+                    for j in T.serial(1, n_iter + 2):
+                        # ---- softmax stage for task j-1 ----
+                        if j < n_iter + 1:
                             T.wait_cross_flag(EV_QK)
                             T.barrier_all()
-                            pid = j * core_num + cid
-                            buf = j % 2
+                            pid = (j - 1) * core_num + cid
+                            buf = (j - 1) % 2
                             if pid < block_num:
                                 b = T.cast(pid // max_seq, "int32")
                                 s = T.cast(pid % max_seq, "int32")
@@ -713,12 +729,12 @@ def _build_swa(
                                     )
                                     T.barrier_all()
                             T.set_cross_flag("MTE3", EV_P)
-                        # ---- output stage for task j-1 ----
-                        if j >= 1:
+                        # ---- output stage for task j-2 ----
+                        if j >= 2:
                             T.wait_cross_flag(EV_PV)
                             T.barrier_all()
-                            pidm = (j - 1) * core_num + cid
-                            bufm = (j - 1) % 2
+                            pidm = (j - 2) * core_num + cid
+                            bufm = (j - 2) % 2
                             if pidm < block_num:
                                 bm = T.cast(pidm // max_seq, "int32")
                                 sm = T.cast(pidm % max_seq, "int32")
