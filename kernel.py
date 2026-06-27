@@ -92,9 +92,13 @@ def build_sparse_attn_sharedkv(
     ``(Output, LSE)``. See module docstring for the SWA contract.
     """
     if scenario != 1:
-        raise NotImplementedError(f"only SWA (scenario=1) is implemented; got scenario={scenario} (SCFA/CFA pending)")
+        raise NotImplementedError(
+            f"only SWA (scenario=1) is implemented; got scenario={scenario} (SCFA/CFA pending)"
+        )
     if n_kv_heads != 1 or n_heads != 64 or head_dim != 512:
-        raise ValueError(f"SWA kernel assumes N1=64, N2=1, D=512 (got N1={n_heads}, N2={n_kv_heads}, D={head_dim})")
+        raise ValueError(
+            f"SWA kernel assumes N1=64, N2=1, D=512 (got N1={n_heads}, N2={n_kv_heads}, D={head_dim})"
+        )
     if ori_win_left + 1 > DEFAULT_BLOCK_I:
         raise ValueError(
             f"ori_win_left={ori_win_left} exceeds single-tile window (BI={DEFAULT_BLOCK_I}); multi-tile SWA not implemented yet"
@@ -187,21 +191,20 @@ def _build_swa(
     EV_P = 1  # vector -> cube: softmax P (ws_p) ready
     EV_PV = 2  # cube -> vector: PV result (ws_o) ready
 
-    # Intra-cube MTE2->MTE1 pipe-flag event ids for the QK/PV KV buffers
-    # (kq_l1=QK's K D-halves, kv_l1=PV's V). Separate MTE2_MTE1 id namespace; must
-    # avoid the gemm template's internal {0,1} (L0AB_EVENT) and the L0AB M_MTE1
-    # {4,5}. So {2,3}. These let PV's copy_pa (MTE2 into kv_l1) overlap QK's gemm
-    # (M reading kq_l1) instead of a full barrier_all -- faithful to the
-    # reference's per-slot KV flags.
-    KV_QK_EV = 2  # kq_l1 (QK K halves) MTE2 done
-    KV_PV_EV = 3  # kv_l1 (PV V) MTE2 done
+    # KV 3-slot ring per-slot MTE2_MTE1/MTE1_MTE2 reverse-flag event ids (shared by
+    # QK's K halves + PV's V tiles). Must avoid the gemm template's internal
+    # MTE2_MTE1 self-fences ({0,1} = L0AB_EVENT) and the L0AB M_MTE1 ({4,5}); {2,3,6}
+    # is the free MTE2_MTE1 triple. {7} stays free as a temporary Q/P load fence
+    # (QP_TMP_EV) until the QP 4-ring (which needs the gemm's {0,1} gated) is built.
+    KV_EV = [2, 3, 6]
+    QP_TMP_EV = 7  # temporary Q (QK) / P (PV) MTE2->MTE1 load fence
 
     # L0AB M_MTE1 ping-pong flags. These match the gemm_v0_fixp template's
     # DEDICATED shared-mode base L0AB_MM_EVENT (=4) and +1 (=5) -- NOT the default
     # L0AB_EVENT (=0). The shared (prime_drain=False) gemm holds these two M_MTE1
     # flags SET across the whole cube loop, so they must be disjoint from the
     # template's per-call MTE2_MTE1/MTE1_MTE2 self-pair fences (which stay on
-    # {0,1}) and from the KV pipe-flags ({2,3}); {4,5} is the free pair (faithful
+    # {0,1}) and from the KV ring flags ({2,3,6}); {4,5} is the free pair (faithful
     # to the reference, which puts M_MTE1 on its own EVENT_ID3/4 disjoint from the
     # L1 flags). Primed ONCE before the cube loop (= AllocEventID,
     # block_cube.h:225-226) and drained ONCE after it (= FreeEventID, :239-240);
@@ -254,9 +257,16 @@ def _build_swa(
                 # + 2*[BI,256] + [BI,D] + [G,BI] = 64+128+128+16 = 336KB < 512KB L1.
                 q_l1_0 = T.alloc_L1([G, D2], dtype)  # Q D-half 0 (D[0:256])
                 q_l1_1 = T.alloc_L1([G, D2], dtype)  # Q D-half 1 (D[256:512])
-                kq_l1_0 = T.alloc_L1([BI, D2], dtype)  # K D-half 0
-                kq_l1_1 = T.alloc_L1([BI, D2], dtype)  # K D-half 1
-                kv_l1 = T.alloc_L1([BI, D], dtype)  # PV's V (whole)
+                # Shared KV 3-slot ring (= reference kvL1 ring): QK's 2 K D-halves
+                # and PV's 4 V D-tiles rotate through the SAME 3 slots. Slot =
+                # load_position % 3 (6 loads/task; 6 % 3 == 0 so the phase resets per
+                # task -- identical to the reference's continuous kvL1BufIter % 3
+                # since 6 is divisible by 3). K halves write the full [BI,256]; V
+                # tiles write the first [BI,128] (same copy_pa dstNzC0Stride=BI, so
+                # the slot's Nz layout is consistent for both). 3*128*256*2 = 192KB.
+                # Per-slot reverse flags (KV_EV[3]) replace the single KV_QK/PV_EV,
+                # priming the L1 ring for the eventual barrier removal.
+                kv_ring = T.alloc_L1([3, BI, D2], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
                 # INCREMENT 1 (shared cL0 buffer): one cL0TensorPingPong shared by
                 # QK and PV, faithful to the reference's single cL0TensorPingPong
@@ -319,6 +329,12 @@ def _build_swa(
                     # lifecycle (only the per-slot Wait/Set inside the tile loop).
                     T.set_flag("m", "mte1", L0AB_EV0)
                     T.set_flag("m", "mte1", L0AB_EV1)
+                    # AllocEventID (cont.): prime the 3 KV-ring slots' MTE1_MTE2
+                    # reverse flags ONCE, so the first load into each slot waits on
+                    # an already-set flag (the slot is "free"); each consume re-arms
+                    # it. Drained once after the loop (FreeEventID).
+                    for _s in range(3):
+                        T.set_flag("mte1", "mte2", KV_EV[_s])
                     for j in T.serial(n_iter + 1):
                         # ---- QK stage for task j ----
                         if j < n_iter:
@@ -344,46 +360,34 @@ def _build_swa(
                                     # startPos.dIdx=kL1*256, actHeadDim=256).
                                     T.copy(Q[tok, :, 0:D2], q_l1_0)
                                     T.copy(Q[tok, :, D2:D], q_l1_1)
-                                    T.copy_pa(
-                                        kq_l1_0,
-                                        ori_kv,
-                                        ori_block_table,
-                                        ori_block_size,
-                                        N2,
-                                        D,
-                                        ori_block_size * N2 * D,
-                                        ori_table_len,
-                                        D2,
-                                        win,
-                                        BI,
-                                        b,
-                                        0,
-                                        ori_left,
-                                        0,
-                                    )
-                                    T.copy_pa(
-                                        kq_l1_1,
-                                        ori_kv,
-                                        ori_block_table,
-                                        ori_block_size,
-                                        N2,
-                                        D,
-                                        ori_block_size * N2 * D,
-                                        ori_table_len,
-                                        D2,
-                                        win,
-                                        BI,
-                                        b,
-                                        0,
-                                        ori_left,
-                                        D2,
-                                    )
-                                    # q/kq D-halves loaded -> tag MTE2 done so
-                                    # the gemm's MTE1 L1->L0 load waits on this point-to
-                                    # -point flag instead of a full barrier_all,
-                                    # letting PV's later copy_pa(kv_l1) MTE2 overlap
-                                    # this QK gemm's M pipe.
-                                    T.set_flag("mte2", "mte1", KV_QK_EV)
+                                    # Q halves loaded -> temporary MTE2 fence (Q joins
+                                    # the QP ring in a later step; for now one flag).
+                                    T.set_flag("mte2", "mte1", QP_TMP_EV)
+                                    # K D-halves -> KV ring slots 0,1. Per-slot reverse
+                                    # flag: wait the slot's prior consumer (primed once
+                                    # / a previous task's V tile), load, signal loaded.
+                                    # = the reference's per-slot kvL1 ring (the gemm is
+                                    # unchanged -- it just reads the slot buffer passed).
+                                    for h in range(2):
+                                        T.wait_flag("mte1", "mte2", KV_EV[h])
+                                        T.copy_pa(
+                                            kv_ring[h, :, :],
+                                            ori_kv,
+                                            ori_block_table,
+                                            ori_block_size,
+                                            N2,
+                                            D,
+                                            ori_block_size * N2 * D,
+                                            ori_table_len,
+                                            D2,
+                                            win,
+                                            BI,
+                                            b,
+                                            0,
+                                            ori_left,
+                                            h * D2,
+                                        )
+                                        T.set_flag("mte2", "mte1", KV_EV[h])
                                     # QK = Q @ Kᵀ over the window; N rounds up to 16 to
                                     # match Ascend C ComputeMm1 (nL1SizeAlign =
                                     # SASAlign(window, 16)); copy_pa loads `win` KV
@@ -394,7 +398,7 @@ def _build_swa(
                                     # in the reference. [win_align:BI] stays
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
-                                    T.wait_flag("mte2", "mte1", KV_QK_EV)
+                                    T.wait_flag("mte2", "mte1", QP_TMP_EV)
                                     # Faithful QK = ComputeMm1, per-D-chunk: each
                                     # 256-wide D-half accumulates into the SAME shared
                                     # cL0 slot (cl0_base=0); chunk 0 inits + holds
@@ -404,9 +408,14 @@ def _build_swa(
                                     # after both kL1 halves, cube.h:591). k_actual=D2
                                     # is each chunk's own contraction width;
                                     # n_actual=win_align = the score's real columns.
+                                    # Each chunk reads K half from KV ring slot h; the
+                                    # per-slot MTE2_MTE1 wait gates the gemm's L1->L0,
+                                    # the MTE1_MTE2 set after releases the slot for its
+                                    # next ring user.
+                                    T.wait_flag("mte2", "mte1", KV_EV[0])
                                     T.gemm_v0_fixp(
                                         q_l1_0,
-                                        kq_l1_0,
+                                        kv_ring[0, :, :],
                                         cL0,
                                         workspace_s[cid, buf, :, :],
                                         k_actual=D2,
@@ -418,9 +427,11 @@ def _build_swa(
                                         flush_last=False,
                                         do_fixpipe=False,
                                     )
+                                    T.set_flag("mte1", "mte2", KV_EV[0])
+                                    T.wait_flag("mte2", "mte1", KV_EV[1])
                                     T.gemm_v0_fixp(
                                         q_l1_1,
-                                        kq_l1_1,
+                                        kv_ring[1, :, :],
                                         cL0,
                                         workspace_s[cid, buf, :, :],
                                         k_actual=D2,
@@ -432,6 +443,7 @@ def _build_swa(
                                         flush_last=True,
                                         do_fixpipe=True,
                                     )
+                                    T.set_flag("mte1", "mte2", KV_EV[1])
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
@@ -449,87 +461,66 @@ def _build_swa(
                                     ori_leftm = T.max(s_globalm - ori_win_left, 0)
                                     winm = s_globalm + 1 - ori_leftm
                                     T.copy(workspace_p[cid, bufm, :, :], p_l1)
-                                    # Reload the task j-1 KV window (faithful to
-                                    # the reference reloading V in Mm2). PV's V is
-                                    # still loaded whole [BI,D] here; its faithful
-                                    # per-output-D 4-slice load is Layer 2.
-                                    T.copy_pa(
-                                        kv_l1[:, :],
-                                        ori_kv,
-                                        ori_block_table,
-                                        ori_block_size,
-                                        N2,
-                                        D,
-                                        ori_block_size * N2 * D,
-                                        ori_table_len,
-                                        D,
-                                        winm,
-                                        BI,
-                                        bm,
-                                        0,
-                                        ori_leftm,
-                                        0,
-                                    )
-                                    # kv_l1 loaded (and p_l1, earlier on the
-                                    # in-order MTE2 queue) -> point-to-point flag
-                                    # instead of a full barrier_all.
-                                    T.set_flag("mte2", "mte1", KV_PV_EV)
-                                    # PV = P @ V, fixpiped per N-tile straight to
-                                    # workspace_o (L0C holds one [G,BI] tile).
-                                    # k_actual=winm: contract only the real window
-                                    # rows (faithful to Ascend C ComputeMm2's
-                                    # kSize=window). The pad rows kv_l1[winm:BI]
-                                    # are uninitialised L1 -- summing them as
-                                    # 0(masked P)*NaN(garbage V) would give NaN;
-                                    # contracting only winm excludes them.
-                                    T.wait_flag("mte2", "mte1", KV_PV_EV)
-                                    # PV = ComputeMm2, DECOMPOSED to kernel-driven
-                                    # per-output-D-tile mma + fused fixpipe (= the
-                                    # gemm_v0_fixp internal nL0split=4 loop lifted
-                                    # into the kernel, so each V D-slice can enter the
-                                    # 3-slot KV ring next). Replaces the single
-                                    # gemm_v0_fixp(p_l1, kv_l1, cL0, ws_o, k_actual=
-                                    # winm, init, cl0_base=1, prime_drain=False).
+                                    # P loaded -> temporary MTE2 fence (P joins the QP
+                                    # ring in a later step; for now one flag, shared
+                                    # with QK's Q fence -- sequential within an
+                                    # iteration so the set/wait pairs don't interfere).
+                                    T.set_flag("mte2", "mte1", QP_TMP_EV)
+                                    T.wait_flag("mte2", "mte1", QP_TMP_EV)
+                                    # PV = ComputeMm2, decomposed (= gemm_v0_fixp
+                                    # nL0split=4) + V D-tiles into the SHARED KV 3-ring.
+                                    # Each of the 4 output-D tiles: LOAD V tile -> ring
+                                    # slot (per-slot reverse flag), then CONSUME it (L0
+                                    # load + mma + fused fixpipe). load+consume are
+                                    # INTERLEAVED per tile so the per-slot MTE1_MTE2
+                                    # flag orders slot reuse (slot 2 is reused by tile 0
+                                    # and tile 3) -- a two-pass load-all/consume-all
+                                    # would overwrite slot 2 before tile 0 is consumed.
+                                    # Slot = (2+nl)%3 = 2,0,1,2 (continues the ring after
+                                    # QK's K halves took slots 0,1; 6 loads/task, 6%3==0
+                                    # = the reference's continuous kvL1BufIter%3).
                                     #
-                                    # Each of the 4 tiles (Python-unrolled so nl/pp/cs
-                                    # are literals -- avoids symbolic flag ids):
-                                    #   wait L0AB slot -> load P->L0A, V D-tile->L0B
-                                    #   -> L0-loaded fence -> mma into cL0 ping-pong
-                                    #   slot -> free L0AB -> fixpipe to ws_o column
-                                    #   band, FUSED via unit_flag=0b11 (NO software
-                                    #   M_FIX flag between mma and fixpipe = the
-                                    #   hardware mma->fixpipe pipeline, gemm:951-967;
-                                    #   the AscendSyncInsert pass is off by default so
-                                    #   nothing is auto-inserted between them).
-                                    # pp = nl&1 (0,1,0,1) = gemm tileIdx&1 -> L0AB
-                                    # events {4,5}, L0A/L0B slots alternate. cs =
-                                    # (1+nl)&1 = 1,0,1,0 (cl0_base=1, no collision with
-                                    # QK's slot 0). The L0A/L0B fractals are loaded
-                                    # with K=winm (real_k=winm) and the mma contracts
-                                    # K=winm (k_actual=winm) -- both MUST match: a full
-                                    # K=128 L0 load + a k=winm mma read mismatched
-                                    # fractals (M-block/head 16-63 wrong for winm<128).
-                                    # Full operands + the real_k/k_actual runtime args
-                                    # (NOT symbolic [..,0:winm] slices -- those make
-                                    # access_ptr int(winm) a Var and fail). = gemm's
-                                    # kSize=winm load + k_actual=winm contract.
-                                    # winm<=128 single K tile -> unit_flag always 0b11.
-                                    # (G/16)*(128/16)=32>=10 -> no PipeBarrier<PIPE_M>
-                                    # (= gemm:944 gate). The per-tile M_MTE1(4/5) chain
-                                    # also orders QK's whole-L0 use before these loads,
-                                    # so p_l0a/v_l0b sharing QK's A2/B2 space is safe.
+                                    # pp=nl&1 (0,1,0,1) = gemm tileIdx&1 -> L0AB events
+                                    # {4,5}. cs=(1+nl)&1 = 1,0,1,0 (cl0_base=1, no cL0
+                                    # collision with QK's slot 0). real_k=k_actual=winm
+                                    # (L0 fractal K and mma K MUST match, else M-block/
+                                    # head 16-63 wrong for winm<128). unit_flag=0b11
+                                    # (single K tile); mma->fixpipe fused, no software
+                                    # M_FIX flag. (G/16)*(128/16)=32>=10 -> no
+                                    # PipeBarrier<PIPE_M> (= gemm:944 gate).
                                     for nl in range(PV_NT):
+                                        slot = (2 + nl) % 3
                                         pp = nl % 2
                                         cs = (1 + nl) % 2
+                                        # LOAD V D-tile nl -> ring slot (act_head_dim
+                                        # =128, d_idx=nl*128). Wait the slot's prior
+                                        # consumer (QK's K half / an earlier V tile).
+                                        T.wait_flag("mte1", "mte2", KV_EV[slot])
+                                        T.copy_pa(
+                                            kv_ring[slot, :, :],
+                                            ori_kv,
+                                            ori_block_table,
+                                            ori_block_size,
+                                            N2,
+                                            D,
+                                            ori_block_size * N2 * D,
+                                            ori_table_len,
+                                            PV_NW,
+                                            winm,
+                                            BI,
+                                            bm,
+                                            0,
+                                            ori_leftm,
+                                            nl * PV_NW,
+                                        )
+                                        T.set_flag("mte2", "mte1", KV_EV[slot])
+                                        # CONSUME: L0 load (real_k=winm) -> mma
+                                        # (k_actual=winm) -> fused fixpipe (unit_flag).
                                         T.wait_flag("m", "mte1", L0AB_EV0 + pp)
-                                        # real_k=winm: load the L0A/L0B fractals with
-                                        # K=winm (NOT the full 128) so they match the
-                                        # mma's k_actual=winm -- a full-width L0 load +
-                                        # a k=winm mma read mismatched fractals (M-block
-                                        # / head 16-63 addressing wrong for winm<128).
+                                        T.wait_flag("mte2", "mte1", KV_EV[slot])
                                         T.copy(p_l1[:, :], p_l0a[pp, :, :], real_k=winm)
                                         T.copy(
-                                            kv_l1[:, nl * PV_NW : (nl + 1) * PV_NW],
+                                            kv_ring[slot, :, 0:PV_NW],
                                             v_l0b[pp, :, :],
                                             real_k=winm,
                                         )
@@ -544,6 +535,8 @@ def _build_swa(
                                             unit_flag=0b11,
                                         )
                                         T.set_flag("m", "mte1", L0AB_EV0 + pp)
+                                        # release ring slot for its next user (reverse)
+                                        T.set_flag("mte1", "mte2", KV_EV[slot])
                                         T.copy(
                                             cL0[cs, :, :],
                                             workspace_o[
@@ -557,13 +550,11 @@ def _build_swa(
                                     # Iteration-boundary full drain (kept while
                                     # DEBUG_SERIAL): PipeBarrier<PIPE_ALL> drains
                                     # every pipe, so it still covers all cross-
-                                    # iteration hazards -- q_l1/p_l1/kv_l1 WAR and
-                                    # the shared cL0 ping-pong cross-iteration reuse
-                                    # (which is why the L0AB flags can be primed once
-                                    # with only local per-call iterators here). The
-                                    # 3-slot KV ring / 4-slot QP ring / persistent
-                                    # cL0BufIter that let this be removed come next
-                                    # (increment 3).
+                                    # iteration hazards -- q_l1/p_l1 WAR and the shared
+                                    # cL0 ping-pong cross-iteration reuse. The KV ring
+                                    # now protects the K/V slots per-slot (so removing
+                                    # this barrier next needs only the QP 4-ring +
+                                    # persistent cL0/abL0 iterators).
                                     if DEBUG_SERIAL:
                                         T.barrier_all()
                             T.set_cross_flag("FIX", EV_PV)
@@ -573,6 +564,11 @@ def _build_swa(
                     # armed instead of self-draining at each call boundary).
                     T.wait_flag("m", "mte1", L0AB_EV0)
                     T.wait_flag("m", "mte1", L0AB_EV1)
+                    # FreeEventID (cont.): drain the 3 KV-ring slots' MTE1_MTE2
+                    # reverse flags, balancing their prime above (each slot's last
+                    # consumer left its flag set).
+                    for _s in range(3):
+                        T.wait_flag("mte1", "mte2", KV_EV[_s])
 
                 # =========================== VECTOR ===========================
                 # iter j: softmax(task j) -> ws_p[j%2] ; output(task j-1)
@@ -605,7 +601,9 @@ def _build_swa(
                                     winm = s_global + 1 - ori_left
                                     win_align = (winm + 15) // 16 * 16
                                     T.copy(
-                                        workspace_s[cid, buf, vid * G2 : (vid + 1) * G2, :],
+                                        workspace_s[
+                                            cid, buf, vid * G2 : (vid + 1) * G2, :
+                                        ],
                                         s_ub,
                                     )
                                     T.barrier_all()
@@ -641,7 +639,9 @@ def _build_swa(
                                     T.tile.cast(p_half, s_ub, "CAST_ROUND", G2 * BI)
                                     T.copy(
                                         p_half,
-                                        workspace_p[cid, buf, vid * G2 : (vid + 1) * G2, :],
+                                        workspace_p[
+                                            cid, buf, vid * G2 : (vid + 1) * G2, :
+                                        ],
                                     )
                                     T.barrier_all()
                             T.set_cross_flag("MTE3", EV_P)
@@ -657,7 +657,9 @@ def _build_swa(
                                 if sm < act_q_lens[bm]:
                                     tokm = q_prefix[bm] + sm
                                     T.copy(
-                                        workspace_o[cid, bufm, vid * G2 : (vid + 1) * G2, :],
+                                        workspace_o[
+                                            cid, bufm, vid * G2 : (vid + 1) * G2, :
+                                        ],
                                         o_ub,
                                     )
                                     T.barrier_all()
@@ -665,7 +667,9 @@ def _build_swa(
                                     # src1RepStride=1) over the full D -- no
                                     # [G2,D] denom buffer, faithful to Ascend C
                                     # RowDivs; processes headDim in one pass.
-                                    T.tile.row_expand_div(o_ub, o_ub, denom[bufm, :, :], brcb_d)
+                                    T.tile.row_expand_div(
+                                        o_ub, o_ub, denom[bufm, :, :], brcb_d
+                                    )
                                     T.tile.cast(o_half, o_ub, out_cast_mode, G2 * D)
                                     T.barrier_all()
                                     T.copy(
