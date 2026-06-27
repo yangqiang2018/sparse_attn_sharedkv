@@ -453,7 +453,7 @@ def _build_swa(
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
-                                        cl0_base=cl0_iter[0] % 2,
+                                        cl0_base=cl0_iter % 2,
                                         prime_drain=False,
                                         flush_last=False,
                                         do_fixpipe=False,
@@ -469,7 +469,7 @@ def _build_swa(
                                         transpose_B=True,
                                         init=False,
                                         n_actual=win_align,
-                                        cl0_base=cl0_iter[0] % 2,
+                                        cl0_base=cl0_iter % 2,
                                         prime_drain=False,
                                         flush_last=True,
                                         do_fixpipe=True,
@@ -483,7 +483,7 @@ def _build_swa(
                                     # +1, = cube.h:613-615 mL1Loops==1). Advance the
                                     # persistent cL0BufIter once per valid QK so the
                                     # next PV/QK ping-pongs onto the other slot.
-                                    cl0_iter[0] = cl0_iter[0] + 1
+                                    cl0_iter += 1
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
@@ -534,7 +534,7 @@ def _build_swa(
                                     for nl in range(PV_NT):
                                         slot = (2 + nl) % 3
                                         pp = nl % 2
-                                        cs = cl0_iter[0] % 2
+                                        cs = cl0_iter % 2
                                         # ev = slot's ring event (slots 0,1 -> KV_EV0
                                         # +slot = 2,3; slot 2 -> KV_EV2 = 6). A tir
                                         # expr -- slot is a loop Var (no list index).
@@ -600,7 +600,7 @@ def _build_swa(
                                         # the persistent cL0BufIter (= cube.h:946-948,
                                         # one ++ per nL1 with mL1Loops==1) so the next
                                         # tile/QK lands on the other slot.
-                                        cl0_iter[0] = cl0_iter[0] + 1
+                                        cl0_iter += 1
                                     # all 4 tiles consumed P -> release the P buffer
                                     # for its next ring user (next task's PV load).
                                     T.set_flag("mte1", "mte2", P_EV)
