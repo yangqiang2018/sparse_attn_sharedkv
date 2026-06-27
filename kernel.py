@@ -285,15 +285,24 @@ def _build_swa(
                 # QK and PV, faithful to the reference's single cL0TensorPingPong
                 # (block_cube.h:127/212 -- one tmpBufL0C.Get, both ComputeMm1:559
                 # and ComputeMm2:833 index it by cL0BufIter%2). [2,G,BI] = 2 slots
-                # of [64,128]fp32 = 64KB < 128KB L0C. QK uses slot 0 (cl0_base=0);
-                # PV rotates slots 1,0,1,0 (cl0_base=1, its 4 D-tiles ping-pong).
-                # The DEBUG_SERIAL barrier still drains each iteration, so the
-                # QK->PV->next-iter cL0 reuse is masked here -- this increment only
-                # merges the buffer (de-risking it in isolation). Continuous
-                # cross-call cL0BufIter + prime-once L0AB flags (removing the
-                # per-call M_MTE1 drain that still serialises QK/PV) come next, as
-                # compiler 010; deleting the barrier needs the L1 rings after that.
+                # of [64,128]fp32 = 64KB < 128KB L0C. Both QK and PV index it by
+                # the persistent cl0_iter % 2 (below), faithful to the reference's
+                # single class-member cL0BufIter (cube.h:97/560/834).
                 cL0 = T.alloc_L0C([2, G, BI], accum_dtype)
+                # Persistent cL0 ping-pong counter = the reference's class-member
+                # uint32_t cL0BufIter (cube.h:97). local.var -> a plain `int32_t
+                # cl0_iter = 0;` declared once before the j-loop, so it survives
+                # across iterations and is mutated in place (codegen_ascend.cc:471
+                # `cl0_iter = ...;`). cL0BufIter advances +1 per QK (mL1Loops=1,
+                # cube.h:613-615) and +1 per PV D-tile (cube.h:946-948), both ONLY
+                # inside the valid-task guards (= the reference's isValid gate,
+                # swa_kernel.h:750-762). cL0BufIter%2 is the slot: since PV adds an
+                # even +4 per task, the parity flips once per task (+5 odd), making
+                # consecutive cL0 uses alternate 0,1,0,1,... across the QK->PV->next
+                # boundary -- so the 2-slot hardware unitFlag ping-pong (no software
+                # cL0 flag, exactly as the reference) protects reuse and the
+                # DEBUG_SERIAL barrier can be dropped next.
+                cl0_iter = T.alloc_var("int32", init=0)
                 # PV decomposition L0A/L0B ping-pong (kernel-driven per-tile mma).
                 # P[G,winm] -> p_l0a, V tile [winm,128] -> v_l0b, alternating slot
                 # pp = nl&1 (= gemm_v0_fixp tileIdx&1 = 0,1,0,1 for the 4 tiles).
@@ -444,7 +453,7 @@ def _build_swa(
                                         transpose_B=True,
                                         init=True,
                                         n_actual=win_align,
-                                        cl0_base=0,
+                                        cl0_base=cl0_iter[0] % 2,
                                         prime_drain=False,
                                         flush_last=False,
                                         do_fixpipe=False,
@@ -460,7 +469,7 @@ def _build_swa(
                                         transpose_B=True,
                                         init=False,
                                         n_actual=win_align,
-                                        cl0_base=0,
+                                        cl0_base=cl0_iter[0] % 2,
                                         prime_drain=False,
                                         flush_last=True,
                                         do_fixpipe=True,
@@ -469,6 +478,12 @@ def _build_swa(
                                     # both gemms consumed Q -> release the Q buffers
                                     # for their next ring user (next task's QK load).
                                     T.set_flag("mte1", "mte2", Q_EV)
+                                    # QK consumed one cL0 slot (the two D-halves
+                                    # accumulate into the SAME slot, one fixpipe ->
+                                    # +1, = cube.h:613-615 mL1Loops==1). Advance the
+                                    # persistent cL0BufIter once per valid QK so the
+                                    # next PV/QK ping-pongs onto the other slot.
+                                    cl0_iter[0] = cl0_iter[0] + 1
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
@@ -506,8 +521,11 @@ def _build_swa(
                                     # = the reference's continuous kvL1BufIter%3).
                                     #
                                     # pp=nl&1 (0,1,0,1) = gemm tileIdx&1 -> L0AB events
-                                    # {4,5}. cs=(1+nl)&1 = 1,0,1,0 (cl0_base=1, no cL0
-                                    # collision with QK's slot 0). real_k=k_actual=winm
+                                    # {4,5}. cs=cl0_iter%2 (the persistent cL0BufIter,
+                                    # cube.h:834): the 4 tiles ping-pong the 2 cL0
+                                    # slots while continuing QK's rotation, so reuse
+                                    # alternates across the iteration boundary too.
+                                    # real_k=k_actual=winm
                                     # (L0 fractal K and mma K MUST match, else M-block/
                                     # head 16-63 wrong for winm<128). unit_flag=0b11
                                     # (single K tile); mma->fixpipe fused, no software
@@ -516,7 +534,7 @@ def _build_swa(
                                     for nl in range(PV_NT):
                                         slot = (2 + nl) % 3
                                         pp = nl % 2
-                                        cs = (1 + nl) % 2
+                                        cs = cl0_iter[0] % 2
                                         # ev = slot's ring event (slots 0,1 -> KV_EV0
                                         # +slot = 2,3; slot 2 -> KV_EV2 = 6). A tir
                                         # expr -- slot is a loop Var (no list index).
@@ -578,16 +596,24 @@ def _build_swa(
                                             ],
                                             unit_flag=0b11,
                                         )
+                                        # this D-tile consumed one cL0 slot -> advance
+                                        # the persistent cL0BufIter (= cube.h:946-948,
+                                        # one ++ per nL1 with mL1Loops==1) so the next
+                                        # tile/QK lands on the other slot.
+                                        cl0_iter[0] = cl0_iter[0] + 1
                                     # all 4 tiles consumed P -> release the P buffer
                                     # for its next ring user (next task's PV load).
                                     T.set_flag("mte1", "mte2", P_EV)
                                     # Iteration-boundary full drain (kept while
-                                    # DEBUG_SERIAL): PipeBarrier<PIPE_ALL> drains every
-                                    # pipe. The KV ring + Q/P reverse flags now protect
-                                    # all L1 buffers per-slot; the only remaining
-                                    # cross-iteration hazard this barrier still covers
-                                    # is the shared cL0 ping-pong reuse -- so removing
-                                    # it next needs only persistent cL0/abL0 iterators.
+                                    # DEBUG_SERIAL). All cross-iteration hazards are now
+                                    # covered without it: L1 by the KV ring + Q/P
+                                    # reverse flags, L0AB by the prime-once M_MTE1
+                                    # ping-pong (cl0_iter is even-invariant in parity),
+                                    # and cL0 by the persistent cl0_iter rotation +
+                                    # 2-slot hardware unitFlag (the reference has no cL0
+                                    # software flag). Flipping DEBUG_SERIAL=False next
+                                    # (Layer 5) drops this barrier; Step 1 keeps it to
+                                    # verify the counter machinery in isolation first.
                                     if DEBUG_SERIAL:
                                         T.barrier_all()
                             T.set_cross_flag("FIX", EV_PV)
