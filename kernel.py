@@ -199,10 +199,16 @@ def _build_cfa(
     one cL0 then fixpipes (ComputeMm2 kL1/kL0, :638-672), and the vector m-chunks rows
     (DealBmm1/2 mSplit) so a [<=16,512] tile fits UB.
 
+    Every fixpipe is DIRECT (no scratch round-trip): QK accumulates the 2 D-halves
+    into cL0 via gemm_v0 (result stays in L0C, no GM dst) then T.copy(cL0 -> ws_s
+    column band) writes the band with the score's full row stride -- faithful to
+    ComputeMm1's strided Fixpipe and identical to SWA PV's cL0->ws_o band copy. PV
+    is the same: T.mma accumulate -> T.copy(cL0 -> ws_o band).
+
     STAGE 1 (this build = correctness-first): the multi-tile MATH (column-block QK,
     K-accumulate PV, online softmax chaining, PV rescale, vec2ResGm accumulator, m
     chunking) under COARSE barriers (T.barrier_all between every cube load/compute and
-    vector stage; gemm_v0_fixp prime_drain=True self-contained) -- mirroring SWA's own
+    vector stage) -- mirroring SWA's own
     DEBUG_SERIAL bring-up. STAGE 2 (perf, after correctness): swap barriers for the KV
     3-ring + directional pipe flags + cross-task gloop overlap, exactly like SWA's
     Layer 3/4/5. The cube<->vector cross-flags (EV_QK/EV_P/EV_PV) keep the depth-3
@@ -260,7 +266,7 @@ def _build_cfa(
     cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
     cmp_idx_shape = [total_tokens, N2, DEFAULT_BLOCK_I]
 
-    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16, 17])
+    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16])
     def kernel():
         @T.prim_func
         def sparse_attn_sharedkv_cfa(
@@ -283,14 +289,6 @@ def _build_cfa(
             workspace_o: T.Tensor([core_num, 2, G, D], accum_dtype),  # 15 PV (raw)
             # running online-softmax PV accumulator (= reference vec2ResGm):
             workspace_acc: T.Tensor([core_num, 2, G, D], accum_dtype),  # 16
-            # QK fixpipe scratch: gemm_v0_fixp's dst must be a FULL-slice BufferRegion
-            # (its _retrieve_shape rejects the BufferLoad that a bounded column slice
-            # ws_s[cid,buf,:,a:b] parses to). So each 128-col QK band fixpipes to this
-            # [G, BI] scratch (full-slice dst), then a T.copy scatters it into the
-            # band of the contiguous ws_s (T.copy accepts the BufferLoad dst).
-            workspace_qk: T.Tensor(
-                [core_num, G, BI], accum_dtype
-            ),  # 17 QK band scratch
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Cube L1/L0 allocations (kernel scope). ----
@@ -416,41 +414,37 @@ def _build_cfa(
                                                             h * D2,
                                                         )
                                                 T.barrier_all()
-                                                # 2 D-halves accumulate into cL0[0] then
-                                                # fixpipe to the [G,BI] scratch (full-slice
-                                                # dst the gemm accepts), then scatter into
-                                                # this 128-col band of the contiguous ws_s.
-                                                T.gemm_v0_fixp(
+                                                # QK = ComputeMm1: the 2 D-halves
+                                                # accumulate (gemm_v0 init=True then
+                                                # init=False) into cL0 -- gemm_v0 keeps
+                                                # the result IN L0C (no GM dst) and ends
+                                                # with its own M->FIX drain, so the band
+                                                # Fixpipe below reads a settled cL0.
+                                                T.gemm_v0(
                                                     q_l1[0, :, :],
                                                     k_l1[0, :, :],
-                                                    cL0,
-                                                    workspace_qk[cid, :, :],
-                                                    k_actual=D2,
+                                                    cL0[0, :, :],
                                                     transpose_B=True,
                                                     init=True,
                                                     n_actual=ncols_a,
-                                                    cl0_base=0,
-                                                    prime_drain=True,
-                                                    flush_last=False,
-                                                    do_fixpipe=False,
                                                 )
-                                                T.gemm_v0_fixp(
+                                                T.gemm_v0(
                                                     q_l1[1, :, :],
                                                     k_l1[1, :, :],
-                                                    cL0,
-                                                    workspace_qk[cid, :, :],
-                                                    k_actual=D2,
+                                                    cL0[0, :, :],
                                                     transpose_B=True,
                                                     init=False,
                                                     n_actual=ncols_a,
-                                                    cl0_base=0,
-                                                    prime_drain=True,
-                                                    flush_last=True,
-                                                    do_fixpipe=True,
                                                 )
                                                 T.barrier_all()
+                                                # Fixpipe this 128-col band DIRECTLY into
+                                                # the strided column band of the contiguous
+                                                # [G,512] score (realDstN = ws_s row stride
+                                                # 512, faithful to ComputeMm1's Fixpipe
+                                                # dstStride = actualSingleProcessSInnerSizeAlign,
+                                                # and identical to SWA PV's cL0->ws_o band).
                                                 T.copy(
-                                                    workspace_qk[cid, :, :],
+                                                    cL0[0, :, :],
                                                     workspace_s[
                                                         cid,
                                                         buf,
