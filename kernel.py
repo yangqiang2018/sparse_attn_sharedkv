@@ -58,6 +58,7 @@ import os
 
 import tilelang
 from tilelang import language as T
+from tvm import tir
 
 from metadata import SAS_META_SIZE
 
@@ -352,18 +353,21 @@ def _build_cfa(
                                         ori_left = T.max(s_global - ori_win_left, 0)
                                         win = s_global + 1 - ori_left
                                         rel = tile - 1
-                                        is_last = tile == s2lt - 1
-                                        # tile column width (ori<=128 / cmp<=512 tail).
-                                        tw = T.if_then_else(
+                                        # tile column width. Inner cmp-tail conditional
+                                        # is T.min (last tile: act_cmp-rel*512 < 512;
+                                        # else >=512 -> 512); the ori/cmp pick is a
+                                        # tir.Select. Both lower to an INLINE ternary
+                                        # (SelectNode); a runtime T.if_then_else instead
+                                        # lowers to a statement (int32_t condval; if{}),
+                                        # which the codegen cannot inline into the copy_pa
+                                        # arg list (bad C++). For ori (rel=-1) the cmp
+                                        # branch = min(512, act_cmp+512)=512, unused.
+                                        tw = tir.Select(
                                             is_ori,
                                             win,
-                                            T.if_then_else(
-                                                is_last,
-                                                act_cmp - rel * S2_BASE,
-                                                S2_BASE,
-                                            ),
+                                            T.min(S2_BASE, act_cmp - rel * S2_BASE),
                                         )
-                                        s2base = T.if_then_else(
+                                        s2base = tir.Select(
                                             is_ori, ori_left, rel * S2_BASE
                                         )
                                         tok = q_prefix[b] + s
@@ -478,17 +482,13 @@ def _build_cfa(
                                         ori_leftm = T.max(s_globalm - ori_win_left, 0)
                                         winm = s_globalm + 1 - ori_leftm
                                         relm = tilem - 1
-                                        is_lastm = tilem == s2ltm - 1
-                                        twm = T.if_then_else(
+                                        # inline ternaries (T.min + tir.Select), see QK.
+                                        twm = tir.Select(
                                             is_orim,
                                             winm,
-                                            T.if_then_else(
-                                                is_lastm,
-                                                act_cmpm - relm * S2_BASE,
-                                                S2_BASE,
-                                            ),
+                                            T.min(S2_BASE, act_cmpm - relm * S2_BASE),
                                         )
-                                        s2basem = T.if_then_else(
+                                        s2basem = tir.Select(
                                             is_orim, ori_leftm, relm * S2_BASE
                                         )
                                         # load P [G, twm] from ws_p into p_l1.
@@ -611,15 +611,11 @@ def _build_cfa(
                                         ori_left = T.max(s_global - ori_win_left, 0)
                                         win = s_global + 1 - ori_left
                                         rel = tile - 1
-                                        is_last = tile == s2lt - 1
-                                        tw = T.if_then_else(
-                                            tile == 0,
+                                        # inline ternaries (T.min + tir.Select), see QK.
+                                        tw = tir.Select(
+                                            is_first,
                                             win,
-                                            T.if_then_else(
-                                                is_last,
-                                                act_cmp - rel * S2_BASE,
-                                                S2_BASE,
-                                            ),
+                                            T.min(S2_BASE, act_cmp - rel * S2_BASE),
                                         )
                                         tw_a = (tw + 15) // 16 * 16
                                         for mc in range(NMC):
