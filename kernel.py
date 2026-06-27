@@ -196,7 +196,12 @@ def _build_swa(
     # MTE2_MTE1 self-fences ({0,1} = L0AB_EVENT) and the L0AB M_MTE1 ({4,5}); {2,3,6}
     # is the free MTE2_MTE1 triple. {7} stays free as a temporary Q/P load fence
     # (QP_TMP_EV) until the QP 4-ring (which needs the gemm's {0,1} gated) is built.
-    KV_EV = [2, 3, 6]
+    # Scalars (NOT a Python list): a list indexed by a TVMScript loop Var (e.g.
+    # slot = (2+nl)%3) fails to parse -- the index must be a literal or the flag id
+    # a tir expr (KV_EV0 + h, or the if_then_else slot select in the PV loop).
+    KV_EV0 = 2  # slot 0 (QK K half 0 / PV V tile 1)
+    KV_EV1 = 3  # slot 1 (QK K half 1 / PV V tile 2)
+    KV_EV2 = 6  # slot 2 (PV V tiles 0, 3)
     QP_TMP_EV = 7  # temporary Q (QK) / P (PV) MTE2->MTE1 load fence
 
     # L0AB M_MTE1 ping-pong flags. These match the gemm_v0_fixp template's
@@ -264,7 +269,7 @@ def _build_swa(
                 # since 6 is divisible by 3). K halves write the full [BI,256]; V
                 # tiles write the first [BI,128] (same copy_pa dstNzC0Stride=BI, so
                 # the slot's Nz layout is consistent for both). 3*128*256*2 = 192KB.
-                # Per-slot reverse flags (KV_EV[3]) replace the single KV_QK/PV_EV,
+                # Per-slot reverse flags (KV_EV0/1/2) replace the single KV_QK/PV_EV,
                 # priming the L1 ring for the eventual barrier removal.
                 kv_ring = T.alloc_L1([3, BI, D2], dtype)
                 p_l1 = T.alloc_L1([G, BI], dtype)
@@ -333,8 +338,9 @@ def _build_swa(
                     # reverse flags ONCE, so the first load into each slot waits on
                     # an already-set flag (the slot is "free"); each consume re-arms
                     # it. Drained once after the loop (FreeEventID).
-                    for _s in range(3):
-                        T.set_flag("mte1", "mte2", KV_EV[_s])
+                    T.set_flag("mte1", "mte2", KV_EV0)
+                    T.set_flag("mte1", "mte2", KV_EV1)
+                    T.set_flag("mte1", "mte2", KV_EV2)
                     for j in T.serial(n_iter + 1):
                         # ---- QK stage for task j ----
                         if j < n_iter:
@@ -368,8 +374,11 @@ def _build_swa(
                                     # / a previous task's V tile), load, signal loaded.
                                     # = the reference's per-slot kvL1 ring (the gemm is
                                     # unchanged -- it just reads the slot buffer passed).
+                                    # ev = KV_EV0 + h (= 2,3 for slots 0,1) -- a tir
+                                    # expr, since h is a TVMScript loop Var (can't
+                                    # index a Python list with it).
                                     for h in range(2):
-                                        T.wait_flag("mte1", "mte2", KV_EV[h])
+                                        T.wait_flag("mte1", "mte2", KV_EV0 + h)
                                         T.copy_pa(
                                             kv_ring[h, :, :],
                                             ori_kv,
@@ -387,7 +396,7 @@ def _build_swa(
                                             ori_left,
                                             h * D2,
                                         )
-                                        T.set_flag("mte2", "mte1", KV_EV[h])
+                                        T.set_flag("mte2", "mte1", KV_EV0 + h)
                                     # QK = Q @ Kᵀ over the window; N rounds up to 16 to
                                     # match Ascend C ComputeMm1 (nL1SizeAlign =
                                     # SASAlign(window, 16)); copy_pa loads `win` KV
@@ -412,7 +421,7 @@ def _build_swa(
                                     # per-slot MTE2_MTE1 wait gates the gemm's L1->L0,
                                     # the MTE1_MTE2 set after releases the slot for its
                                     # next ring user.
-                                    T.wait_flag("mte2", "mte1", KV_EV[0])
+                                    T.wait_flag("mte2", "mte1", KV_EV0)
                                     T.gemm_v0_fixp(
                                         q_l1_0,
                                         kv_ring[0, :, :],
@@ -427,8 +436,8 @@ def _build_swa(
                                         flush_last=False,
                                         do_fixpipe=False,
                                     )
-                                    T.set_flag("mte1", "mte2", KV_EV[0])
-                                    T.wait_flag("mte2", "mte1", KV_EV[1])
+                                    T.set_flag("mte1", "mte2", KV_EV0)
+                                    T.wait_flag("mte2", "mte1", KV_EV1)
                                     T.gemm_v0_fixp(
                                         q_l1_1,
                                         kv_ring[1, :, :],
@@ -443,7 +452,7 @@ def _build_swa(
                                         flush_last=True,
                                         do_fixpipe=True,
                                     )
-                                    T.set_flag("mte1", "mte2", KV_EV[1])
+                                    T.set_flag("mte1", "mte2", KV_EV1)
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
@@ -492,10 +501,16 @@ def _build_swa(
                                         slot = (2 + nl) % 3
                                         pp = nl % 2
                                         cs = (1 + nl) % 2
+                                        # ev = slot's ring event (slots 0,1 -> KV_EV0
+                                        # +slot = 2,3; slot 2 -> KV_EV2 = 6). A tir
+                                        # expr -- slot is a loop Var (no list index).
+                                        ev = T.if_then_else(
+                                            slot < 2, KV_EV0 + slot, KV_EV2
+                                        )
                                         # LOAD V D-tile nl -> ring slot (act_head_dim
                                         # =128, d_idx=nl*128). Wait the slot's prior
                                         # consumer (QK's K half / an earlier V tile).
-                                        T.wait_flag("mte1", "mte2", KV_EV[slot])
+                                        T.wait_flag("mte1", "mte2", ev)
                                         T.copy_pa(
                                             kv_ring[slot, :, :],
                                             ori_kv,
@@ -513,11 +528,11 @@ def _build_swa(
                                             ori_leftm,
                                             nl * PV_NW,
                                         )
-                                        T.set_flag("mte2", "mte1", KV_EV[slot])
+                                        T.set_flag("mte2", "mte1", ev)
                                         # CONSUME: L0 load (real_k=winm) -> mma
                                         # (k_actual=winm) -> fused fixpipe (unit_flag).
                                         T.wait_flag("m", "mte1", L0AB_EV0 + pp)
-                                        T.wait_flag("mte2", "mte1", KV_EV[slot])
+                                        T.wait_flag("mte2", "mte1", ev)
                                         T.copy(p_l1[:, :], p_l0a[pp, :, :], real_k=winm)
                                         T.copy(
                                             kv_ring[slot, :, 0:PV_NW],
@@ -536,7 +551,7 @@ def _build_swa(
                                         )
                                         T.set_flag("m", "mte1", L0AB_EV0 + pp)
                                         # release ring slot for its next user (reverse)
-                                        T.set_flag("mte1", "mte2", KV_EV[slot])
+                                        T.set_flag("mte1", "mte2", ev)
                                         T.copy(
                                             cL0[cs, :, :],
                                             workspace_o[
@@ -567,8 +582,9 @@ def _build_swa(
                     # FreeEventID (cont.): drain the 3 KV-ring slots' MTE1_MTE2
                     # reverse flags, balancing their prime above (each slot's last
                     # consumer left its flag set).
-                    for _s in range(3):
-                        T.wait_flag("mte1", "mte2", KV_EV[_s])
+                    T.wait_flag("mte1", "mte2", KV_EV0)
+                    T.wait_flag("mte1", "mte2", KV_EV1)
+                    T.wait_flag("mte1", "mte2", KV_EV2)
 
                 # =========================== VECTOR ===========================
                 # iter j: softmax(task j) -> ws_p[j%2] ; output(task j-1)
