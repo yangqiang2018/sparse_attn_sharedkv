@@ -234,6 +234,20 @@ def _build_swa(
     L0AB_EV0 = 4
     L0AB_EV1 = 5
 
+    # Vector-core HardEvent ids for the fine-grained pipe flags that replace the
+    # vector's full barrier_all (faithful to block_vector.h DealBmm1ResBaseBlock /
+    # DealBmm2ResBaseBlock, which use 0 PIPE_ALL barriers -- only MTE2_V/V_MTE2/
+    # MTE3_V/V_MTE3 SetFlag/WaitFlag + PipeBarrier<PIPE_V>). The vector core has its
+    # own HardEvent namespace (disjoint from the cube's). Avoid id 0: copy_gm_to_ub's
+    # padding path (common.h:282-288) uses MTE2_V/MTE3_V/V_MTE2 at id 0 (our full-tile
+    # copies don't hit it, but stay clear). Each id is reused for the RAW and WAR
+    # HardEvent of one buffer (= the reference's SYNC_INPUT/OUTPUT_BUF*_FLAG).
+    SV_S_EV = 2  # softmax input buffer (s_ub/sink_ub): MTE2_V (RAW) + V_MTE2 (WAR)
+    SV_P_EV = 3  # softmax output buffer (p_half): V_MTE3 (RAW) + MTE3_V (WAR)
+    VO_O_EV = 4  # output input buffer (o_ub): MTE2_V (RAW) + V_MTE2 (WAR)
+    VO_OUT_EV = 5  # output result buffer (o_half): V_MTE3 (RAW) + MTE3_V (WAR)
+    VO_LSE_EV = 6  # output lse buffer (lse_ub): V_MTE3 (RAW) + MTE3_V (WAR)
+
     q_shape = [total_tokens, N1, D]
     ori_kv_shape = [ori_block_num, ori_block_size, N2, D]
     cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
@@ -658,14 +672,26 @@ def _build_swa(
                     # in_sum seed for SoftmaxFlashV2 = 1.0 (Ascend C R0); filled
                     # once, read each task as the flash running-sum initial value.
                     T.tile.fill(ones_ub, T.float32(1.0))
-                    T.barrier_all()
+                    # Prime the softmax buffers' reverse flags ONCE (buffers free) =
+                    # block_vector.h's initial SYNC_INPUT/OUTPUT_BUF1 flag state:
+                    # V_MTE2 (s_ub/sink free) + MTE3_V (p_half free). Drained once
+                    # after the loop. The old barrier_all here was redundant: the
+                    # fill and the softmax's ones_ub read are both PIPE_V, so the V
+                    # pipe's in-order issue already orders them.
+                    T.set_flag("v", "mte2", SV_S_EV)
+                    T.set_flag("mte3", "v", SV_P_EV)
+                    # Same for the output buffers: o_ub free (V_MTE2), o_half free
+                    # + lse_ub free (MTE3_V). = block_vector.h DealBmm2ResBaseBlock
+                    # SYNC_INPUT/OUTPUT_BUF1 initial state.
+                    T.set_flag("v", "mte2", VO_O_EV)
+                    T.set_flag("mte3", "v", VO_OUT_EV)
+                    T.set_flag("mte3", "v", VO_LSE_EV)
                     # j in [1, n_iter+1]: softmax(j-1) for j in [1,n_iter], output
                     # (j-2) for j in [2,n_iter+1] -- both single-comparison guards.
                     for j in T.serial(1, n_iter + 2):
                         # ---- softmax stage for task j-1 ----
                         if j < n_iter + 1:
                             T.wait_cross_flag(EV_QK)
-                            T.barrier_all()
                             pid = (j - 1) * core_num + cid
                             buf = (j - 1) % 2
                             if pid < block_num:
@@ -684,16 +710,26 @@ def _build_swa(
                                     # reduces only winm (actualColumnCount).
                                     winm = s_global + 1 - ori_left
                                     win_align = (winm + 15) // 16 * 16
+                                    # copy-in s_ub + sink (MTE2). WAR: wait s_ub free
+                                    # (prev task's compute done reading it) = ref
+                                    # WaitFlag<V_MTE2>(block_vector.h:415).
+                                    T.wait_flag("v", "mte2", SV_S_EV)
                                     T.copy(
                                         workspace_s[
                                             cid, buf, vid * G2 : (vid + 1) * G2, :
                                         ],
                                         s_ub,
                                     )
-                                    T.barrier_all()
-                                    T.tile.mul(s_ub, s_ub, softmax_scale)
                                     T.copy(sinks[vid * G2 : (vid + 1) * G2], sink_ub)
-                                    T.barrier_all()
+                                    # copy-in done -> compute (= ref SetFlag/WaitFlag
+                                    # <MTE2_V>, :418-419). One flag covers both MTE2
+                                    # copies (s_ub for mul/softmax, sink for softmax).
+                                    T.set_flag("mte2", "v", SV_S_EV)
+                                    T.wait_flag("mte2", "v", SV_S_EV)
+                                    T.tile.mul(s_ub, s_ub, softmax_scale)
+                                    # V-pipe order mul -> softmax (= ref PipeBarrier
+                                    # <PIPE_V>, :423).
+                                    T.pipe_barrier("v")
                                     # Faithful Ascend C SoftmaxFlashV2
                                     # (swa_block_vector.h SoftmaxFlashV2Compute):
                                     # sink-seeded single-pass softmax. The primitive
@@ -719,20 +755,32 @@ def _build_swa(
                                         win_align,
                                         winm,
                                     )
-                                    T.barrier_all()
+                                    # V-pipe order softmax -> cast (= ref PipeBarrier
+                                    # <PIPE_V>, :429).
+                                    T.pipe_barrier("v")
+                                    # cast -> copy-out (MTE3). WAR: wait p_half free
+                                    # (prev copy-out done) = ref WaitFlag<MTE3_V>(:431).
+                                    T.wait_flag("mte3", "v", SV_P_EV)
                                     T.tile.cast(p_half, s_ub, "CAST_ROUND", G2 * BI)
+                                    # s_ub free (compute done reading) = ref SetFlag
+                                    # <V_MTE2>(:434); cast done -> copy-out = ref
+                                    # SetFlag/WaitFlag<V_MTE3>(:436-437).
+                                    T.set_flag("v", "mte2", SV_S_EV)
+                                    T.set_flag("v", "mte3", SV_P_EV)
+                                    T.wait_flag("v", "mte3", SV_P_EV)
                                     T.copy(
                                         p_half,
                                         workspace_p[
                                             cid, buf, vid * G2 : (vid + 1) * G2, :
                                         ],
                                     )
-                                    T.barrier_all()
+                                    # copy-out done, p_half free = ref SetFlag<MTE3_V>
+                                    # (:439); also gates the cross-core EV_P below.
+                                    T.set_flag("mte3", "v", SV_P_EV)
                             T.set_cross_flag("MTE3", EV_P)
                         # ---- output stage for task j-2 ----
                         if j >= 2:
                             T.wait_cross_flag(EV_PV)
-                            T.barrier_all()
                             pidm = (j - 2) * core_num + cid
                             bufm = (j - 2) % 2
                             if pidm < block_num:
@@ -740,13 +788,19 @@ def _build_swa(
                                 sm = T.cast(pidm % max_seq, "int32")
                                 if sm < act_q_lens[bm]:
                                     tokm = q_prefix[bm] + sm
+                                    # copy-in o_ub (MTE2). WAR: wait o_ub free = ref
+                                    # WaitFlag<V_MTE2>(block_vector.h:656).
+                                    T.wait_flag("v", "mte2", VO_O_EV)
                                     T.copy(
                                         workspace_o[
                                             cid, bufm, vid * G2 : (vid + 1) * G2, :
                                         ],
                                         o_ub,
                                     )
-                                    T.barrier_all()
+                                    # copy-in done -> compute = ref SetFlag/WaitFlag
+                                    # <MTE2_V>(:659-660).
+                                    T.set_flag("mte2", "v", VO_O_EV)
+                                    T.wait_flag("mte2", "v", VO_O_EV)
                                     # o = o / denom via row broadcast (Brcb + Div,
                                     # src1RepStride=1) over the full D -- no
                                     # [G2,D] denom buffer, faithful to Ascend C
@@ -754,19 +808,45 @@ def _build_swa(
                                     T.tile.row_expand_div(
                                         o_ub, o_ub, denom[bufm, :, :], brcb_d
                                     )
+                                    # V-pipe order RowDivs -> cast (= ref PipeBarrier
+                                    # <PIPE_V>, :707).
+                                    T.pipe_barrier("v")
+                                    # cast -> copy-out (MTE3). WAR: wait o_half free =
+                                    # ref WaitFlag<MTE3_V>(:617).
+                                    T.wait_flag("mte3", "v", VO_OUT_EV)
                                     T.tile.cast(o_half, o_ub, out_cast_mode, G2 * D)
-                                    T.barrier_all()
+                                    # o_ub free (compute done reading) = ref SetFlag
+                                    # <V_MTE2>(:665, here after the last o_ub read);
+                                    # cast done -> copy-out = ref SetFlag/WaitFlag
+                                    # <V_MTE3>(:624-625).
+                                    T.set_flag("v", "mte2", VO_O_EV)
+                                    T.set_flag("v", "mte3", VO_OUT_EV)
+                                    T.wait_flag("v", "mte3", VO_OUT_EV)
                                     T.copy(
                                         o_half,
                                         Output[tokm, vid * G2 : (vid + 1) * G2, :],
                                     )
-                                    # lse = max + ln(sum) (T.tile.ln; scalar
-                                    # tir.log is unlowerable on Ascend).
+                                    # copy-out done, o_half free = ref SetFlag<MTE3_V>
+                                    # (:627).
+                                    T.set_flag("mte3", "v", VO_OUT_EV)
+                                    # lse = max + ln(sum) (T.tile.ln; scalar tir.log
+                                    # unlowerable on Ascend). lse_ub WAR: wait free,
+                                    # then ln+add (V) -> copy-out (MTE3) with V_MTE3.
+                                    T.wait_flag("mte3", "v", VO_LSE_EV)
                                     T.tile.ln(lse_ub, denom[bufm, :, :])
                                     T.tile.add(lse_ub, lse_ub, m_i[bufm, :, :])
-                                    T.barrier_all()
+                                    T.set_flag("v", "mte3", VO_LSE_EV)
+                                    T.wait_flag("v", "mte3", VO_LSE_EV)
                                     T.copy(lse_ub, LSE[tokm, vid * G2 : (vid + 1) * G2])
-                                    T.barrier_all()
+                                    T.set_flag("mte3", "v", VO_LSE_EV)
+                    # Drain ALL the vector buffers' reverse flags ONCE (balance the
+                    # primes above): each buffer's last consumer left its flag set
+                    # (= block_vector.h FreeEventID for SYNC_INPUT/OUTPUT_BUF1).
+                    T.wait_flag("v", "mte2", SV_S_EV)
+                    T.wait_flag("mte3", "v", SV_P_EV)
+                    T.wait_flag("v", "mte2", VO_O_EV)
+                    T.wait_flag("mte3", "v", VO_OUT_EV)
+                    T.wait_flag("mte3", "v", VO_LSE_EV)
 
         return sparse_attn_sharedkv_swa
 
