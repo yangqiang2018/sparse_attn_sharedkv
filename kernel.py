@@ -166,10 +166,14 @@ def _build_swa(
     # tmpBuff1 = 32KB; ample for the [G2, BI] softmax block).
     SOFTMAX_TMP_BYTES = 32768
 
-    # DEBUG_SERIAL=True keeps the iteration-boundary barrier_all (current parity
-    # structure). The 3-slot KV ring / QP ring / zero-barrier come AFTER the gemm
-    # is proven; this flag stays True until then.
-    DEBUG_SERIAL = True
+    # DEBUG_SERIAL gates the cube's iteration-boundary barrier_all (line ~617).
+    # Now False (Layer 5): the KV 3-ring + Q/P reverse flags protect every L1
+    # buffer per-slot, the prime-once M_MTE1 ping-pong protects L0AB, and the
+    # persistent cl0_iter rotation + 2-slot hardware unitFlag protects cL0 (the
+    # reference has no cL0 software flag) -- so the barrier is redundant and the
+    # cube QK(j)/PV(j-1) can pipeline. (The 11 vector-scope barriers are
+    # unconditional and untouched here -- a separate later perf item.)
+    DEBUG_SERIAL = False
 
     accum_dtype = "float"
     idx_dtype = "int32"
