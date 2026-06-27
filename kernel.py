@@ -193,16 +193,24 @@ def _build_swa(
 
     # KV 3-slot ring per-slot MTE2_MTE1/MTE1_MTE2 reverse-flag event ids (shared by
     # QK's K halves + PV's V tiles). Must avoid the gemm template's internal
-    # MTE2_MTE1 self-fences ({0,1} = L0AB_EVENT) and the L0AB M_MTE1 ({4,5}); {2,3,6}
-    # is the free MTE2_MTE1 triple. {7} stays free as a temporary Q/P load fence
-    # (QP_TMP_EV) until the QP 4-ring (which needs the gemm's {0,1} gated) is built.
+    # MTE2_MTE1 self-fences (event 0 = L0AB_EVENT) and the L0AB M_MTE1 ({4,5}); {2,3,6}
+    # is the free MTE2_MTE1 triple.
     # Scalars (NOT a Python list): a list indexed by a TVMScript loop Var (e.g.
     # slot = (2+nl)%3) fails to parse -- the index must be a literal or the flag id
     # a tir expr (KV_EV0 + h, or the if_then_else slot select in the PV loop).
     KV_EV0 = 2  # slot 0 (QK K half 0 / PV V tile 1)
     KV_EV1 = 3  # slot 1 (QK K half 1 / PV V tile 2)
     KV_EV2 = 6  # slot 2 (PV V tiles 0, 3)
-    QP_TMP_EV = 7  # temporary Q (QK) / P (PV) MTE2->MTE1 load fence
+    # QP reverse-flag event ids (Q halves as one unit + P). For SWA (mL1Loops=1)
+    # the reference's 4-slot QP ring degenerates to Q (slots {0,1}, loaded+consumed
+    # as the QK unit) + P (slot {2}) -- so one reverse flag for Q and one for P
+    # suffice. Events {1,7} (event 1 free; 7 free), no reuse. Replaces the old
+    # per-iteration QP_TMP_EV self-fence with the prime-once reverse-flag protocol
+    # (a slot's reload waits on its own prior consumer), priming Q/P for the
+    # eventual barrier removal. (The 4th slot / cross-iteration double-buffer is a
+    # later perf refinement, and the depth-2->depth-3 pipeline is separate.)
+    Q_EV = 1  # Q (both D-halves) reverse flag
+    P_EV = 7  # P reverse flag
 
     # L0AB M_MTE1 ping-pong flags. These match the gemm_v0_fixp template's
     # DEDICATED shared-mode base L0AB_MM_EVENT (=4) and +1 (=5) -- NOT the default
@@ -341,6 +349,9 @@ def _build_swa(
                     T.set_flag("mte1", "mte2", KV_EV0)
                     T.set_flag("mte1", "mte2", KV_EV1)
                     T.set_flag("mte1", "mte2", KV_EV2)
+                    # Prime the Q / P reverse flags too (free = ready to load).
+                    T.set_flag("mte1", "mte2", Q_EV)
+                    T.set_flag("mte1", "mte2", P_EV)
                     for j in T.serial(n_iter + 1):
                         # ---- QK stage for task j ----
                         if j < n_iter:
@@ -364,11 +375,13 @@ def _build_swa(
                                     # headSize=256); K half h = copy_pa with
                                     # act_head_dim=256, d_idx=h*256 (= DataCopyPA
                                     # startPos.dIdx=kL1*256, actHeadDim=256).
+                                    # Q reverse flag: wait the Q buffers' prior consumer
+                                    # (primed once / the previous task's QK gemm), load
+                                    # both D-halves, signal loaded.
+                                    T.wait_flag("mte1", "mte2", Q_EV)
                                     T.copy(Q[tok, :, 0:D2], q_l1_0)
                                     T.copy(Q[tok, :, D2:D], q_l1_1)
-                                    # Q halves loaded -> temporary MTE2 fence (Q joins
-                                    # the QP ring in a later step; for now one flag).
-                                    T.set_flag("mte2", "mte1", QP_TMP_EV)
+                                    T.set_flag("mte2", "mte1", Q_EV)
                                     # K D-halves -> KV ring slots 0,1. Per-slot reverse
                                     # flag: wait the slot's prior consumer (primed once
                                     # / a previous task's V tile), load, signal loaded.
@@ -407,7 +420,7 @@ def _build_swa(
                                     # in the reference. [win_align:BI] stays
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
-                                    T.wait_flag("mte2", "mte1", QP_TMP_EV)
+                                    T.wait_flag("mte2", "mte1", Q_EV)
                                     # Faithful QK = ComputeMm1, per-D-chunk: each
                                     # 256-wide D-half accumulates into the SAME shared
                                     # cL0 slot (cl0_base=0); chunk 0 inits + holds
@@ -453,6 +466,9 @@ def _build_swa(
                                         do_fixpipe=True,
                                     )
                                     T.set_flag("mte1", "mte2", KV_EV1)
+                                    # both gemms consumed Q -> release the Q buffers
+                                    # for their next ring user (next task's QK load).
+                                    T.set_flag("mte1", "mte2", Q_EV)
                             T.set_cross_flag("FIX", EV_QK)
                         # ---- PV stage for task j-1 ----
                         if j >= 1:
@@ -469,13 +485,13 @@ def _build_swa(
                                     s_globalm = act_kvm - act_q_lens[bm] + sm
                                     ori_leftm = T.max(s_globalm - ori_win_left, 0)
                                     winm = s_globalm + 1 - ori_leftm
+                                    # P reverse flag: wait the P buffer's prior consumer
+                                    # (primed once / the previous task's PV), load P,
+                                    # signal loaded, wait ready (for the L0A reads below).
+                                    T.wait_flag("mte1", "mte2", P_EV)
                                     T.copy(workspace_p[cid, bufm, :, :], p_l1)
-                                    # P loaded -> temporary MTE2 fence (P joins the QP
-                                    # ring in a later step; for now one flag, shared
-                                    # with QK's Q fence -- sequential within an
-                                    # iteration so the set/wait pairs don't interfere).
-                                    T.set_flag("mte2", "mte1", QP_TMP_EV)
-                                    T.wait_flag("mte2", "mte1", QP_TMP_EV)
+                                    T.set_flag("mte2", "mte1", P_EV)
+                                    T.wait_flag("mte2", "mte1", P_EV)
                                     # PV = ComputeMm2, decomposed (= gemm_v0_fixp
                                     # nL0split=4) + V D-tiles into the SHARED KV 3-ring.
                                     # Each of the 4 output-D tiles: LOAD V tile -> ring
@@ -562,14 +578,16 @@ def _build_swa(
                                             ],
                                             unit_flag=0b11,
                                         )
+                                    # all 4 tiles consumed P -> release the P buffer
+                                    # for its next ring user (next task's PV load).
+                                    T.set_flag("mte1", "mte2", P_EV)
                                     # Iteration-boundary full drain (kept while
-                                    # DEBUG_SERIAL): PipeBarrier<PIPE_ALL> drains
-                                    # every pipe, so it still covers all cross-
-                                    # iteration hazards -- q_l1/p_l1 WAR and the shared
-                                    # cL0 ping-pong cross-iteration reuse. The KV ring
-                                    # now protects the K/V slots per-slot (so removing
-                                    # this barrier next needs only the QP 4-ring +
-                                    # persistent cL0/abL0 iterators).
+                                    # DEBUG_SERIAL): PipeBarrier<PIPE_ALL> drains every
+                                    # pipe. The KV ring + Q/P reverse flags now protect
+                                    # all L1 buffers per-slot; the only remaining
+                                    # cross-iteration hazard this barrier still covers
+                                    # is the shared cL0 ping-pong reuse -- so removing
+                                    # it next needs only persistent cL0/abL0 iterators.
                                     if DEBUG_SERIAL:
                                         T.barrier_all()
                             T.set_cross_flag("FIX", EV_PV)
@@ -585,6 +603,10 @@ def _build_swa(
                     T.wait_flag("mte1", "mte2", KV_EV0)
                     T.wait_flag("mte1", "mte2", KV_EV1)
                     T.wait_flag("mte1", "mte2", KV_EV2)
+                    # drain the Q / P reverse flags too (each left set by its last
+                    # consumer), balancing their prime.
+                    T.wait_flag("mte1", "mte2", Q_EV)
+                    T.wait_flag("mte1", "mte2", P_EV)
 
                 # =========================== VECTOR ===========================
                 # iter j: softmax(task j) -> ws_p[j%2] ; output(task j-1)
