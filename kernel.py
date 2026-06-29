@@ -1281,6 +1281,10 @@ def _build_scfa(
     EV_QK = 0  # cube -> vector: QK score (ws_s) ready
     EV_P = 1  # vector -> cube: softmax P (ws_p) ready
     EV_PV = 2  # cube -> vector: PV result (ws_o) ready
+    # SCFA: vector V0 -> cube cross-flag (= reference syncV0C1 / SYNC_V0_C1_FLAG):
+    # V0 has written this cmp tile's merged KV (kvMergeGm); cube cmp QK may read it.
+    # Cross-core id 3 (0/1/2 = EV_QK/P/PV); ori tiles skip it (cube reads ori_kv).
+    EV_V0 = 3
 
     # ---- Stage 2 cube within-pipe sync (= SWA Layer 3/4/5, proven). ----
     # DEBUG_SERIAL gates the per-op T.barrier_all: True keeps every barrier (the
@@ -1332,7 +1336,7 @@ def _build_scfa(
     # SCFA: topk index table = K (=topk_cmp) selected cmp-block ids per (token,n2).
     cmp_idx_shape = [total_tokens, N2, topk_cmp]
 
-    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16, 17])
+    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16, 17, 18])
     def kernel():
         @T.prim_func
         def sparse_attn_sharedkv_scfa(
@@ -1358,6 +1362,14 @@ def _build_scfa(
             # QK shape-token: gemm_v0_fixp(do_fixpipe=False) (DEBUG_SERIAL=False path)
             # derives M,N from a dst it NEVER writes (the fixpipe is T.copy(cL0->band)).
             workspace_qk: T.Tensor([core_num, G, BI], accum_dtype),  # 17
+            # SCFA V0 merged sparse KV (= reference kvMergeGm). 4-deep ring indexed
+            # by the flat tile g%4 (= reference cmpLoop%4, but a pure function of g so
+            # V0(g)/QK(g)/PV(g-1) agree with NO runtime counter): the depth-3 pipeline
+            # keeps tiles g,g-1,g-2 in flight, so g%4-distinct slots avoid the V0-write
+            # vs cube-read WAR. V0 (vector) gathers topk-selected cmp tokens here; cube
+            # cmp QK/PV read it via a plain Nd2Nz copy (= block_cube.h:448-478, NOT
+            # paged copy_pa).
+            kvMergeGm: T.Tensor([core_num, 4, S2_BASE, D], dtype),  # 18
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Cube L1/L0 allocations (kernel scope). ----
@@ -1401,6 +1413,10 @@ def _build_scfa(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
                 softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
+                # SCFA V0 merge buffer (= reference INPUT2_BUFFER, 16 rows x D). V0 gathers
+                # topk-selected cmp tokens here (GM cmp_kv -> UB), then scatters the batch
+                # to kvMergeGm (UB -> GM); the cube reads kvMergeGm. 16 = ref merge depth.
+                merge_ub = T.alloc_ub([M_CHUNK, D], dtype)
                 # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
                 # [tile g%2, m-chunk, row, 1]. The m-chunk is a SEPARATE dim (not a
                 # bounded row-slice of [2,G2,1]) so a per-chunk view ring[slot, mc, :, :]
@@ -1439,7 +1455,9 @@ def _build_scfa(
                                     act_kv = seqused_kv[b]
                                     s_global = act_kv - act_q + s
                                     act_cmp = (s_global + 1) // cmp_ratio
-                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    cmp_tiles = (
+                                        T.min(act_cmp, topk_cmp) + S2_BASE - 1
+                                    ) // S2_BASE
                                     s2lt = 1 + cmp_tiles
                                     if tile < s2lt:
                                         is_ori = tile == 0
@@ -1458,7 +1476,11 @@ def _build_scfa(
                                         tw = tir.Select(
                                             is_ori,
                                             win,
-                                            T.min(S2_BASE, act_cmp - rel * S2_BASE),
+                                            T.min(
+                                                S2_BASE,
+                                                T.min(act_cmp, topk_cmp)
+                                                - rel * S2_BASE,
+                                            ),
                                         )
                                         s2base = tir.Select(
                                             is_ori, ori_left, rel * S2_BASE
@@ -1481,6 +1503,14 @@ def _build_scfa(
                                         # them into one cL0 ping-pong slot via gemm_v0, then
                                         # T.copy(cL0 -> ws_s band) is the standalone band
                                         # Fixpipe.
+                                        # SCFA: cmp tiles read merged KV from kvMergeGm; wait
+                                        # until V0 (vector) produced this tile's slot (= ref
+                                        # ComputeMm1 CrossCoreWaitFlag(syncV0C1):797). ori
+                                        # tiles read ori_kv (no wait); V0 sets EV_V0 only for
+                                        # cmp, and tile<s2lt uses the same acmp_s on both
+                                        # cores, so the set/wait counts stay balanced.
+                                        if tile != 0:
+                                            T.wait_cross_flag(EV_V0)
                                         for cb in range(MAX_COLBLK):
                                             if cb * BI < tw:
                                                 ncols = T.min(BI, tw - cb * BI)
@@ -1522,22 +1552,22 @@ def _build_scfa(
                                                             h * D2,
                                                         )
                                                     else:
-                                                        T.copy_pa(
-                                                            kv_ring[slot, :, :],
-                                                            cmp_kv,
-                                                            cmp_block_table,
-                                                            cmp_block_size,
-                                                            N2,
-                                                            D,
-                                                            cmp_block_size * N2 * D,
-                                                            cmp_table_len,
-                                                            D2,
-                                                            ncols,
-                                                            BI,
-                                                            b,
-                                                            0,
-                                                            s2base + cb * BI,
-                                                            h * D2,
+                                                        # SCFA: this cmp tile's merged KV is in
+                                                        # kvMergeGm (V0 produced it; QK waited
+                                                        # EV_V0 before this cb loop). Plain Nd2Nz
+                                                        # (= block_cube.h:459) replaces paged
+                                                        # copy_pa; the slot holds only this tile's
+                                                        # tokens at local 0 so row = cb*BI (not
+                                                        # s2base+cb*BI). g%4 = ring slot.
+                                                        T.copy(
+                                                            kvMergeGm[
+                                                                cid,
+                                                                g % 4,
+                                                                cb * BI : cb * BI
+                                                                + ncols,
+                                                                h * D2 : h * D2 + D2,
+                                                            ],
+                                                            kv_ring[slot, 0:ncols, :],
                                                         )
                                                     T.set_flag("mte2", "mte1", ev)
                                                 if DEBUG_SERIAL:
@@ -1664,7 +1694,9 @@ def _build_scfa(
                                     act_kvm = seqused_kv[bm]
                                     s_globalm = act_kvm - act_q_lens[bm] + sm
                                     act_cmpm = (s_globalm + 1) // cmp_ratio
-                                    cmp_tilesm = (act_cmpm + S2_BASE - 1) // S2_BASE
+                                    cmp_tilesm = (
+                                        T.min(act_cmpm, topk_cmp) + S2_BASE - 1
+                                    ) // S2_BASE
                                     s2ltm = 1 + cmp_tilesm
                                     if tilem < s2ltm:
                                         is_orim = tilem == 0
@@ -1675,7 +1707,11 @@ def _build_scfa(
                                         twm = tir.Select(
                                             is_orim,
                                             winm,
-                                            T.min(S2_BASE, act_cmpm - relm * S2_BASE),
+                                            T.min(
+                                                S2_BASE,
+                                                T.min(act_cmpm, topk_cmp)
+                                                - relm * S2_BASE,
+                                            ),
                                         )
                                         s2basem = tir.Select(
                                             is_orim, ori_leftm, relm * S2_BASE
@@ -1731,22 +1767,22 @@ def _build_scfa(
                                                             nl * PV_NW,
                                                         )
                                                     else:
-                                                        T.copy_pa(
-                                                            kv_ring[slot, :, :],
-                                                            cmp_kv,
-                                                            cmp_block_table,
-                                                            cmp_block_size,
-                                                            N2,
-                                                            D,
-                                                            cmp_block_size * N2 * D,
-                                                            cmp_table_len,
-                                                            PV_NW,
-                                                            krows,
-                                                            BI,
-                                                            bm,
-                                                            0,
-                                                            s2basem + ks * BI,
-                                                            nl * PV_NW,
+                                                        # SCFA: merged V from kvMergeGm (gm%4 ring
+                                                        # slot; V0 produced tile gm). Plain Nd2Nz
+                                                        # replaces paged copy_pa. PV reads K-block
+                                                        # ks (rows) x D-tile nl; local row = ks*BI.
+                                                        T.copy(
+                                                            kvMergeGm[
+                                                                cid,
+                                                                gm % 4,
+                                                                ks * BI : ks * BI
+                                                                + krows,
+                                                                nl * PV_NW : nl * PV_NW
+                                                                + PV_NW,
+                                                            ],
+                                                            kv_ring[
+                                                                slot, 0:krows, 0:PV_NW
+                                                            ],
                                                         )
                                                     T.set_flag("mte2", "mte1", ev)
                                                     if DEBUG_SERIAL:
@@ -1852,7 +1888,96 @@ def _build_scfa(
                     T.set_flag("v", "mte2", ACC_EV)  # acc_pre free
                     T.set_flag("mte3", "v", OUT_EV)  # out_ub free
                     T.set_flag("mte3", "v", LSE_EV)  # lse_ub free
+                    # V0 merge buffer flush batches: ceil(min(S2_BASE,topk_cmp)/M_CHUNK)
+                    # (one cmp tile merges <= min(S2_BASE, topk_cmp) tokens). Compile-time.
+                    V0_NB = (min(S2_BASE, topk_cmp) + M_CHUNK - 1) // M_CHUNK
                     for g in T.serial(1, GLOOP + 2):
+                        # ==== V0: merge topk-selected sparse cmp KV for tile g ====
+                        # = reference ProcessVec0L. The vector gathers the CURRENT flat
+                        # tile g's topk cmp tokens into kvMergeGm; cube QK(g) reads them
+                        # (cross-flag EV_V0). flat index = g (SAME as cube QK) so the
+                        # EV_V0 set(vector)/wait(cube) counts pair tile-for-tile and stay
+                        # balanced. sparseBlockSize=1 (scfa_kernel.h:234) => cmp_indices
+                        # [pid,0,j] is directly the j-th selected cmp TOKEN id (realS2Idx);
+                        # GetKeyGmOffset paging = cmp_block_table[b, id//blk] then id%blk.
+                        # Only cmp tiles (tile!=0) merge (ori reads ori_kv on the cube;
+                        # g=0 is always ori, so the vector loop starting at g=1 still
+                        # covers every cmp tile). Phase A: ONE kvMergeGm slot, GM->UB->GM
+                        # in M_CHUNK batches under barriers (= ref CopyInSingleKv +
+                        # CopyOutMrgeResult, blockCount=1 fallback shape); the fused
+                        # 2-token gather [015] + cmpLoop%4 ring + ping-pong are Phase D.
+                        if g < GLOOP:
+                            v0task = g // MAX_TILES
+                            v0tile = g % MAX_TILES
+                            v0pid = v0task * core_num + cid
+                            if v0pid < block_num:
+                                v0b = T.cast(v0pid // max_seq, "int32")
+                                v0s = T.cast(v0pid % max_seq, "int32")
+                                if v0s < act_q_lens[v0b]:
+                                    v0skv = seqused_kv[v0b] - act_q_lens[v0b] + v0s
+                                    v0acmp = (v0skv + 1) // cmp_ratio
+                                    # sparse merged length = min(topk_cmp, causal act_cmp)
+                                    v0asparse = T.min(v0acmp, topk_cmp)
+                                    v0ctiles = (v0asparse + S2_BASE - 1) // S2_BASE
+                                    if (
+                                        v0tile != 0
+                                    ):  # cmp tile (ori reads ori_kv directly)
+                                        if v0tile < 1 + v0ctiles:
+                                            v0rel = v0tile - 1
+                                            v0n = T.min(
+                                                S2_BASE, v0asparse - v0rel * S2_BASE
+                                            )
+                                            # sub-block 0 merges (Phase A single-threaded;
+                                            # Phase D splits across vid per GetSubBlockIdx).
+                                            if vid == 0:
+                                                for jb in T.serial(V0_NB):
+                                                    for jj in range(M_CHUNK):
+                                                        jtok = jb * M_CHUNK + jj
+                                                        if jtok < v0n:
+                                                            r2 = cmp_indices[
+                                                                v0pid,
+                                                                0,
+                                                                v0rel * S2_BASE + jtok,
+                                                            ]
+                                                            blkid = cmp_block_table[
+                                                                v0b,
+                                                                r2 // cmp_block_size,
+                                                            ]
+                                                            T.copy(
+                                                                cmp_kv[
+                                                                    blkid,
+                                                                    r2
+                                                                    % cmp_block_size : r2
+                                                                    % cmp_block_size
+                                                                    + 1,
+                                                                    0,
+                                                                    :,
+                                                                ],
+                                                                merge_ub[
+                                                                    jj : jj + 1, :
+                                                                ],
+                                                            )
+                                                    T.barrier_all()
+                                                    if jb * M_CHUNK < v0n:
+                                                        v0cnt = T.min(
+                                                            M_CHUNK, v0n - jb * M_CHUNK
+                                                        )
+                                                        T.copy(
+                                                            merge_ub[0:v0cnt, :],
+                                                            kvMergeGm[
+                                                                cid,
+                                                                g % 4,
+                                                                jb * M_CHUNK : jb
+                                                                * M_CHUNK
+                                                                + v0cnt,
+                                                                :,
+                                                            ],
+                                                        )
+                                                    T.barrier_all()
+                                    # signal cube: this cmp tile's merged KV ready (= ref
+                                    # syncV0C1). Set on BOTH vids (mode-2 group flag converges)
+                                    # -- same pattern as EV_P; only the WRITE above is vid==0.
+                                    T.set_cross_flag("MTE3", EV_V0)
                         # ---- softmax for tile g-1 ----
                         if g < GLOOP + 1:
                             T.wait_cross_flag(EV_QK)
@@ -1870,7 +1995,9 @@ def _build_scfa(
                                     act_kv = seqused_kv[b]
                                     s_global = act_kv - act_q + s
                                     act_cmp = (s_global + 1) // cmp_ratio
-                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    cmp_tiles = (
+                                        T.min(act_cmp, topk_cmp) + S2_BASE - 1
+                                    ) // S2_BASE
                                     s2lt = 1 + cmp_tiles
                                     if tile < s2lt:
                                         is_first = tile == 0
@@ -1881,7 +2008,11 @@ def _build_scfa(
                                         tw = tir.Select(
                                             is_first,
                                             win,
-                                            T.min(S2_BASE, act_cmp - rel * S2_BASE),
+                                            T.min(
+                                                S2_BASE,
+                                                T.min(act_cmp, topk_cmp)
+                                                - rel * S2_BASE,
+                                            ),
                                         )
                                         tw_a = (tw + 15) // 16 * 16
                                         for mc in range(NMC):
@@ -2007,7 +2138,9 @@ def _build_scfa(
                                     act_kv = seqused_kv[b]
                                     s_global = act_kv - act_q + s
                                     act_cmp = (s_global + 1) // cmp_ratio
-                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    cmp_tiles = (
+                                        T.min(act_cmp, topk_cmp) + S2_BASE - 1
+                                    ) // S2_BASE
                                     s2lt = 1 + cmp_tiles
                                     if tile < s2lt:
                                         not_first = tile != 0
