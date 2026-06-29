@@ -267,7 +267,7 @@ def _build_cfa(
     # ring/flags are present but redundant -- verifies they BALANCE / never
     # deadlock, correctness still guaranteed by the barriers); flip False to drop
     # the barriers and let the ring + reverse flags overlap the pipes (the perf).
-    DEBUG_SERIAL = True
+    DEBUG_SERIAL = False
     # Shared KV 3-slot L1 ring (= reference kvL1BufIter%3): QK's K D-halves and PV's
     # V tiles rotate the SAME 3 slots; per-slot MTE2_MTE1/MTE1_MTE2 reverse flags let
     # the next copy_pa (the 1961us mte2) overlap the current gemm/mma. Slot is a
