@@ -583,13 +583,18 @@ def _build_cfa(
                                                     )
                                                     T.barrier_all()
                                                 else:
+                                                    # 0b11 fixpipe nSize MUST equal the
+                                                    # mma's n_actual=ncols_a (else it waits
+                                                    # cL0 cols [ncols_a:BI] no mma marked ->
+                                                    # hang). So the band is ncols_a wide
+                                                    # (row stride still 512 = ws_s width).
                                                     T.copy(
-                                                        cL0[cs, :, :],
+                                                        cL0[cs, :, 0:ncols_a],
                                                         workspace_s[
                                                             cid,
                                                             buf,
                                                             :,
-                                                            cb * BI : (cb + 1) * BI,
+                                                            cb * BI : cb * BI + ncols_a,
                                                         ],
                                                         unit_flag=0b11,
                                                     )
