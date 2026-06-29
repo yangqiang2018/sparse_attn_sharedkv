@@ -282,8 +282,8 @@ def _build_cfa(
     # Q (both D-halves, reused across a tile's bands) / P reverse flags (MTE1_MTE2).
     Q_EV = 1
     P_EV = 7
-    # L0AB M_MTE1 ping-pong, SHARED by QK's gemm_v0_fixp(prime_drain=False) and PV's
-    # decomposed mma; primed once before the g-loop, drained once after.
+    # L0AB M_MTE1 ping-pong for PV's decomposed mma (QK's gemm_v0 self-manages its
+    # own L0AB on event 0); primed once before the g-loop, drained once after.
     L0AB_EV0 = 4
     L0AB_EV1 = 5
 
@@ -292,7 +292,7 @@ def _build_cfa(
     cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
     cmp_idx_shape = [total_tokens, N2, DEFAULT_BLOCK_I]
 
-    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16, 17])
+    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16])
     def kernel():
         @T.prim_func
         def sparse_attn_sharedkv_cfa(
@@ -315,10 +315,6 @@ def _build_cfa(
             workspace_o: T.Tensor([core_num, 2, G, D], accum_dtype),  # 15 PV (raw)
             # running online-softmax PV accumulator (= reference vec2ResGm):
             workspace_acc: T.Tensor([core_num, 2, G, D], accum_dtype),  # 16
-            # QK shape-token: gemm_v0_fixp(do_fixpipe=False) derives M,N from a dst
-            # but NEVER writes it (the real fixpipe is the T.copy(cL0 -> ws_s band)).
-            # A [G,BI] full-slice dst the gemm accepts; not a scratch (zero writes).
-            workspace_qk: T.Tensor([core_num, G, BI], accum_dtype),  # 17
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Cube L1/L0 allocations (kernel scope). ----
@@ -369,10 +365,10 @@ def _build_cfa(
                 # ============================ CUBE ============================
                 with T.Scope("C"):
                     # AllocEventID (= block_cube.h:225): prime the L0AB M_MTE1 pair
-                    # {4,5} (shared by QK's gemm_v0_fixp(prime_drain=False) and PV's
-                    # mma), the 3 KV-ring slots' MTE1_MTE2 reverse flags {2,3,6}, and
-                    # the Q/P reverse flags {1,7} -- all "free" so the first user waits
-                    # on an already-set flag. Drained once after the g-loop.
+                    # {4,5} (PV's mma; QK's gemm_v0 self-manages event 0), the 3 KV-ring
+                    # slots' MTE1_MTE2 reverse flags {2,3,6}, and the Q/P reverse flags
+                    # {1,7} -- all "free" so the first user waits on an already-set
+                    # flag. Drained once after the g-loop.
                     T.set_flag("m", "mte1", L0AB_EV0)
                     T.set_flag("m", "mte1", L0AB_EV1)
                     T.set_flag("mte1", "mte2", KV_EV0)
@@ -432,13 +428,11 @@ def _build_cfa(
                                             T.barrier_all()
                                         # QK over 128-col blocks (ComputeMm1 nL1Loops):
                                         # each band loads its 2 K D-halves into 2 KV-ring
-                                        # slots, accumulates them into one cL0 slot
-                                        # (gemm_v0_fixp do_fixpipe=False keeps the result
-                                        # in L0C, prime_drain=False shares the L0AB flags),
-                                        # then the band Fixpipe = T.copy(cL0 -> ws_s band)
-                                        # overlaps the next band's mma via the cL0 ping-pong
-                                        # + 0b11 unitFlag (barriers off); under barriers it
-                                        # is a standalone fixpipe.
+                                        # slots (per-slot reverse flags overlap the next
+                                        # band's copy_pa with the current gemm), accumulates
+                                        # them into one cL0 ping-pong slot via gemm_v0, then
+                                        # T.copy(cL0 -> ws_s band) is the standalone band
+                                        # Fixpipe.
                                         for cb in range(MAX_COLBLK):
                                             if cb * BI < tw:
                                                 ncols = T.min(BI, tw - cb * BI)
@@ -501,67 +495,52 @@ def _build_cfa(
                                                 if DEBUG_SERIAL:
                                                     T.barrier_all()
                                                 # 2 D-halves accumulate into cL0[cs].
+                                                # gemm_v0 (no unitFlag, self-L0AB on
+                                                # event 0 + its own M->FIX drain) = Stage
+                                                # 1's proven QK gemm; the band fixpipe
+                                                # below is standalone. (gemm_v0_fixp's
+                                                # 0b11 flush has no paired 0b11 standalone
+                                                # fixpipe -> hardware hang, so not used
+                                                # here; the fixpipe||next-mma overlap it
+                                                # would buy is deferred.)
                                                 T.wait_flag("mte2", "mte1", ev0)
-                                                T.gemm_v0_fixp(
+                                                T.gemm_v0(
                                                     q_l1[0, :, :],
                                                     kv_ring[s0, :, :],
-                                                    cL0,
-                                                    workspace_qk[cid, :, :],
-                                                    k_actual=D2,
+                                                    cL0[cs, :, :],
                                                     transpose_B=True,
                                                     init=True,
                                                     n_actual=ncols_a,
-                                                    cl0_base=cs,
-                                                    prime_drain=False,
-                                                    flush_last=False,
-                                                    do_fixpipe=False,
                                                 )
                                                 T.set_flag("mte1", "mte2", ev0)
                                                 T.wait_flag("mte2", "mte1", ev1)
-                                                T.gemm_v0_fixp(
+                                                T.gemm_v0(
                                                     q_l1[1, :, :],
                                                     kv_ring[s1, :, :],
-                                                    cL0,
-                                                    workspace_qk[cid, :, :],
-                                                    k_actual=D2,
+                                                    cL0[cs, :, :],
                                                     transpose_B=True,
                                                     init=False,
                                                     n_actual=ncols_a,
-                                                    cl0_base=cs,
-                                                    prime_drain=False,
-                                                    flush_last=True,
-                                                    do_fixpipe=False,
                                                 )
                                                 T.set_flag("mte1", "mte2", ev1)
                                                 kv_iter += 2
                                                 if DEBUG_SERIAL:
                                                     T.barrier_all()
                                                 # band Fixpipe cL0[cs] -> strided ws_s band
-                                                # (realDstN = 512 row stride, = ComputeMm1
-                                                # Fixpipe dstStride; 0b11 pairs with the
-                                                # gemm's last mma -> fixpipe||next-mma).
+                                                # (realDstN = 512 row stride = ComputeMm1
+                                                # Fixpipe dstStride); standalone, ordered by
+                                                # gemm_v0's M->FIX drain.
+                                                T.copy(
+                                                    cL0[cs, :, :],
+                                                    workspace_s[
+                                                        cid,
+                                                        buf,
+                                                        :,
+                                                        cb * BI : (cb + 1) * BI,
+                                                    ],
+                                                )
                                                 if DEBUG_SERIAL:
-                                                    T.copy(
-                                                        cL0[cs, :, :],
-                                                        workspace_s[
-                                                            cid,
-                                                            buf,
-                                                            :,
-                                                            cb * BI : (cb + 1) * BI,
-                                                        ],
-                                                    )
                                                     T.barrier_all()
-                                                else:
-                                                    T.copy(
-                                                        cL0[cs, :, :],
-                                                        workspace_s[
-                                                            cid,
-                                                            buf,
-                                                            :,
-                                                            cb * BI : (cb + 1) * BI,
-                                                        ],
-                                                        unit_flag=0b11,
-                                                    )
                                                 cl0_iter += 1
                                         # release Q for the next tile's QK load.
                                         T.set_flag("mte1", "mte2", Q_EV)
