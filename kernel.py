@@ -1413,10 +1413,13 @@ def _build_scfa(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
                 softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
-                # SCFA V0 merge buffer (= reference INPUT2_BUFFER, 16 rows x D). V0 gathers
-                # topk-selected cmp tokens here (GM cmp_kv -> UB), then scatters the batch
-                # to kvMergeGm (UB -> GM); the cube reads kvMergeGm. 16 = ref merge depth.
-                merge_ub = T.alloc_ub([M_CHUNK, D], dtype)
+                # SCFA V0 merge buffer (1 token x D). V0 gathers each topk-selected cmp
+                # token here (GM cmp_kv -> UB) then scatters it to kvMergeGm (UB -> GM);
+                # the cube reads kvMergeGm. Phase A = ONE row (= ref batch depth 1):
+                # dstM==maskShapeM==1 keeps copy_gm_to_ub OFF the Duplicate-pad path (a
+                # multi-row buffer + 1-row copy would Duplicate-wipe the whole buffer each
+                # token AND overflow UB). Phase D: batch 16 via 015 (no Duplicate) + UB reuse.
+                merge_ub = T.alloc_ub([1, D], dtype)
                 # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
                 # [tile g%2, m-chunk, row, 1]. The m-chunk is a SEPARATE dim (not a
                 # bounded row-slice of [2,G2,1]) so a per-chunk view ring[slot, mc, :, :]
@@ -1888,9 +1891,10 @@ def _build_scfa(
                     T.set_flag("v", "mte2", ACC_EV)  # acc_pre free
                     T.set_flag("mte3", "v", OUT_EV)  # out_ub free
                     T.set_flag("mte3", "v", LSE_EV)  # lse_ub free
-                    # V0 merge buffer flush batches: ceil(min(S2_BASE,topk_cmp)/M_CHUNK)
-                    # (one cmp tile merges <= min(S2_BASE, topk_cmp) tokens). Compile-time.
-                    V0_NB = (min(S2_BASE, topk_cmp) + M_CHUNK - 1) // M_CHUNK
+                    # V0 per-cmp-tile token loop bound (compile-time): one cmp tile merges
+                    # at most min(S2_BASE, topk_cmp) topk-selected tokens (runtime v0n <=
+                    # this; the jtok < v0n guard skips the tail).
+                    V0_NMAX = min(S2_BASE, topk_cmp)
                     for g in T.serial(1, GLOOP + 2):
                         # ==== V0: merge topk-selected sparse cmp KV for tile g ====
                         # = reference ProcessVec0L. The vector gathers the CURRENT flat
@@ -1935,50 +1939,43 @@ def _build_scfa(
                                             # sub-block 0 merges (Phase A single-threaded;
                                             # Phase D splits across vid per GetSubBlockIdx).
                                             if vid == 0:
-                                                for jb in T.serial(V0_NB):
-                                                    for jj in range(M_CHUNK):
-                                                        jtok = jb * M_CHUNK + jj
-                                                        if jtok < v0n:
-                                                            r2 = cmp_indices[
-                                                                v0tok,
-                                                                0,
-                                                                v0rel * S2_BASE + jtok,
-                                                            ]
-                                                            blkid = cmp_block_table[
-                                                                v0b,
-                                                                r2 // cmp_block_size,
-                                                            ]
-                                                            T.copy(
-                                                                cmp_kv[
-                                                                    blkid,
-                                                                    r2
-                                                                    % cmp_block_size : r2
-                                                                    % cmp_block_size
-                                                                    + 1,
-                                                                    0,
-                                                                    :,
-                                                                ],
-                                                                merge_ub[
-                                                                    jj : jj + 1, :
-                                                                ],
-                                                            )
-                                                    T.barrier_all()
-                                                    if jb * M_CHUNK < v0n:
-                                                        v0cnt = T.min(
-                                                            M_CHUNK, v0n - jb * M_CHUNK
-                                                        )
+                                                for jtok in T.serial(V0_NMAX):
+                                                    if jtok < v0n:
+                                                        r2 = cmp_indices[
+                                                            v0tok,
+                                                            0,
+                                                            v0rel * S2_BASE + jtok,
+                                                        ]
+                                                        blkid = cmp_block_table[
+                                                            v0b,
+                                                            r2 // cmp_block_size,
+                                                        ]
+                                                        # gather 1 token GM->UB (dstM=1
+                                                        # => no copy_gm_to_ub Duplicate).
                                                         T.copy(
-                                                            merge_ub[0:v0cnt, :],
+                                                            cmp_kv[
+                                                                blkid,
+                                                                r2 % cmp_block_size : r2
+                                                                % cmp_block_size
+                                                                + 1,
+                                                                0,
+                                                                :,
+                                                            ],
+                                                            merge_ub[0:1, :],
+                                                        )
+                                                        T.barrier_all()
+                                                        # scatter to kvMergeGm row jtok
+                                                        # (= CopyOutMrgeResult bc=1).
+                                                        T.copy(
+                                                            merge_ub[0:1, :],
                                                             kvMergeGm[
                                                                 cid,
                                                                 g % 4,
-                                                                jb * M_CHUNK : jb
-                                                                * M_CHUNK
-                                                                + v0cnt,
+                                                                jtok : jtok + 1,
                                                                 :,
                                                             ],
                                                         )
-                                                    T.barrier_all()
+                                                        T.barrier_all()
                                             # signal cube: this cmp tile's merged KV is
                                             # ready (= ref syncV0C1). Set on BOTH vids
                                             # (mode-2 group flag converges; = EV_P pattern)
