@@ -7,10 +7,11 @@ This module is the kernel half of the op whose host wrapper lives in
 function with 11 positional tensors (``out_idx=[11, 12]`` ⇒ returns
 ``(Output, LSE)``; workspaces are auto-allocated via ``workspace_idx``).
 
-Scope of THIS file so far: the **SWA** (sliding-window attention,
-``scenario == 1``) path only -- a faithful TileLang port of the Ascend C
-``SparseAttnSharedkvSwa`` kernel (op_kernel/arch32/sparse_attn_sharedkv_swa_*).
-SCFA/CFA (``scenario`` 2/3) are not implemented yet and raise.
+Scope of THIS file: **SWA** (``scenario == 1``, :func:`_build_swa`) and **CFA**
+(``scenario == 2``, :func:`_build_cfa`) -- faithful TileLang ports of the Ascend C
+``SparseAttnSharedkvSwa`` kernel (op_kernel/arch32/sparse_attn_sharedkv_swa_*); CFA
+is the same class's ``CFA_TEMPLATE`` multi-KV-tile online-softmax path. SCFA
+(``scenario == 3``) is not implemented yet and raises.
 
 Faithful mapping to the Ascend C SWA (per query row ``s`` of batch ``b``):
 
@@ -57,6 +58,7 @@ import os
 
 import tilelang
 from tilelang import language as T
+from tvm import tir
 
 from metadata import SAS_META_SIZE
 
@@ -95,8 +97,9 @@ def build_sparse_attn_sharedkv(
     Returns a callable taking the 11 input tensors and returning
     ``(Output, LSE)``. See module docstring for the SWA contract.
     """
-    if scenario != 1:
+    if scenario not in (1, 2):
         raise NotImplementedError(
+<<<<<<< HEAD
             f"only SWA (scenario=1) is implemented; got scenario={scenario} (SCFA/CFA pending)"
         )
     if n_kv_heads != 1 or n_heads != 64 or head_dim != 512:
@@ -106,9 +109,45 @@ def build_sparse_attn_sharedkv(
     if ori_win_left + 1 > DEFAULT_BLOCK_I:
         raise ValueError(
             f"ori_win_left={ori_win_left} exceeds single-tile window (BI={DEFAULT_BLOCK_I}); multi-tile SWA not implemented yet"
+=======
+            f"only SWA (scenario=1) and CFA (scenario=2) are implemented; got scenario={scenario} (SCFA=3 pending)"
+        )
+    if n_kv_heads != 1 or n_heads != 64 or head_dim != 512:
+        raise ValueError(
+            f"kernel assumes N1=64, N2=1, D=512 (got N1={n_heads}, N2={n_kv_heads}, D={head_dim})"
+        )
+    if ori_win_left + 1 > DEFAULT_BLOCK_I:
+        raise ValueError(
+            f"ori_win_left={ori_win_left} exceeds single-tile window (BI={DEFAULT_BLOCK_I}); the ori window is one tile for both SWA and CFA"
+>>>>>>> wip/swa-cv-pipeline
         )
 
-    return _build_swa(
+    if scenario == 1:
+        # SWA: single ori KV-tile (window <= 128), degenerate online softmax.
+        return _build_swa(
+            batch=batch,
+            max_seq=max_seq,
+            total_tokens=total_tokens,
+            ori_block_num=ori_block_num,
+            ori_block_size=ori_block_size,
+            ori_table_len=ori_table_len,
+            cmp_block_num=cmp_block_num,
+            cmp_block_size=cmp_block_size,
+            cmp_table_len=cmp_table_len,
+            n_heads=n_heads,
+            head_dim=head_dim,
+            ori_win_left=ori_win_left,
+            softmax_scale=float(softmax_scale),
+            dtype=dtype,
+            core_num=core_num,
+        )
+
+    # CFA (scenario 2): the reference's SWA class with templateMode==CFA_TEMPLATE.
+    # = SWA + a cmp KV segment (read sequentially via copy_pa, no topk/gather) →
+    # multi-tile s2 sequence (ori tiles + cmp tiles) threaded by one online-softmax
+    # flash-accumulation chain + PV rescale. cmp segment length per task =
+    # actCmpS2Size = (cmpMaskRight + s1EndIdx + 1) / cmp_ratio (swa_kernel.h:378-381).
+    return _build_cfa(
         batch=batch,
         max_seq=max_seq,
         total_tokens=total_tokens,
@@ -121,10 +160,1002 @@ def build_sparse_attn_sharedkv(
         n_heads=n_heads,
         head_dim=head_dim,
         ori_win_left=ori_win_left,
+        cmp_ratio=cmp_ratio,
         softmax_scale=float(softmax_scale),
         dtype=dtype,
         core_num=core_num,
     )
+
+
+def _build_cfa(
+    *,
+    batch,
+    max_seq,
+    total_tokens,
+    ori_block_num,
+    ori_block_size,
+    ori_table_len,
+    cmp_block_num,
+    cmp_block_size,
+    cmp_table_len,
+    n_heads,
+    head_dim,
+    ori_win_left,
+    cmp_ratio,
+    softmax_scale,
+    dtype,
+    core_num,
+):
+    """CFA (scenario 2) = the reference SWA class's CFA_TEMPLATE path: SWA + a cmp
+    KV segment read sequentially via copy_pa (NO topk / NO gather -- that is SCFA).
+
+    Reverse-degenerates our SWA single-tile kernel back to the reference's
+    multi-KV-tile online softmax. Instruction-level faithful (verified): every op
+    maps to an existing primitive emitting the exact reference instruction
+    (copy_pa->DataCopyPA, gemm_v0_fixp->Mmad/Fixpipe, softmax_flash_v2->SoftmaxFlashV2,
+    row_expand_div->RowDivs, row_expand_mul_nd[013]->RowMuls, T.copy->DataCopyPad,
+    T.set_flag->MTE3_MTE2 fence); the rest is pure kernel structure mirroring
+    ProcessBalance / SoftmaxFlashV2Compute / DealBmm2ResBaseBlock.
+
+    STRUCTURE (verified against swa_kernel.h:728-769 ProcessBalance/PreloadPipeline):
+    the reference flattens (bN2, gS1, s2) into a single ``gloop`` that advances PER
+    s2-TILE; its 3-stage preload is, at iteration g, cube QK(g)+PV(g-1) and vector
+    softmax(g-1)+output(g-2) -- IDENTICAL to our SWA depth-3 pipeline with the loop
+    unit changed from "task j" to "global tile g". So this is _build_swa generalised:
+    ``for g`` over ``n_iter * MAX_TILES`` flattened tiles (task = g//MAX_TILES, tile =
+    g%MAX_TILES; padding tiles beyond a task's s2LoopTimes are skipped by isValid, the
+    same way SWA skips invalid tasks), per-tile (ori/cmp) scalar decode, online softmax
+    chaining via the g%preLoadNum ring, and the PV rescale.
+
+    cmp tiles are up to s2BaseSize=512 columns (vs ori <=128): QK loops 128-col blocks
+    (ComputeMm1 nL1Loops, block_cube.h:353), PV K-accumulates 128-row sub-blocks into
+    one cL0 then fixpipes (ComputeMm2 kL1/kL0, :638-672), and the vector m-chunks rows
+    (DealBmm1/2 mSplit) so a [<=16,512] tile fits UB.
+
+    Every fixpipe is DIRECT (no scratch round-trip): QK accumulates the 2 D-halves
+    into cL0 via gemm_v0 (result stays in L0C, no GM dst) then T.copy(cL0 -> ws_s
+    column band) writes the band with the score's full row stride -- faithful to
+    ComputeMm1's strided Fixpipe and identical to SWA PV's cL0->ws_o band copy. PV
+    is the same: T.mma accumulate -> T.copy(cL0 -> ws_o band).
+
+    STAGE 1 (this build = correctness-first): the multi-tile MATH (column-block QK,
+    K-accumulate PV, online softmax chaining, PV rescale, vec2ResGm accumulator, m
+    chunking) under COARSE barriers (T.barrier_all between every cube load/compute and
+    vector stage) -- mirroring SWA's own
+    DEBUG_SERIAL bring-up. STAGE 2 (perf, after correctness): swap barriers for the KV
+    3-ring + directional pipe flags + cross-task gloop overlap, exactly like SWA's
+    Layer 3/4/5. The cube<->vector cross-flags (EV_QK/EV_P/EV_PV) keep the depth-3
+    overlap and fire every g (even invalid) to stay count-balanced, as in SWA.
+
+    Watch (high risk): ring slot off-by-one (softmax in=(g-2)%2 if !isFirst else sink,
+    out=(g-1)%2; rescale prev=vec2ResGm[(g-3)%2], expmax=(g-2)%2 -- verified consistent
+    with mod-2 under the depth-3 lag); cmp tile width 512 vs ori <=128; UB budget.
+    """
+    N1 = n_heads  # query heads (= 64)
+    N2 = 1  # kv heads
+    D = head_dim  # head dim (= 512)
+    D2 = D // 2  # 256: QK D-chunk (kL1) width -- function-scope int (see _build_swa)
+    G = N1 // N2  # GQA group = rows per task (= 64)
+    BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
+    PV_NT = D // BI  # 4 output-D tiles (= ComputeMm2 nL1Loops)
+    PV_NW = BI  # 128: each output-D tile width
+    VEC_NUM = 2  # 2 vector cores per cube core
+    G2 = G // VEC_NUM  # 32: rows per vector core
+    BLK = 8  # FP32 elems per 32B block (Brcb fan-out for row_expand)
+    S2_BASE = 512  # cmp tile width = reference s2BaseSize (metadata.py:319)
+    MAX_COLBLK = S2_BASE // BI  # 4: max 128-col QK blocks per (cmp) tile
+    # preLoadNum = 2 (online-softmax ring depth); the rings are [2, ...] / g%2.
+    # Vector m-chunk: a [M_CHUNK, 512] fp32 tile must fit UB alongside the rescale
+    # buffers. M_CHUNK=8 -> NMC=4 chunks; conservative for Stage 1 (Stage 2 may widen
+    # to 16 = the reference's mSplit for columnCount=512).
+    # m-split chunk = ref mSplitSize = BASE_BLOCK_MAX_ELEMENT_NUM(32K/4=8192) /
+    # columnCount(=S2_BASE 512) = 16 (block_vector.h:448-453). NMC=2 chunks/core.
+    M_CHUNK = 16
+    NMC = G2 // M_CHUNK  # 2 m-chunks per vector core (= ref loopCount)
+
+    accum_dtype = "float"
+    idx_dtype = "int32"
+    out_cast_mode = "CAST_RINT" if dtype == "bfloat16" else "CAST_ROUND"
+    # SoftmaxFlashV2 shared scratch (= Ascend C softmaxTmpUb / tmpBuff1).
+    SOFTMAX_TMP_BYTES = 32768
+
+    # Max cmp tiles per task (compile-time upper bound). cmp length per task =
+    # (s_global+1)//cmp_ratio <= max_seq//cmp_ratio; tiled at S2_BASE.
+    max_cmp_len = (max_seq + cmp_ratio - 1) // cmp_ratio
+    MAX_CMP_TILES = (max_cmp_len + S2_BASE - 1) // S2_BASE
+    MAX_TILES = 1 + MAX_CMP_TILES  # 1 ori tile + cmp tiles
+
+    block_num = batch * max_seq
+    n_iter = (block_num + core_num - 1) // core_num  # tasks per core (ceil)
+    # Flattened per-core tile iterations: each task occupies MAX_TILES g-slots
+    # (padding tiles skipped via isValid). gloop advances per tile, g%PRELOAD rings.
+    GLOOP = n_iter * MAX_TILES
+
+    # Cube<->vector cross-core handshake event ids (= reference syncC1V1/V1C2/C2V2).
+    EV_QK = 0  # cube -> vector: QK score (ws_s) ready
+    EV_P = 1  # vector -> cube: softmax P (ws_p) ready
+    EV_PV = 2  # cube -> vector: PV result (ws_o) ready
+
+    # ---- Stage 2 cube within-pipe sync (= SWA Layer 3/4/5, proven). ----
+    # DEBUG_SERIAL gates the per-op T.barrier_all: True keeps every barrier (the
+    # ring/flags are present but redundant -- verifies they BALANCE / never
+    # deadlock, correctness still guaranteed by the barriers); flip False to drop
+    # the barriers and let the ring + reverse flags overlap the pipes (the perf).
+    DEBUG_SERIAL = False
+    # Shared KV 3-slot L1 ring (= reference kvL1BufIter%3): QK's K D-halves and PV's
+    # V tiles rotate the SAME 3 slots; per-slot MTE2_MTE1/MTE1_MTE2 reverse flags let
+    # the next copy_pa (the 1961us mte2) overlap the current gemm/mma. Slot is a
+    # RUNTIME kv_iter%3 (bands/K-blocks are runtime-guarded; a fixed Python slot
+    # would break flag balance when a band is skipped). Flag id by slot via
+    # Select(slot<2, KV_EV0+slot, KV_EV2) -- runtime ids OK (FlagOpCodegen PrintExpr's
+    # the event id). {2,3,6} avoid the L0AB pair {4,5} and the gemm's internal
+    # MTE2_MTE1 self-fence (event 0).
+    KV_EV0 = 2
+    KV_EV1 = 3
+    KV_EV2 = 6
+    # Q (both D-halves, reused across a tile's bands) / P reverse flags (MTE1_MTE2).
+    Q_EV = 1
+    P_EV = 7
+    # L0AB M_MTE1 ping-pong for PV's decomposed mma (QK's gemm_v0 self-manages its
+    # own L0AB on event 0); primed once before the g-loop, drained once after.
+    L0AB_EV0 = 4
+    L0AB_EV1 = 5
+
+    # ---- Stage 2c vector within-pipe directed flags. = block_vector.h's SYNC_*_BUF,
+    # replacing the m-chunk barrier_all (VECTOR core's own event ids; CrossCore EV_*
+    # are separate). Mirrors the proven SWA vector debarrier (_build_swa) + the
+    # multi-tile rescale (DealBmm2 671-697) / stash (709-717), now with the reference's
+    # BUFFER REUSE: vec1(softmax j-1) and vec2(output j-2) run sequentially within one
+    # PreloadPipeline iteration (swa_kernel.h:757/765), so they TIME-SHARE one input
+    # buffer (in_ub = ref inputBuff1, SYNC_INPUT_BUF1) and one output buffer (out_ub =
+    # ref outputBuff1, SYNC_OUTPUT_BUF1). in_ub is m-split PING-PONG (ids IN+{0,1}, =
+    # pingpongFlag): chunk i+1's MTE2 load overlaps chunk i's V compute. acc_pre single
+    # (= ref BUF2). Distinct HardEvent types are independent id namespaces, so
+    # LSE_EV (MTE3_V/V_MTE3) and FENCE (MTE3_MTE2) share id 0 without colliding. ----
+    IN_EV = 2  # in_ub ping-pong base (ids 2,3): s_ub(vec1)+o_ub(vec2); V_MTE2+MTE2_V (+stash V_MTE3/MTE3_V)
+    ACC_EV = 4  # acc_pre single: V_MTE2 (WAR) + MTE2_V (RAW)
+    OUT_EV = 5  # out_ub single: p_half(vec1)+o_half(vec2); MTE3_V (WAR) + V_MTE3 (RAW)
+    LSE_EV = 0  # lse_ub single: MTE3_V (WAR) + V_MTE3 (RAW)
+    # workspace_acc cross-tile MTE3->MTE2 fence: prev tile stashed via MTE3, this tile
+    # reloads via MTE2 -> same-core GM RAW (= DealBmm2:672-674). MTE3_MTE2 own namespace.
+    FENCE = 0
+
+    q_shape = [total_tokens, N1, D]
+    ori_kv_shape = [ori_block_num, ori_block_size, N2, D]
+    cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
+    cmp_idx_shape = [total_tokens, N2, DEFAULT_BLOCK_I]
+
+    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16, 17])
+    def kernel():
+        @T.prim_func
+        def sparse_attn_sharedkv_cfa(
+            Q: T.Tensor(q_shape, dtype),  # 0
+            ori_kv: T.Tensor(ori_kv_shape, dtype),  # 1  (ori shared K & V)
+            ori_block_table: T.Tensor([batch, ori_table_len], idx_dtype),  # 2
+            cmp_kv: T.Tensor(cmp_kv_shape, dtype),  # 3  (cmp shared K & V)
+            cmp_block_table: T.Tensor([batch, cmp_table_len], idx_dtype),  # 4
+            cmp_indices: T.Tensor(cmp_idx_shape, idx_dtype),  # 5  (unused, CFA = dense)
+            q_prefix: T.Tensor([batch], idx_dtype),  # 6  flat-token base
+            act_q_lens: T.Tensor([batch], idx_dtype),  # 7  per-batch q len
+            seqused_kv: T.Tensor([batch], idx_dtype),  # 8  per-batch ori kv len
+            sinks: T.Tensor([N1], accum_dtype),  # 9  per-head sink
+            metadata: T.Tensor([SAS_META_SIZE], idx_dtype),  # 10 (unused, v1)
+            Output: T.Tensor(q_shape, dtype),  # 11 out
+            LSE: T.Tensor([total_tokens, N1], accum_dtype),  # 12 out
+            # cube<->vector workspaces, per core, ring-buffered (dim 1 = g%2):
+            workspace_s: T.Tensor([core_num, 2, G, S2_BASE], accum_dtype),  # 13 QKᵀ
+            workspace_p: T.Tensor([core_num, 2, G, S2_BASE], dtype),  # 14 softmax P
+            workspace_o: T.Tensor([core_num, 2, G, D], accum_dtype),  # 15 PV (raw)
+            # running online-softmax PV accumulator (= reference vec2ResGm):
+            workspace_acc: T.Tensor([core_num, 2, G, D], accum_dtype),  # 16
+            # QK shape-token: gemm_v0_fixp(do_fixpipe=False) (DEBUG_SERIAL=False path)
+            # derives M,N from a dst it NEVER writes (the fixpipe is T.copy(cL0->band)).
+            workspace_qk: T.Tensor([core_num, G, BI], accum_dtype),  # 17
+        ):
+            with T.Kernel(core_num, is_npu=True) as (cid, vid):
+                # ---- Cube L1/L0 allocations (kernel scope). ----
+                # Q/K as two 256-wide D-halves (ComputeMm1 kL1Loops=2).
+                q_l1 = T.alloc_L1([2, G, D2], dtype)  # Q D-halves (reused across bands)
+                # Shared KV 3-slot ring (= reference kvL1): QK K D-halves + PV V tiles.
+                kv_ring = T.alloc_L1([3, BI, D2], dtype)
+                p_l1 = T.alloc_L1([G, S2_BASE], dtype)  # P (up to 512 wide)
+                cL0 = T.alloc_L0C([2, G, BI], accum_dtype)  # shared QK/PV cL0 ping-pong
+                p_l0a = T.alloc_L0A(
+                    [2, G, BI], dtype
+                )  # P activations (PV, L0AB ping-pong)
+                v_l0b = T.alloc_L0B([2, BI, BI], dtype)  # V tile (PV, L0AB ping-pong)
+                # Persistent ring/ping-pong counters (= reference class members; survive
+                # across g, mutated in place). kv_iter -> KV-ring slot (per load),
+                # cl0_iter -> cL0 slot (per band/PV-tile fixpipe), ab_iter -> L0AB pp
+                # (per PV L0 load). alloc_var scalars: read by name, write with +=.
+                kv_iter = T.alloc_var("int32", init=0)
+                cl0_iter = T.alloc_var("int32", init=0)
+                ab_iter = T.alloc_var("int32", init=0)
+                # ---- Vector UB allocations (m-chunked to M_CHUNK rows). D == S2_BASE
+                # (both 512), so one buffer serves both the score (vec1) and PV (vec2)
+                # roles. = ref's time-shared inputBuff1 / outputBuff1 (vec1 fully
+                # precedes vec2 within a PreloadPipeline iteration). ----
+                in_ub = T.alloc_ub(
+                    [2, M_CHUNK, S2_BASE], accum_dtype
+                )  # = ref inputBuff1: s_ub(vec1 score) + o_ub(vec2 PV); ping-pong [mc&1]
+                softmax_cmp = T.alloc_ub([M_CHUNK, S2_BASE], accum_dtype)  # compaction
+                out_ub = T.alloc_ub(
+                    [M_CHUNK, S2_BASE], dtype
+                )  # = ref outputBuff1: p_half(vec1 cast P) + o_half(vec2 cast out)
+                acc_pre = T.alloc_ub(
+                    [M_CHUNK, D], accum_dtype
+                )  # prev accumulator (rescale); = ref inputBuff2 (single)
+                sink_ub = T.alloc_ub(
+                    [2, M_CHUNK, 1], accum_dtype
+                )  # m-split ping-pong [mc&1]: rides in_ub's slot-keyed IN_EV+ps flag
+                lse_ub = T.alloc_ub([M_CHUNK, 1], accum_dtype)
+                ones_ub = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # in_sum seed (1.0)
+                brcb_d = T.alloc_ub(
+                    [M_CHUNK, BLK], accum_dtype
+                )  # Brcb scratch (row_expand)
+                softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
+                # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
+                # [tile g%2, m-chunk, row, 1]. The m-chunk is a SEPARATE dim (not a
+                # bounded row-slice of [2,G2,1]) so a per-chunk view ring[slot, mc, :, :]
+                # is a FULL-slice BufferRegion the tile primitives accept (a bounded
+                # slice ring[slot, mc*M:(mc+1)*M, :] parses to a BufferLoad they reject).
+                m_i = T.alloc_ub([2, NMC, M_CHUNK, 1], accum_dtype)  # running max
+                denom = T.alloc_ub([2, NMC, M_CHUNK, 1], accum_dtype)  # running sum
+                expmax = T.alloc_ub([2, NMC, M_CHUNK, 1], accum_dtype)  # flash rescale
+
+                # ============================ CUBE ============================
+                with T.Scope("C"):
+                    # AllocEventID (= block_cube.h:225): prime the L0AB M_MTE1 pair
+                    # {4,5} (PV's mma; QK's gemm_v0 self-manages event 0), the 3 KV-ring
+                    # slots' MTE1_MTE2 reverse flags {2,3,6}, and the Q/P reverse flags
+                    # {1,7} -- all "free" so the first user waits on an already-set
+                    # flag. Drained once after the g-loop.
+                    T.set_flag("m", "mte1", L0AB_EV0)
+                    T.set_flag("m", "mte1", L0AB_EV1)
+                    T.set_flag("mte1", "mte2", KV_EV0)
+                    T.set_flag("mte1", "mte2", KV_EV1)
+                    T.set_flag("mte1", "mte2", KV_EV2)
+                    T.set_flag("mte1", "mte2", Q_EV)
+                    T.set_flag("mte1", "mte2", P_EV)
+                    for g in T.serial(GLOOP + 1):
+                        # ---- QK for tile g ----
+                        if g < GLOOP:
+                            buf = g % 2
+                            task = g // MAX_TILES
+                            tile = g % MAX_TILES
+                            pid = task * core_num + cid
+                            if pid < block_num:
+                                b = T.cast(pid // max_seq, "int32")
+                                s = T.cast(pid % max_seq, "int32")
+                                act_q = act_q_lens[b]
+                                if s < act_q:
+                                    act_kv = seqused_kv[b]
+                                    s_global = act_kv - act_q + s
+                                    act_cmp = (s_global + 1) // cmp_ratio
+                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    s2lt = 1 + cmp_tiles
+                                    if tile < s2lt:
+                                        is_ori = tile == 0
+                                        ori_left = T.max(s_global - ori_win_left, 0)
+                                        win = s_global + 1 - ori_left
+                                        rel = tile - 1
+                                        # tile column width. Inner cmp-tail conditional
+                                        # is T.min (last tile: act_cmp-rel*512 < 512;
+                                        # else >=512 -> 512); the ori/cmp pick is a
+                                        # tir.Select. Both lower to an INLINE ternary
+                                        # (SelectNode); a runtime T.if_then_else instead
+                                        # lowers to a statement (int32_t condval; if{}),
+                                        # which the codegen cannot inline into the copy_pa
+                                        # arg list (bad C++). For ori (rel=-1) the cmp
+                                        # branch = min(512, act_cmp+512)=512, unused.
+                                        tw = tir.Select(
+                                            is_ori,
+                                            win,
+                                            T.min(S2_BASE, act_cmp - rel * S2_BASE),
+                                        )
+                                        s2base = tir.Select(
+                                            is_ori, ori_left, rel * S2_BASE
+                                        )
+                                        tok = q_prefix[b] + s
+                                        # Q reverse flag: wait Q free (prev tile's gemms
+                                        # done), load both D-halves, signal loaded, wait
+                                        # loaded (every band's gemm reads q_l1).
+                                        T.wait_flag("mte1", "mte2", Q_EV)
+                                        T.copy(Q[tok, :, 0:D2], q_l1[0, :, :])
+                                        T.copy(Q[tok, :, D2:D], q_l1[1, :, :])
+                                        T.set_flag("mte2", "mte1", Q_EV)
+                                        T.wait_flag("mte2", "mte1", Q_EV)
+                                        if DEBUG_SERIAL:
+                                            T.barrier_all()
+                                        # QK over 128-col blocks (ComputeMm1 nL1Loops):
+                                        # each band loads its 2 K D-halves into 2 KV-ring
+                                        # slots (per-slot reverse flags overlap the next
+                                        # band's copy_pa with the current gemm), accumulates
+                                        # them into one cL0 ping-pong slot via gemm_v0, then
+                                        # T.copy(cL0 -> ws_s band) is the standalone band
+                                        # Fixpipe.
+                                        for cb in range(MAX_COLBLK):
+                                            if cb * BI < tw:
+                                                ncols = T.min(BI, tw - cb * BI)
+                                                ncols_a = (ncols + 15) // 16 * 16
+                                                cs = cl0_iter % 2
+                                                # 2 K D-halves -> 2 consecutive ring slots
+                                                # (pre-increment exprs; kv_iter bumps AFTER
+                                                # the gemms consume the slots).
+                                                s0 = kv_iter % 3
+                                                s1 = (kv_iter + 1) % 3
+                                                ev0 = tir.Select(
+                                                    s0 < 2, KV_EV0 + s0, KV_EV2
+                                                )
+                                                ev1 = tir.Select(
+                                                    s1 < 2, KV_EV0 + s1, KV_EV2
+                                                )
+                                                for h in range(2):
+                                                    slot = (kv_iter + h) % 3
+                                                    ev = tir.Select(
+                                                        slot < 2, KV_EV0 + slot, KV_EV2
+                                                    )
+                                                    T.wait_flag("mte1", "mte2", ev)
+                                                    if is_ori:
+                                                        T.copy_pa(
+                                                            kv_ring[slot, :, :],
+                                                            ori_kv,
+                                                            ori_block_table,
+                                                            ori_block_size,
+                                                            N2,
+                                                            D,
+                                                            ori_block_size * N2 * D,
+                                                            ori_table_len,
+                                                            D2,
+                                                            ncols,
+                                                            BI,
+                                                            b,
+                                                            0,
+                                                            s2base + cb * BI,
+                                                            h * D2,
+                                                        )
+                                                    else:
+                                                        T.copy_pa(
+                                                            kv_ring[slot, :, :],
+                                                            cmp_kv,
+                                                            cmp_block_table,
+                                                            cmp_block_size,
+                                                            N2,
+                                                            D,
+                                                            cmp_block_size * N2 * D,
+                                                            cmp_table_len,
+                                                            D2,
+                                                            ncols,
+                                                            BI,
+                                                            b,
+                                                            0,
+                                                            s2base + cb * BI,
+                                                            h * D2,
+                                                        )
+                                                    T.set_flag("mte2", "mte1", ev)
+                                                if DEBUG_SERIAL:
+                                                    T.barrier_all()
+                                                # 2 D-halves accumulate into cL0[cs].
+                                                # DEBUG_SERIAL=True: gemm_v0 (no unitFlag,
+                                                # self-L0AB on event 0, standalone fixpipe)
+                                                # -- the barriered debug path. False (perf):
+                                                # gemm_v0_fixp(prime_drain=False shares L0AB
+                                                # {4,5} primed once, do_fixpipe=False leaves
+                                                # cL0 for the 0b11 band fixpipe) = ComputeMm1
+                                                # Mmad; the last mma 0b11 lets fixpipe(cb) ||
+                                                # mma(cb+1) (cL0 ping-pong), so band cb+1's
+                                                # copy_pa(mte2) overlaps band cb's gemm(mac)
+                                                # -- the overlap gemm_v0's per-call FIX_M
+                                                # drain blocks. (0b11 needs the FUSED 0b11
+                                                # fixpipe, so only the no-barrier path.)
+                                                T.wait_flag("mte2", "mte1", ev0)
+                                                if DEBUG_SERIAL:
+                                                    T.gemm_v0(
+                                                        q_l1[0, :, :],
+                                                        kv_ring[s0, :, :],
+                                                        cL0[cs, :, :],
+                                                        transpose_B=True,
+                                                        init=True,
+                                                        n_actual=ncols_a,
+                                                    )
+                                                else:
+                                                    T.gemm_v0_fixp(
+                                                        q_l1[0, :, :],
+                                                        kv_ring[s0, :, :],
+                                                        cL0,
+                                                        workspace_qk[cid, :, :],
+                                                        k_actual=D2,
+                                                        transpose_B=True,
+                                                        init=True,
+                                                        n_actual=ncols_a,
+                                                        cl0_base=cs,
+                                                        prime_drain=False,
+                                                        flush_last=False,
+                                                        do_fixpipe=False,
+                                                    )
+                                                T.set_flag("mte1", "mte2", ev0)
+                                                T.wait_flag("mte2", "mte1", ev1)
+                                                if DEBUG_SERIAL:
+                                                    T.gemm_v0(
+                                                        q_l1[1, :, :],
+                                                        kv_ring[s1, :, :],
+                                                        cL0[cs, :, :],
+                                                        transpose_B=True,
+                                                        init=False,
+                                                        n_actual=ncols_a,
+                                                    )
+                                                else:
+                                                    T.gemm_v0_fixp(
+                                                        q_l1[1, :, :],
+                                                        kv_ring[s1, :, :],
+                                                        cL0,
+                                                        workspace_qk[cid, :, :],
+                                                        k_actual=D2,
+                                                        transpose_B=True,
+                                                        init=False,
+                                                        n_actual=ncols_a,
+                                                        cl0_base=cs,
+                                                        prime_drain=False,
+                                                        flush_last=True,
+                                                        do_fixpipe=False,
+                                                    )
+                                                T.set_flag("mte1", "mte2", ev1)
+                                                kv_iter += 2
+                                                if DEBUG_SERIAL:
+                                                    T.barrier_all()
+                                                # band Fixpipe cL0[cs] -> strided ws_s band
+                                                # (realDstN = 512 = ComputeMm1 dstStride).
+                                                # 0b11 pairs with gemm_v0_fixp's last mma
+                                                # (0b11) -> fixpipe(cb) || mma(cb+1) via the
+                                                # cL0 ping-pong; standalone + barrier on the
+                                                # DEBUG_SERIAL (gemm_v0) debug path.
+                                                if DEBUG_SERIAL:
+                                                    T.copy(
+                                                        cL0[cs, :, :],
+                                                        workspace_s[
+                                                            cid,
+                                                            buf,
+                                                            :,
+                                                            cb * BI : (cb + 1) * BI,
+                                                        ],
+                                                    )
+                                                    T.barrier_all()
+                                                else:
+                                                    # 0b11 fixpipe nSize MUST equal the
+                                                    # mma's n_actual=ncols_a (else it waits
+                                                    # cL0 cols [ncols_a:BI] no mma marked ->
+                                                    # hang). So the band is ncols_a wide
+                                                    # (row stride still 512 = ws_s width).
+                                                    T.copy(
+                                                        cL0[cs, :, 0:ncols_a],
+                                                        workspace_s[
+                                                            cid,
+                                                            buf,
+                                                            :,
+                                                            cb * BI : cb * BI + ncols_a,
+                                                        ],
+                                                        unit_flag=0b11,
+                                                    )
+                                                cl0_iter += 1
+                                        # release Q for the next tile's QK load.
+                                        T.set_flag("mte1", "mte2", Q_EV)
+                            # fire every g<GLOOP (incl. invalid tiles) to keep the
+                            # cross-flag count balanced with the vector's waits.
+                            T.set_cross_flag("FIX", EV_QK)
+                        # ---- PV for tile g-1 ----
+                        if g >= 1:
+                            T.wait_cross_flag(EV_P)
+                            gm = g - 1
+                            bufm = gm % 2
+                            taskm = gm // MAX_TILES
+                            tilem = gm % MAX_TILES
+                            pidm = taskm * core_num + cid
+                            if pidm < block_num:
+                                bm = T.cast(pidm // max_seq, "int32")
+                                sm = T.cast(pidm % max_seq, "int32")
+                                if sm < act_q_lens[bm]:
+                                    act_kvm = seqused_kv[bm]
+                                    s_globalm = act_kvm - act_q_lens[bm] + sm
+                                    act_cmpm = (s_globalm + 1) // cmp_ratio
+                                    cmp_tilesm = (act_cmpm + S2_BASE - 1) // S2_BASE
+                                    s2ltm = 1 + cmp_tilesm
+                                    if tilem < s2ltm:
+                                        is_orim = tilem == 0
+                                        ori_leftm = T.max(s_globalm - ori_win_left, 0)
+                                        winm = s_globalm + 1 - ori_leftm
+                                        relm = tilem - 1
+                                        # inline ternaries (T.min + tir.Select), see QK.
+                                        twm = tir.Select(
+                                            is_orim,
+                                            winm,
+                                            T.min(S2_BASE, act_cmpm - relm * S2_BASE),
+                                        )
+                                        s2basem = tir.Select(
+                                            is_orim, ori_leftm, relm * S2_BASE
+                                        )
+                                        # P reverse flag: wait P free, load P, signal
+                                        # loaded, wait loaded (every (nl,ks) reads p_l1).
+                                        T.wait_flag("mte1", "mte2", P_EV)
+                                        T.copy(
+                                            workspace_p[cid, bufm, :, 0:S2_BASE],
+                                            p_l1[:, :],
+                                        )
+                                        T.set_flag("mte2", "mte1", P_EV)
+                                        T.wait_flag("mte2", "mte1", P_EV)
+                                        if DEBUG_SERIAL:
+                                            T.barrier_all()
+                                        # PV = ComputeMm2: 4 output-D tiles, each
+                                        # K-accumulating the tile's 128-row sub-blocks into
+                                        # one cL0 slot. Each (nl,ks): LOAD V -> KV ring slot
+                                        # (per-slot reverse flag), CONSUME (L0 load on the
+                                        # L0AB pp ping-pong -> mma accumulate). Then the
+                                        # band Fixpipe cL0[cs] -> ws_o band (0b11 overlaps
+                                        # the next tile's mma; standalone under barriers).
+                                        for nl in range(PV_NT):
+                                            cs = cl0_iter % 2
+                                            for ks in range(MAX_COLBLK):
+                                                if ks * BI < twm:
+                                                    krows = T.min(BI, twm - ks * BI)
+                                                    is_first_ks = ks == 0
+                                                    is_last_ks = (ks + 1) * BI >= twm
+                                                    slot = kv_iter % 3
+                                                    ev = tir.Select(
+                                                        slot < 2, KV_EV0 + slot, KV_EV2
+                                                    )
+                                                    pp = ab_iter % 2
+                                                    # LOAD V D-tile nl, K-block ks -> slot.
+                                                    T.wait_flag("mte1", "mte2", ev)
+                                                    if is_orim:
+                                                        T.copy_pa(
+                                                            kv_ring[slot, :, :],
+                                                            ori_kv,
+                                                            ori_block_table,
+                                                            ori_block_size,
+                                                            N2,
+                                                            D,
+                                                            ori_block_size * N2 * D,
+                                                            ori_table_len,
+                                                            PV_NW,
+                                                            krows,
+                                                            BI,
+                                                            bm,
+                                                            0,
+                                                            s2basem + ks * BI,
+                                                            nl * PV_NW,
+                                                        )
+                                                    else:
+                                                        T.copy_pa(
+                                                            kv_ring[slot, :, :],
+                                                            cmp_kv,
+                                                            cmp_block_table,
+                                                            cmp_block_size,
+                                                            N2,
+                                                            D,
+                                                            cmp_block_size * N2 * D,
+                                                            cmp_table_len,
+                                                            PV_NW,
+                                                            krows,
+                                                            BI,
+                                                            bm,
+                                                            0,
+                                                            s2basem + ks * BI,
+                                                            nl * PV_NW,
+                                                        )
+                                                    T.set_flag("mte2", "mte1", ev)
+                                                    if DEBUG_SERIAL:
+                                                        T.barrier_all()
+                                                    # CONSUME: L0 load (L0AB pp) -> mma.
+                                                    T.wait_flag(
+                                                        "m", "mte1", L0AB_EV0 + pp
+                                                    )
+                                                    T.wait_flag("mte2", "mte1", ev)
+                                                    T.copy(
+                                                        p_l1[
+                                                            :, ks * BI : (ks + 1) * BI
+                                                        ],
+                                                        p_l0a[pp, :, :],
+                                                        real_k=krows,
+                                                    )
+                                                    T.copy(
+                                                        kv_ring[slot, :, 0:PV_NW],
+                                                        v_l0b[pp, :, :],
+                                                        real_k=krows,
+                                                    )
+                                                    T.set_flag(
+                                                        "mte1", "m", L0AB_EV0 + pp
+                                                    )
+                                                    T.wait_flag(
+                                                        "mte1", "m", L0AB_EV0 + pp
+                                                    )
+                                                    # last K -> 0b11 flush (pairs with the
+                                                    # band fixpipe); else 0b10 accumulate.
+                                                    # 0 under barriers (no fusion).
+                                                    uf = (
+                                                        0
+                                                        if DEBUG_SERIAL
+                                                        else tir.Select(
+                                                            is_last_ks, 0b11, 0b10
+                                                        )
+                                                    )
+                                                    T.mma(
+                                                        p_l0a[pp, :, :],
+                                                        v_l0b[pp, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=is_first_ks,
+                                                        k_actual=krows,
+                                                        unit_flag=uf,
+                                                    )
+                                                    T.set_flag(
+                                                        "m", "mte1", L0AB_EV0 + pp
+                                                    )
+                                                    T.set_flag("mte1", "mte2", ev)
+                                                    kv_iter += 1
+                                                    ab_iter += 1
+                                                    if DEBUG_SERIAL:
+                                                        T.barrier_all()
+                                            # band Fixpipe cL0[cs] -> this output-D band.
+                                            if DEBUG_SERIAL:
+                                                T.copy(
+                                                    cL0[cs, :, :],
+                                                    workspace_o[
+                                                        cid,
+                                                        bufm,
+                                                        :,
+                                                        nl * PV_NW : (nl + 1) * PV_NW,
+                                                    ],
+                                                )
+                                                T.barrier_all()
+                                            else:
+                                                T.copy(
+                                                    cL0[cs, :, :],
+                                                    workspace_o[
+                                                        cid,
+                                                        bufm,
+                                                        :,
+                                                        nl * PV_NW : (nl + 1) * PV_NW,
+                                                    ],
+                                                    unit_flag=0b11,
+                                                )
+                                            cl0_iter += 1
+                                        # release P for the next tile's PV load.
+                                        T.set_flag("mte1", "mte2", P_EV)
+                            # fire every g>=1 (incl. invalid) for count balance.
+                            T.set_cross_flag("FIX", EV_PV)
+                    # FreeEventID (= block_cube.h:239): drain the L0AB pair {4,5}, the 3
+                    # KV-ring slots {2,3,6}, and Q/P {1,7} -- each left set by its last
+                    # consumer, balancing the prime before the g-loop.
+                    T.wait_flag("m", "mte1", L0AB_EV0)
+                    T.wait_flag("m", "mte1", L0AB_EV1)
+                    T.wait_flag("mte1", "mte2", KV_EV0)
+                    T.wait_flag("mte1", "mte2", KV_EV1)
+                    T.wait_flag("mte1", "mte2", KV_EV2)
+                    T.wait_flag("mte1", "mte2", Q_EV)
+                    T.wait_flag("mte1", "mte2", P_EV)
+
+                # =========================== VECTOR ===========================
+                with T.Scope("V"):
+                    T.tile.fill(ones_ub, T.float32(1.0))
+                    # Prime every vector buffer's reverse flag ONCE (buffers free) =
+                    # block_vector.h InitBuffers SetFlag<V_MTE2>/<MTE3_V>; the first mc
+                    # of the first tile waits on an already-set flag. Drained once after
+                    # the g-loop. Each executed mc does exactly 1 wait + 1 set, so
+                    # skipping invalid tiles keeps the balance (wait+set is net-zero).
+                    T.set_flag("v", "mte2", IN_EV)  # in_ub slot0 free
+                    T.set_flag("v", "mte2", IN_EV + 1)  # in_ub slot1 free (pong)
+                    T.set_flag("v", "mte2", ACC_EV)  # acc_pre free
+                    T.set_flag("mte3", "v", OUT_EV)  # out_ub free
+                    T.set_flag("mte3", "v", LSE_EV)  # lse_ub free
+                    for g in T.serial(1, GLOOP + 2):
+                        # ---- softmax for tile g-1 ----
+                        if g < GLOOP + 1:
+                            T.wait_cross_flag(EV_QK)
+                            gs = g - 1
+                            buf = gs % 2
+                            prev = (gs - 1) % 2
+                            task = gs // MAX_TILES
+                            tile = gs % MAX_TILES
+                            pid = task * core_num + cid
+                            if pid < block_num:
+                                b = T.cast(pid // max_seq, "int32")
+                                s = T.cast(pid % max_seq, "int32")
+                                act_q = act_q_lens[b]
+                                if s < act_q:
+                                    act_kv = seqused_kv[b]
+                                    s_global = act_kv - act_q + s
+                                    act_cmp = (s_global + 1) // cmp_ratio
+                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    s2lt = 1 + cmp_tiles
+                                    if tile < s2lt:
+                                        is_first = tile == 0
+                                        ori_left = T.max(s_global - ori_win_left, 0)
+                                        win = s_global + 1 - ori_left
+                                        rel = tile - 1
+                                        # inline ternaries (T.min + tir.Select), see QK.
+                                        tw = tir.Select(
+                                            is_first,
+                                            win,
+                                            T.min(S2_BASE, act_cmp - rel * S2_BASE),
+                                        )
+                                        tw_a = (tw + 15) // 16 * 16
+                                        for mc in range(NMC):
+                                            r0 = vid * G2 + mc * M_CHUNK
+                                            ps = (
+                                                mc & 1
+                                            )  # in_ub ping-pong slot (= ref pingpongFlag)
+                                            # copy-in score + sink (MTE2). WAR: wait this
+                                            # in_ub slot free (mc-2's compute / prev vec2's
+                                            # output done reading it) = ref WaitFlag
+                                            # <V_MTE2>(BUF1+pong):415.
+                                            T.wait_flag("v", "mte2", IN_EV + ps)
+                                            # load only the tw_a valid window columns
+                                            # (the cube wrote exactly those) -- = ref
+                                            # columnCount = actualSingleProcessSInner
+                                            # SizeAlign, not a fixed 512 (DealBmm1).
+                                            # Runtime inner-extent on T.copy needs the
+                                            # 014 codegen fix (template col-dim from
+                                            # buffer shape, width via maskShapeN).
+                                            T.copy(
+                                                workspace_s[
+                                                    cid,
+                                                    buf,
+                                                    r0 : r0 + M_CHUNK,
+                                                    0:tw_a,
+                                                ],
+                                                in_ub[ps, :, 0:tw_a],
+                                            )
+                                            T.copy(
+                                                sinks[r0 : r0 + M_CHUNK],
+                                                sink_ub[ps, :, :],
+                                            )
+                                            # copy-in -> compute (= ref SetFlag/WaitFlag
+                                            # <MTE2_V>(BUF1+pong):418-419; one flag covers
+                                            # in_ub for mul/softmax and sink for softmax).
+                                            T.set_flag("mte2", "v", IN_EV + ps)
+                                            T.wait_flag("mte2", "v", IN_EV + ps)
+                                            T.tile.mul(
+                                                in_ub[ps, :, :],
+                                                in_ub[ps, :, :],
+                                                softmax_scale,
+                                            )
+                                            # V-pipe order mul -> softmax (= ref
+                                            # PipeBarrier<PIPE_V>:423).
+                                            T.pipe_barrier("v")
+                                            if is_first:
+                                                T.tile.softmax_flash_v2(
+                                                    in_ub[ps, :, :],
+                                                    denom[buf, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                    expmax[buf, mc, :, :],
+                                                    in_ub[ps, :, :],
+                                                    ones_ub,
+                                                    sink_ub[ps, :, :],
+                                                    softmax_tmp,
+                                                    softmax_cmp,
+                                                    tw_a,
+                                                    tw,
+                                                )
+                                            else:
+                                                T.tile.softmax_flash_v2(
+                                                    in_ub[ps, :, :],
+                                                    denom[buf, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                    expmax[buf, mc, :, :],
+                                                    in_ub[ps, :, :],
+                                                    denom[prev, mc, :, :],
+                                                    m_i[prev, mc, :, :],
+                                                    softmax_tmp,
+                                                    softmax_cmp,
+                                                    tw_a,
+                                                    tw,
+                                                )
+                                            # V-pipe order softmax -> cast (= ref
+                                            # PipeBarrier<PIPE_V>:429).
+                                            T.pipe_barrier("v")
+                                            # cast -> copy-out (MTE3). WAR: wait out_ub
+                                            # free (prev copy-out done) = ref
+                                            # WaitFlag<MTE3_V>(:431).
+                                            T.wait_flag("mte3", "v", OUT_EV)
+                                            T.tile.cast(
+                                                out_ub,
+                                                in_ub[ps, :, :],
+                                                "CAST_ROUND",
+                                                M_CHUNK * S2_BASE,
+                                            )
+                                            # in_ub slot free (compute done) = ref SetFlag
+                                            # <V_MTE2>(BUF1+pong):434; cast -> copy-out =
+                                            # ref SetFlag/WaitFlag<V_MTE3>(:436-437).
+                                            T.set_flag("v", "mte2", IN_EV + ps)
+                                            T.set_flag("v", "mte3", OUT_EV)
+                                            T.wait_flag("v", "mte3", OUT_EV)
+                                            # copy out only the tw_a valid P columns
+                                            # (the cube PV reads exactly the window) --
+                                            # = ref width, saves MTE3 (needs 014).
+                                            T.copy(
+                                                out_ub[:, 0:tw_a],
+                                                workspace_p[
+                                                    cid,
+                                                    buf,
+                                                    r0 : r0 + M_CHUNK,
+                                                    0:tw_a,
+                                                ],
+                                            )
+                                            # copy-out done, out_ub free = ref SetFlag
+                                            # <MTE3_V>(:439); gates the cross EV_P below.
+                                            T.set_flag("mte3", "v", OUT_EV)
+                            T.set_cross_flag("MTE3", EV_P)
+                        # ---- output for tile g-2 ----
+                        if g >= 2:
+                            T.wait_cross_flag(EV_PV)
+                            go = g - 2
+                            bufo = go % 2
+                            prevo = (go - 1) % 2
+                            task = go // MAX_TILES
+                            tile = go % MAX_TILES
+                            pid = task * core_num + cid
+                            if pid < block_num:
+                                b = T.cast(pid // max_seq, "int32")
+                                s = T.cast(pid % max_seq, "int32")
+                                act_q = act_q_lens[b]
+                                if s < act_q:
+                                    act_kv = seqused_kv[b]
+                                    s_global = act_kv - act_q + s
+                                    act_cmp = (s_global + 1) // cmp_ratio
+                                    cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
+                                    s2lt = 1 + cmp_tiles
+                                    if tile < s2lt:
+                                        not_first = tile != 0
+                                        is_last = tile == s2lt - 1
+                                        tok = q_prefix[b] + s
+                                        for mc in range(NMC):
+                                            r0 = vid * G2 + mc * M_CHUNK
+                                            po = (
+                                                mc & 1
+                                            )  # in_ub ping-pong slot (= ref pingpongFlag)
+                                            # copy-in PV result into in_ub (MTE2). WAR:
+                                            # wait this slot free (mc-2's last reader / this
+                                            # iter's vec1 softmax done) = ref
+                                            # WaitFlag<V_MTE2>(BUF1+pong):656.
+                                            T.wait_flag("v", "mte2", IN_EV + po)
+                                            T.copy(
+                                                workspace_o[
+                                                    cid, bufo, r0 : r0 + M_CHUNK, :
+                                                ],
+                                                in_ub[po, :, :],
+                                            )
+                                            # copy-in -> compute (= ref SetFlag/WaitFlag
+                                            # <MTE2_V>(BUF1+pong):659-660).
+                                            T.set_flag("mte2", "v", IN_EV + po)
+                                            T.wait_flag("mte2", "v", IN_EV + po)
+                                            if not_first:
+                                                # prev tile STASHED workspace_acc via
+                                                # MTE3; this MTE2 reload is a same-core
+                                                # cross-tile GM RAW -> MTE3->MTE2 fence
+                                                # (= ref DealBmm2:672-674).
+                                                T.set_flag("mte3", "mte2", FENCE)
+                                                T.wait_flag("mte3", "mte2", FENCE)
+                                                # WAR: acc_pre free (= ref WaitFlag
+                                                # <V_MTE2> SYNC_INPUT_BUF2:677).
+                                                T.wait_flag("v", "mte2", ACC_EV)
+                                                T.copy(
+                                                    workspace_acc[
+                                                        cid, prevo, r0 : r0 + M_CHUNK, :
+                                                    ],
+                                                    acc_pre,
+                                                )
+                                                # load -> compute (= ref SetFlag/WaitFlag
+                                                # <MTE2_V> BUF2:682-683).
+                                                T.set_flag("mte2", "v", ACC_EV)
+                                                T.wait_flag("mte2", "v", ACC_EV)
+                                                # rescale prev (RowMuls) -> Add (= ref
+                                                # :691-694, PipeBarrier<V> between).
+                                                T.tile.row_expand_mul_nd(
+                                                    acc_pre,
+                                                    acc_pre,
+                                                    expmax[bufo, mc, :, :],
+                                                    brcb_d,
+                                                )
+                                                T.pipe_barrier("v")
+                                                T.tile.add(
+                                                    in_ub[po, :, :],
+                                                    in_ub[po, :, :],
+                                                    acc_pre,
+                                                )
+                                                T.pipe_barrier("v")
+                                                # acc_pre free (= ref SetFlag<V_MTE2>
+                                                # BUF2:696).
+                                                T.set_flag("v", "mte2", ACC_EV)
+                                            if is_last:
+                                                # normalize -> cast -> copy out + LSE
+                                                # (= ref DealBmm2 700-708 + Bmm2Cast
+                                                # AndCopyOut + LSE block; flags as SWA).
+                                                T.tile.row_expand_div(
+                                                    in_ub[po, :, :],
+                                                    in_ub[po, :, :],
+                                                    denom[bufo, mc, :, :],
+                                                    brcb_d,
+                                                )
+                                                T.pipe_barrier("v")
+                                                # cast -> copy-out (MTE3). WAR: out_ub
+                                                # free = ref WaitFlag<MTE3_V>(:617).
+                                                T.wait_flag("mte3", "v", OUT_EV)
+                                                T.tile.cast(
+                                                    out_ub,
+                                                    in_ub[po, :, :],
+                                                    out_cast_mode,
+                                                    M_CHUNK * D,
+                                                )
+                                                # in_ub slot free (V cast last-read it) =
+                                                # ref SetFlag<V_MTE2>; cast -> copy-out =
+                                                # ref SetFlag/WaitFlag<V_MTE3>(:624-625).
+                                                T.set_flag("v", "mte2", IN_EV + po)
+                                                T.set_flag("v", "mte3", OUT_EV)
+                                                T.wait_flag("v", "mte3", OUT_EV)
+                                                T.copy(
+                                                    out_ub,
+                                                    Output[tok, r0 : r0 + M_CHUNK, :],
+                                                )
+                                                # out_ub free = ref SetFlag<MTE3_V>(:627).
+                                                T.set_flag("mte3", "v", OUT_EV)
+                                                # LSE = ln(denom)+m_i (= ref :393-402).
+                                                T.wait_flag("mte3", "v", LSE_EV)
+                                                T.tile.ln(
+                                                    lse_ub,
+                                                    denom[bufo, mc, :, :],
+                                                )
+                                                T.tile.add(
+                                                    lse_ub,
+                                                    lse_ub,
+                                                    m_i[bufo, mc, :, :],
+                                                )
+                                                T.set_flag("v", "mte3", LSE_EV)
+                                                T.wait_flag("v", "mte3", LSE_EV)
+                                                T.copy(
+                                                    lse_ub, LSE[tok, r0 : r0 + M_CHUNK]
+                                                )
+                                                T.set_flag("mte3", "v", LSE_EV)
+                                            else:
+                                                # stash in_ub -> workspace_acc (MTE3) for
+                                                # the next tile's rescale. Two guards =
+                                                # ref DealBmm2:711-717 (which V-copies
+                                                # bmm2ResUb->outUb then MTE3-stashes outUb):
+                                                # (A) V->MTE3 so the stash reads the final
+                                                # in_ub slot (after its MTE2 load + optional
+                                                # V add); (B) MTE3->V->V_MTE2 so the next
+                                                # reuse of this slot (waits V_MTE2) is
+                                                # ordered after this stash read.
+                                                T.set_flag("v", "mte3", IN_EV + po)
+                                                T.wait_flag("v", "mte3", IN_EV + po)
+                                                T.copy(
+                                                    in_ub[po, :, :],
+                                                    workspace_acc[
+                                                        cid, bufo, r0 : r0 + M_CHUNK, :
+                                                    ],
+                                                )
+                                                T.set_flag("mte3", "v", IN_EV + po)
+                                                T.wait_flag("mte3", "v", IN_EV + po)
+                                                T.set_flag("v", "mte2", IN_EV + po)
+                            T.set_cross_flag("MTE3", EV_PV)
+                    # Drain ALL the vector buffers' reverse flags ONCE (balance the
+                    # primes above): each buffer's last consumer left its flag set
+                    # (= block_vector.h FreeAllEventID for the SYNC_*_BUF flags).
+                    T.wait_flag("v", "mte2", IN_EV)
+                    T.wait_flag("v", "mte2", IN_EV + 1)
+                    T.wait_flag("v", "mte2", ACC_EV)
+                    T.wait_flag("mte3", "v", OUT_EV)
+                    T.wait_flag("mte3", "v", LSE_EV)
+
+        return sparse_attn_sharedkv_cfa
+
+    func = kernel()
+    if os.environ.get("SAS_DUMP_SRC"):
+        try:
+            src = func.get_kernel_source()
+            with open("/tmp/cfa_gen.cpp", "w") as fh:
+                fh.write(src)
+            print(f"[SAS_DUMP_SRC] wrote {len(src)} chars to /tmp/cfa_gen.cpp")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[SAS_DUMP_SRC] get_kernel_source failed: {exc!r}")
+    return func
 
 
 def _build_swa(
