@@ -875,21 +875,16 @@ def _build_cfa(
                                             # output done reading it) = ref WaitFlag
                                             # <V_MTE2>(BUF1+pong):415.
                                             T.wait_flag("v", "mte2", IN_EV + ps)
-                                            # m-chunk's score row from ws_s into this
-                                            # ping-pong slot. Only the actual window
-                                            # tw_a columns are valid (the cube wrote
-                                            # exactly those); loading the full S2_BASE
-                                            # wastes MTE2 -- = ref columnCount =
-                                            # actualSingleProcessSInnerSizeAlign, NOT a
-                                            # fixed 512 (block_vector.h DealBmm1).
+                                            # m-chunk's [M_CHUNK, 512] score row from the
+                                            # contiguous ws_s into this ping-pong slot.
                                             T.copy(
                                                 workspace_s[
                                                     cid,
                                                     buf,
                                                     r0 : r0 + M_CHUNK,
-                                                    0:tw_a,
+                                                    0:S2_BASE,
                                                 ],
-                                                in_ub[ps, :, 0:tw_a],
+                                                in_ub[ps, :, :],
                                             )
                                             T.copy(
                                                 sinks[r0 : r0 + M_CHUNK],
@@ -955,16 +950,15 @@ def _build_cfa(
                                             T.set_flag("v", "mte2", IN_EV + ps)
                                             T.set_flag("v", "mte3", OUT_EV)
                                             T.wait_flag("v", "mte3", OUT_EV)
-                                            # copy out only the tw_a valid P columns
-                                            # (the cube PV reads exactly the window) --
-                                            # = ref width, saves MTE3.
+                                            # src out_ub full Buffer -> dst ws_p slice may
+                                            # be a BufferLoad (T.copy needs one extent).
                                             T.copy(
-                                                out_ub[:, 0:tw_a],
+                                                out_ub,
                                                 workspace_p[
                                                     cid,
                                                     buf,
                                                     r0 : r0 + M_CHUNK,
-                                                    0:tw_a,
+                                                    0:S2_BASE,
                                                 ],
                                             )
                                             # copy-out done, out_ub free = ref SetFlag
