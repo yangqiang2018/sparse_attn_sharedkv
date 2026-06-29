@@ -287,6 +287,21 @@ def _build_cfa(
     L0AB_EV0 = 4
     L0AB_EV1 = 5
 
+    # ---- Stage 2b vector within-pipe directed flags (= block_vector.h SYNC_*_BUF,
+    # replacing the m-chunk barrier_all). These are the VECTOR core's own event ids
+    # (independent of the cube core's above; the CrossCore EV_* are a separate
+    # mechanism). Mirrors the proven SWA vector debarrier (_build_swa), extended for
+    # CFA's mc loop + the multi-tile rescale (DealBmm2 671-697) / stash (709-717). ----
+    SV_S_EV = 2  # softmax s_ub/sink MTE2 buffer: V_MTE2 (WAR) + MTE2_V (RAW)
+    SV_P_EV = 3  # softmax p_half MTE3 buffer: MTE3_V (WAR) + V_MTE3 (RAW)
+    VO_O_EV = 4  # output o_ub MTE2 buffer (+ MTE3_V bridge on the stash path)
+    VO_ACC_EV = 5  # output acc_pre MTE2 buffer (rescale; SWA single-tile lacks this)
+    VO_OUT_EV = 6  # output o_half MTE3 buffer
+    VO_LSE_EV = 7  # output lse_ub MTE3 buffer
+    # workspace_acc cross-tile MTE3->MTE2 fence: the prev tile stashed it via MTE3,
+    # this tile reloads via MTE2 -> same-core GM RAW (= DealBmm2:672-674).
+    VO_FENCE = 0
+
     q_shape = [total_tokens, N1, D]
     ori_kv_shape = [ori_block_num, ori_block_size, N2, D]
     cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
@@ -797,6 +812,17 @@ def _build_cfa(
                 # =========================== VECTOR ===========================
                 with T.Scope("V"):
                     T.tile.fill(ones_ub, T.float32(1.0))
+                    # Prime every vector buffer's reverse flag ONCE (buffers free) =
+                    # block_vector.h InitBuffers SetFlag<V_MTE2>/<MTE3_V>; the first mc
+                    # of the first tile waits on an already-set flag. Drained once after
+                    # the g-loop. Each executed mc does exactly 1 wait + 1 set, so
+                    # skipping invalid tiles keeps the balance (wait+set is net-zero).
+                    T.set_flag("v", "mte2", SV_S_EV)  # s_ub/sink free
+                    T.set_flag("mte3", "v", SV_P_EV)  # p_half free
+                    T.set_flag("v", "mte2", VO_O_EV)  # o_ub free
+                    T.set_flag("v", "mte2", VO_ACC_EV)  # acc_pre free
+                    T.set_flag("mte3", "v", VO_OUT_EV)  # o_half free
+                    T.set_flag("mte3", "v", VO_LSE_EV)  # lse_ub free
                     for g in T.serial(1, GLOOP + 2):
                         # ---- softmax for tile g-1 ----
                         if g < GLOOP + 1:
@@ -831,9 +857,13 @@ def _build_cfa(
                                         tw_a = (tw + 15) // 16 * 16
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
-                                            # copy this m-chunk's [M_CHUNK, 512] score
-                                            # row from the contiguous ws_s (dst s_ub is a
-                                            # full Buffer, so T.copy deduces the extent).
+                                            # copy-in s_ub + sink (MTE2). WAR: wait s_ub
+                                            # free (prev mc's compute done reading it) =
+                                            # ref WaitFlag<V_MTE2>(block_vector.h:415).
+                                            T.wait_flag("v", "mte2", SV_S_EV)
+                                            # m-chunk's [M_CHUNK, 512] score row from the
+                                            # contiguous ws_s (dst s_ub full Buffer ->
+                                            # T.copy deduces the extent).
                                             T.copy(
                                                 workspace_s[
                                                     cid,
@@ -847,9 +877,15 @@ def _build_cfa(
                                                 sinks[r0 : r0 + M_CHUNK],
                                                 sink_ub,
                                             )
-                                            T.barrier_all()
+                                            # copy-in -> compute (= ref SetFlag/WaitFlag
+                                            # <MTE2_V>:418-419; one flag covers s_ub for
+                                            # mul/softmax and sink for softmax).
+                                            T.set_flag("mte2", "v", SV_S_EV)
+                                            T.wait_flag("mte2", "v", SV_S_EV)
                                             T.tile.mul(s_ub, s_ub, softmax_scale)
-                                            T.barrier_all()
+                                            # V-pipe order mul -> softmax (= ref
+                                            # PipeBarrier<PIPE_V>:423).
+                                            T.pipe_barrier("v")
                                             if is_first:
                                                 T.tile.softmax_flash_v2(
                                                     s_ub,
@@ -878,17 +914,27 @@ def _build_cfa(
                                                     tw_a,
                                                     tw,
                                                 )
-                                            T.barrier_all()
+                                            # V-pipe order softmax -> cast (= ref
+                                            # PipeBarrier<PIPE_V>:429).
+                                            T.pipe_barrier("v")
+                                            # cast -> copy-out (MTE3). WAR: wait p_half
+                                            # free (prev copy-out done) = ref
+                                            # WaitFlag<MTE3_V>(:431).
+                                            T.wait_flag("mte3", "v", SV_P_EV)
                                             T.tile.cast(
                                                 p_half,
                                                 s_ub,
                                                 "CAST_ROUND",
                                                 M_CHUNK * S2_BASE,
                                             )
-                                            T.barrier_all()
-                                            # src p_half is a full Buffer (extent
-                                            # deducible) -> dst ws_p slice may be a
-                                            # BufferLoad (T.copy needs one side w/ extent).
+                                            # s_ub free (compute done) = ref SetFlag
+                                            # <V_MTE2>(:434); cast -> copy-out = ref
+                                            # SetFlag/WaitFlag<V_MTE3>(:436-437).
+                                            T.set_flag("v", "mte2", SV_S_EV)
+                                            T.set_flag("v", "mte3", SV_P_EV)
+                                            T.wait_flag("v", "mte3", SV_P_EV)
+                                            # src p_half full Buffer -> dst ws_p slice may
+                                            # be a BufferLoad (T.copy needs one extent).
                                             T.copy(
                                                 p_half,
                                                 workspace_p[
@@ -898,7 +944,9 @@ def _build_cfa(
                                                     0:S2_BASE,
                                                 ],
                                             )
-                                            T.barrier_all()
+                                            # copy-out done, p_half free = ref SetFlag
+                                            # <MTE3_V>(:439); gates the cross EV_P below.
+                                            T.set_flag("mte3", "v", SV_P_EV)
                             T.set_cross_flag("MTE3", EV_P)
                         # ---- output for tile g-2 ----
                         if g >= 2:
@@ -925,51 +973,88 @@ def _build_cfa(
                                         tok = q_prefix[b] + s
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
+                                            # copy-in o_ub (MTE2). WAR: o_ub free (prev
+                                            # tile's last reader done) = ref
+                                            # WaitFlag<V_MTE2>(block_vector.h:656).
+                                            T.wait_flag("v", "mte2", VO_O_EV)
                                             T.copy(
                                                 workspace_o[
                                                     cid, bufo, r0 : r0 + M_CHUNK, :
                                                 ],
                                                 o_ub,
                                             )
-                                            T.barrier_all()
+                                            # copy-in -> compute (= ref SetFlag/WaitFlag
+                                            # <MTE2_V>:659-660).
+                                            T.set_flag("mte2", "v", VO_O_EV)
+                                            T.wait_flag("mte2", "v", VO_O_EV)
                                             if not_first:
-                                                # rescale prev accumulator + add.
+                                                # prev tile STASHED workspace_acc via
+                                                # MTE3; this MTE2 reload is a same-core
+                                                # cross-tile GM RAW -> MTE3->MTE2 fence
+                                                # (= ref DealBmm2:672-674).
+                                                T.set_flag("mte3", "mte2", VO_FENCE)
+                                                T.wait_flag("mte3", "mte2", VO_FENCE)
+                                                # WAR: acc_pre free (= ref WaitFlag
+                                                # <V_MTE2> SYNC_INPUT_BUF2:677).
+                                                T.wait_flag("v", "mte2", VO_ACC_EV)
                                                 T.copy(
                                                     workspace_acc[
                                                         cid, prevo, r0 : r0 + M_CHUNK, :
                                                     ],
                                                     acc_pre,
                                                 )
-                                                T.barrier_all()
+                                                # load -> compute (= ref SetFlag/WaitFlag
+                                                # <MTE2_V> BUF2:682-683).
+                                                T.set_flag("mte2", "v", VO_ACC_EV)
+                                                T.wait_flag("mte2", "v", VO_ACC_EV)
+                                                # rescale prev (RowMuls) -> Add (= ref
+                                                # :691-694, PipeBarrier<V> between).
                                                 T.tile.row_expand_mul_nd(
                                                     acc_pre,
                                                     acc_pre,
                                                     expmax[bufo, mc, :, :],
                                                     brcb_d,
                                                 )
-                                                T.barrier_all()
+                                                T.pipe_barrier("v")
                                                 T.tile.add(o_ub, o_ub, acc_pre)
-                                                T.barrier_all()
+                                                T.pipe_barrier("v")
+                                                # acc_pre free (= ref SetFlag<V_MTE2>
+                                                # BUF2:696).
+                                                T.set_flag("v", "mte2", VO_ACC_EV)
                                             if is_last:
-                                                # normalize, cast, write out + LSE.
+                                                # normalize -> cast -> copy out + LSE
+                                                # (= ref DealBmm2 700-708 + Bmm2Cast
+                                                # AndCopyOut + LSE block; flags as SWA).
                                                 T.tile.row_expand_div(
                                                     o_ub,
                                                     o_ub,
                                                     denom[bufo, mc, :, :],
                                                     brcb_d,
                                                 )
-                                                T.barrier_all()
+                                                T.pipe_barrier("v")
+                                                # cast -> copy-out (MTE3). WAR: o_half
+                                                # free = ref WaitFlag<MTE3_V>(:617).
+                                                T.wait_flag("mte3", "v", VO_OUT_EV)
                                                 T.tile.cast(
                                                     o_half,
                                                     o_ub,
                                                     out_cast_mode,
                                                     M_CHUNK * D,
                                                 )
-                                                T.barrier_all()
+                                                # o_ub free (V cast last-read it) = ref
+                                                # SetFlag<V_MTE2>; cast -> copy-out = ref
+                                                # SetFlag/WaitFlag<V_MTE3>(:624-625).
+                                                T.set_flag("v", "mte2", VO_O_EV)
+                                                T.set_flag("v", "mte3", VO_OUT_EV)
+                                                T.wait_flag("v", "mte3", VO_OUT_EV)
                                                 T.copy(
                                                     o_half,
                                                     Output[tok, r0 : r0 + M_CHUNK, :],
                                                 )
+                                                # o_half free = ref SetFlag<MTE3_V>(:627).
+                                                T.set_flag("mte3", "v", VO_OUT_EV)
+                                                # LSE = ln(denom)+m_i (= ref :393-402).
+                                                T.wait_flag("mte3", "v", VO_LSE_EV)
                                                 T.tile.ln(
                                                     lse_ub,
                                                     denom[bufo, mc, :, :],
@@ -979,20 +1064,43 @@ def _build_cfa(
                                                     lse_ub,
                                                     m_i[bufo, mc, :, :],
                                                 )
+                                                T.set_flag("v", "mte3", VO_LSE_EV)
+                                                T.wait_flag("v", "mte3", VO_LSE_EV)
                                                 T.copy(
                                                     lse_ub, LSE[tok, r0 : r0 + M_CHUNK]
                                                 )
-                                                T.barrier_all()
+                                                T.set_flag("mte3", "v", VO_LSE_EV)
                                             else:
-                                                # stash accumulator for the next tile.
+                                                # stash o_ub -> workspace_acc (MTE3) for
+                                                # the next tile's rescale. Two guards =
+                                                # ref DealBmm2:711-717 (which V-copies
+                                                # o_ub->outUb then MTE3-stashes outUb):
+                                                # (A) V->MTE3 so the stash reads the final
+                                                # o_ub (after its MTE2 load + optional V
+                                                # add); (B) MTE3->V->V_MTE2 so the next
+                                                # o_ub load (waits V_MTE2) is ordered
+                                                # after this stash read.
+                                                T.set_flag("v", "mte3", VO_O_EV)
+                                                T.wait_flag("v", "mte3", VO_O_EV)
                                                 T.copy(
                                                     o_ub,
                                                     workspace_acc[
                                                         cid, bufo, r0 : r0 + M_CHUNK, :
                                                     ],
                                                 )
-                                                T.barrier_all()
+                                                T.set_flag("mte3", "v", VO_O_EV)
+                                                T.wait_flag("mte3", "v", VO_O_EV)
+                                                T.set_flag("v", "mte2", VO_O_EV)
                             T.set_cross_flag("MTE3", EV_PV)
+                    # Drain ALL the vector buffers' reverse flags ONCE (balance the
+                    # primes above): each buffer's last consumer left its flag set
+                    # (= block_vector.h FreeAllEventID for the SYNC_*_BUF flags).
+                    T.wait_flag("v", "mte2", SV_S_EV)
+                    T.wait_flag("mte3", "v", SV_P_EV)
+                    T.wait_flag("v", "mte2", VO_O_EV)
+                    T.wait_flag("v", "mte2", VO_ACC_EV)
+                    T.wait_flag("mte3", "v", VO_OUT_EV)
+                    T.wait_flag("mte3", "v", VO_LSE_EV)
 
         return sparse_attn_sharedkv_cfa
 
