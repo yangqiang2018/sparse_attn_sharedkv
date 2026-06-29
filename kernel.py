@@ -373,7 +373,9 @@ def _build_cfa(
                     [M_CHUNK, D], accum_dtype
                 )  # prev accumulator (rescale)
                 o_half = T.alloc_ub([M_CHUNK, D], dtype)  # cast output
-                sink_ub = T.alloc_ub([M_CHUNK, 1], accum_dtype)
+                sink_ub = T.alloc_ub(
+                    [2, M_CHUNK, 1], accum_dtype
+                )  # m-split ping-pong [mc&1]: rides s_ub's slot-keyed SV_S_EV+ps flag
                 lse_ub = T.alloc_ub([M_CHUNK, 1], accum_dtype)
                 ones_ub = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # in_sum seed (1.0)
                 brcb_d = T.alloc_ub(
@@ -888,7 +890,7 @@ def _build_cfa(
                                             )
                                             T.copy(
                                                 sinks[r0 : r0 + M_CHUNK],
-                                                sink_ub,
+                                                sink_ub[ps, :, :],
                                             )
                                             # copy-in -> compute (= ref SetFlag/WaitFlag
                                             # <MTE2_V>(BUF1+pong):418-419; one flag covers
@@ -911,7 +913,7 @@ def _build_cfa(
                                                     expmax[buf, mc, :, :],
                                                     s_ub[ps, :, :],
                                                     ones_ub,
-                                                    sink_ub,
+                                                    sink_ub[ps, :, :],
                                                     softmax_tmp,
                                                     softmax_cmp,
                                                     tw_a,
