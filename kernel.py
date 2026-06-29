@@ -1335,7 +1335,7 @@ def _build_scfa(
     @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16, 17])
     def kernel():
         @T.prim_func
-        def sparse_attn_sharedkv_cfa(
+        def sparse_attn_sharedkv_scfa(
             Q: T.Tensor(q_shape, dtype),  # 0
             ori_kv: T.Tensor(ori_kv_shape, dtype),  # 1  (ori shared K & V)
             ori_block_table: T.Tensor([batch, ori_table_len], idx_dtype),  # 2
@@ -2151,15 +2151,15 @@ def _build_scfa(
                     T.wait_flag("mte3", "v", OUT_EV)
                     T.wait_flag("mte3", "v", LSE_EV)
 
-        return sparse_attn_sharedkv_cfa
+        return sparse_attn_sharedkv_scfa
 
     func = kernel()
     if os.environ.get("SAS_DUMP_SRC"):
         try:
             src = func.get_kernel_source()
-            with open("/tmp/cfa_gen.cpp", "w") as fh:
+            with open("/tmp/scfa_gen.cpp", "w") as fh:
                 fh.write(src)
-            print(f"[SAS_DUMP_SRC] wrote {len(src)} chars to /tmp/cfa_gen.cpp")
+            print(f"[SAS_DUMP_SRC] wrote {len(src)} chars to /tmp/scfa_gen.cpp")
         except Exception as exc:  # noqa: BLE001
             print(f"[SAS_DUMP_SRC] get_kernel_source failed: {exc!r}")
     return func
