@@ -1913,6 +1913,11 @@ def _build_scfa(
                             if v0pid < block_num:
                                 v0b = T.cast(v0pid // max_seq, "int32")
                                 v0s = T.cast(v0pid % max_seq, "int32")
+                                # token dim of cmp_indices/Q/Output is the FLAT token
+                                # q_prefix[b]+s (= cube/vector tok), NOT v0pid: they agree
+                                # for BSND (q_prefix=b*max_seq) & TND B=1 (q_prefix[0]=0)
+                                # but differ for TND B>1 (variable prefix sum) (review #2).
+                                v0tok = q_prefix[v0b] + v0s
                                 if v0s < act_q_lens[v0b]:
                                     v0skv = seqused_kv[v0b] - act_q_lens[v0b] + v0s
                                     v0acmp = (v0skv + 1) // cmp_ratio
@@ -1935,7 +1940,7 @@ def _build_scfa(
                                                         jtok = jb * M_CHUNK + jj
                                                         if jtok < v0n:
                                                             r2 = cmp_indices[
-                                                                v0pid,
+                                                                v0tok,
                                                                 0,
                                                                 v0rel * S2_BASE + jtok,
                                                             ]
@@ -1974,10 +1979,15 @@ def _build_scfa(
                                                             ],
                                                         )
                                                     T.barrier_all()
-                                    # signal cube: this cmp tile's merged KV ready (= ref
-                                    # syncV0C1). Set on BOTH vids (mode-2 group flag converges)
-                                    # -- same pattern as EV_P; only the WRITE above is vid==0.
-                                    T.set_cross_flag("MTE3", EV_V0)
+                                            # signal cube: this cmp tile's merged KV is
+                                            # ready (= ref syncV0C1). Set on BOTH vids
+                                            # (mode-2 group flag converges; = EV_P pattern)
+                                            # -- only the WRITE above is vid==0. MUST sit
+                                            # inside the SAME predicate as the cube QK wait
+                                            # (tile!=0 && tile<s2lt) -- one EV_V0 set per
+                                            # cmp tile -- else set/wait counts diverge ->
+                                            # cross-core deadlock + wrong slot (review #1).
+                                            T.set_cross_flag("MTE3", EV_V0)
                         # ---- softmax for tile g-1 ----
                         if g < GLOOP + 1:
                             T.wait_cross_flag(EV_QK)
