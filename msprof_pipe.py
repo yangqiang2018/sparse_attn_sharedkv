@@ -136,12 +136,24 @@ def collect(impl: str, scenario: str, outdir: str) -> str | None:
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print(f"\nmsprof failed: {e}")
         return None
-    # Auto-export usually drops CSVs under <outdir>/PROF_*/**/. Glob broadly and
-    # take the newest by mtime (outdir was wiped above, so this is THIS run's).
+    # Newer msprof COLLECTS into a PROF_* dir but does NOT auto-export the
+    # op_summary CSV (it just prints "Data is saved in .../PROF_*"). So run the
+    # explicit export pass on each fresh PROF_* dir to generate the CSVs, then
+    # glob. (outdir was wiped above, so every PROF_* here is from THIS run.)
+    if not glob.glob(os.path.join(outdir, "**", "*op_summary*.csv"), recursive=True):
+        for prof_dir in glob.glob(os.path.join(outdir, "PROF_*")):
+            print(f"exporting: msprof --export=on --output={prof_dir}")
+            try:
+                subprocess.run(
+                    ["msprof", "--export=on", f"--output={prof_dir}"], check=True
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"export failed for {prof_dir}: {e}")
+    # Take the newest op_summary CSV by mtime (this run's).
     cands = glob.glob(os.path.join(outdir, "**", "*op_summary*.csv"), recursive=True)
     cands.sort(key=os.path.getmtime)
     if not cands:
-        print(f"\nno op_summary CSV under {outdir}. Try exporting:")
+        print(f"\nno op_summary CSV under {outdir} even after --export=on. Try:")
         print(f"  msprof --export=on --output={outdir}/PROF_*")
         print(f"then: python msprof_pipe.py --csv {outdir}/PROF_*/.../op_summary_*.csv")
         return None
