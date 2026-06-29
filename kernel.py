@@ -99,17 +99,6 @@ def build_sparse_attn_sharedkv(
     """
     if scenario not in (1, 2):
         raise NotImplementedError(
-<<<<<<< HEAD
-            f"only SWA (scenario=1) is implemented; got scenario={scenario} (SCFA/CFA pending)"
-        )
-    if n_kv_heads != 1 or n_heads != 64 or head_dim != 512:
-        raise ValueError(
-            f"SWA kernel assumes N1=64, N2=1, D=512 (got N1={n_heads}, N2={n_kv_heads}, D={head_dim})"
-        )
-    if ori_win_left + 1 > DEFAULT_BLOCK_I:
-        raise ValueError(
-            f"ori_win_left={ori_win_left} exceeds single-tile window (BI={DEFAULT_BLOCK_I}); multi-tile SWA not implemented yet"
-=======
             f"only SWA (scenario=1) and CFA (scenario=2) are implemented; got scenario={scenario} (SCFA=3 pending)"
         )
     if n_kv_heads != 1 or n_heads != 64 or head_dim != 512:
@@ -119,7 +108,6 @@ def build_sparse_attn_sharedkv(
     if ori_win_left + 1 > DEFAULT_BLOCK_I:
         raise ValueError(
             f"ori_win_left={ori_win_left} exceeds single-tile window (BI={DEFAULT_BLOCK_I}); the ori window is one tile for both SWA and CFA"
->>>>>>> wip/swa-cv-pipeline
         )
 
     if scenario == 1:
