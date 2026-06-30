@@ -23,19 +23,34 @@ We discard it (configurable via --drop) and average the warm remainder.
 
 Usage
 -----
-  # Everything (swa/cfa/scfa x prefill/decode), bf16, default 1+5 launches:
+--ops and --phases each take ONE OR MORE values; the scenarios actually run are
+the FULL CROSS PRODUCT  (#ops) x (#phases).  Default = all 3 ops x both phases.
+
+  # Everything: swa/cfa/scfa x prefill/decode = 6 scenarios (bf16):
       python msprof_compare.py
 
-  # Just SCFA, both phases:
+  # A SINGLE scenario -- one op + one phase:
+      python msprof_compare.py --ops scfa --phases decode
+      #   -> scfa_decode
+
+  # One op, BOTH phases:
       python msprof_compare.py --ops scfa
+      #   -> scfa_prefill, scfa_decode
 
-  # CFA + SCFA, prefill only, fp16, more samples:
-      python msprof_compare.py --ops cfa scfa --phases prefill --dtype float16 --iters 9
+  # SEVERAL ops, ONE phase:
+      python msprof_compare.py --ops cfa scfa --phases prefill
+      #   -> cfa_prefill, scfa_prefill
 
-  # Decode only, all ops:
+  # SEVERAL ops x BOTH phases (cross product = 2 x 2 = 4 scenarios):
+      python msprof_compare.py --ops swa scfa --phases prefill decode
+      #   -> swa_prefill, scfa_prefill, swa_decode, scfa_decode
+
+  # All ops, decode only:
       python msprof_compare.py --phases decode
+      #   -> swa_decode, cfa_decode, scfa_decode
 
-  # If the auto-picked duration column is wrong, override the header substring:
+  # fp16 / more samples / override the duration column header:
+      python msprof_compare.py --ops scfa --dtype float16 --iters 9
       python msprof_compare.py --ops scfa --duration-col "aicore time"
 
 Notes
