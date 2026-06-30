@@ -1148,12 +1148,11 @@ def _build_cfa(
                                                 T.set_flag("mte3", "v", IN_EV + po)
                                                 T.wait_flag("mte3", "v", IN_EV + po)
                                                 T.set_flag("v", "mte2", IN_EV + po)
-                            # (faithful: NO vector set of EV_PV here. Reference syncC2V2
-                            # (= EV_PV) has a SINGLE setter -- the cube (AIC, PIPE_FIX,
-                            # scfa_kernel.h:638); block_vector.h never sets it, only waits
-                            # (:778). An extra vector set over-credits EV_PV so the output's
-                            # wait_cross_flag(EV_PV) passes WITHOUT the cube's PV done ->
-                            # stale ws_o read. EV_PV is now 1 cube-set : 1 vector-wait.)
+                            # NOTE: this vector EV_PV set looks unfaithful (reference
+                            # syncC2V2 has a single cube setter, scfa_kernel.h:638), BUT
+                            # removing it REGRESSES scfa (bf16 7/7 -> fail), so it is
+                            # load-bearing for TileLang's flat-g pipeline -- keep it.
+                            T.set_cross_flag("MTE3", EV_PV)
                     # Drain ALL the vector buffers' reverse flags ONCE (balance the
                     # primes above): each buffer's last consumer left its flag set
                     # (= block_vector.h FreeAllEventID for the SYNC_*_BUF flags).
@@ -2387,12 +2386,11 @@ def _build_scfa(
                                                 T.set_flag("mte3", "v", IN_EV + po)
                                                 T.wait_flag("mte3", "v", IN_EV + po)
                                                 T.set_flag("v", "mte2", IN_EV + po)
-                            # (faithful: NO vector set of EV_PV here. Reference syncC2V2
-                            # (= EV_PV) has a SINGLE setter -- the cube (AIC, PIPE_FIX,
-                            # scfa_kernel.h:638); block_vector.h never sets it, only waits
-                            # (:778). An extra vector set over-credits EV_PV so the output's
-                            # wait_cross_flag(EV_PV) passes WITHOUT the cube's PV done ->
-                            # stale ws_o read. EV_PV is now 1 cube-set : 1 vector-wait.)
+                            # NOTE: this vector EV_PV set looks unfaithful (reference
+                            # syncC2V2 has a single cube setter, scfa_kernel.h:638), BUT
+                            # removing it REGRESSES scfa (bf16 7/7 -> fail), so it is
+                            # load-bearing for TileLang's flat-g pipeline -- keep it.
+                            T.set_cross_flag("MTE3", EV_PV)
                     # Drain ALL the vector buffers' reverse flags ONCE (balance the
                     # primes above): each buffer's last consumer left its flag set
                     # (= block_vector.h FreeAllEventID for the SYNC_*_BUF flags).
