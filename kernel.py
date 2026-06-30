@@ -1971,16 +1971,17 @@ def _build_scfa(
                                                             # merge_ub[jj] (blockCount=1,
                                                             # blockLen=D bytes, no Duplicate
                                                             # -- = CopyInSingleKv bc=1).
+                                                            # POINT indices (jj / off), NOT
+                                                            # bounded slices jj:jj+1 -- the
+                                                            # latter parse to a BufferLoad
+                                                            # that _retrieve_ptr rejects;
+                                                            # point+full-slice = the
+                                                            # BufferRegion copy_pa/015 want.
                                                             T.copy_gather(
-                                                                merge_ub[
-                                                                    jj : jj + 1, :
-                                                                ],
+                                                                merge_ub[jj, :],
                                                                 cmp_kv[
                                                                     blkid,
-                                                                    r2
-                                                                    % cmp_block_size : r2
-                                                                    % cmp_block_size
-                                                                    + 1,
+                                                                    r2 % cmp_block_size,
                                                                     0,
                                                                     :,
                                                                 ],
