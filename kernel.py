@@ -1582,7 +1582,7 @@ def _build_scfa(
                                                         T.copy(
                                                             kvMergeGm[
                                                                 cid,
-                                                                g % 4,
+                                                                task % 4,
                                                                 cb * BI : cb * BI
                                                                 + ncols,
                                                                 h * D2 : h * D2 + D2,
@@ -1794,7 +1794,7 @@ def _build_scfa(
                                                         T.copy(
                                                             kvMergeGm[
                                                                 cid,
-                                                                gm % 4,
+                                                                taskm % 4,
                                                                 ks * BI : ks * BI
                                                                 + krows,
                                                                 nl * PV_NW : nl * PV_NW
@@ -2027,7 +2027,7 @@ def _build_scfa(
                                                         merge_ub[pp, 0:bcnt, :],
                                                         kvMergeGm[
                                                             cid,
-                                                            g % 4,
+                                                            v0task % 4,
                                                             v0start
                                                             + jb * MERGE_ROWS : v0start
                                                             + jb * MERGE_ROWS
