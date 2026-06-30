@@ -1298,6 +1298,15 @@ def _build_scfa(
     # V0 has written this cmp tile's merged KV (kvMergeGm); cube cmp QK may read it.
     # Cross-core id 3 (0/1/2 = EV_QK/P/PV); ori tiles skip it (cube reads ori_kv).
     EV_V0 = 3
+    # SCFA flag-3 (= reference SAS_SYNC_MODE2 literal flag 3, scfa_kernel.h:680-683/
+    # 777-780/801-803/816-818): a TASK-level 4-credit semaphore throttling the V0
+    # writer to <=4 tasks ahead of the cube reader of the SAME kvMergeGm slot (= 4-deep
+    # ring). The per-tile EV_V0 RAW handshake only orders the SCALAR pointer; the V0
+    # scatter (async MTE3 DMA) can run far ahead once issued, so without this credit the
+    # ring WAR fires intermittently at scale (full-8K cold NaN, confirmed: ring=32 probe
+    # passed 6/6). cube primes 4 + returns 1 after each task's last-tile PV read (MTE2);
+    # vector waits 1 before each task's first tile + drains 4. id 4 (0..3 used above).
+    EV_CREDIT = 4
 
     # ---- Stage 2 cube within-pipe sync (= SWA Layer 3/4/5, proven). ----
     # DEBUG_SERIAL gates the per-op T.barrier_all: True keeps every barrier (the
@@ -1348,13 +1357,12 @@ def _build_scfa(
     # 6/7; MTE2_MTE3 has no other user. Lets gather(batch i+1) overlap scatter(i).
     MRG_EV = 6
 
-    # PROBE (diagnostic, revert): kvMergeGm ring depth. Faithful = 4 (= ref cmpLoop%4).
-    # Bumped to 32 to test the kvMergeGm WAR hypothesis: if the intermittent full-8K
-    # cold NaN vanishes with a deeper ring (more slack between V0-write & cube-read of
-    # the same slot), the race IS a ring WAR; if unchanged, the ring WAR is ruled out.
-    # Workspace is JIT-auto-allocated from the signature shape (api.py:368) so only the
-    # 4 sites below change. core_num*32*512*512*2 ~= 400MB workspace at core_num=24.
-    KVMERGE_RING = 32
+    # kvMergeGm ring depth (= reference MERGE_CACHE_GM_BUF_NUM = 4, scfa_block_vector.h:125).
+    # MUST equal the EV_CREDIT prime count (4): the flag-3 credit bounds the V0 writer to
+    # <=KVMERGE_RING tasks ahead of the cube reader, so credits==slots keeps the ring WAR-
+    # free with max overlap (= reference's exact tuning). (A 32 probe confirmed the WAR;
+    # the faithful fix is flag-3 + ring=4, not a deeper ring.)
+    KVMERGE_RING = 4
 
     q_shape = [total_tokens, N1, D]
     ori_kv_shape = [ori_block_num, ori_block_size, N2, D]
@@ -1397,7 +1405,7 @@ def _build_scfa(
             # paged copy_pa).
             kvMergeGm: T.Tensor(
                 [core_num, KVMERGE_RING, S2_BASE, D], dtype
-            ),  # 18  (PROBE: ring depth KVMERGE_RING, faithful=4)
+            ),  # 18  (KVMERGE_RING-deep ring = ref MERGE_CACHE_GM_BUF_NUM=4)
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Cube L1/L0 allocations (kernel scope). ----
@@ -1470,6 +1478,11 @@ def _build_scfa(
                     T.set_flag("mte1", "mte2", KV_EV2)
                     T.set_flag("mte1", "mte2", Q_EV)
                     T.set_flag("mte1", "mte2", P_EV)
+                    # flag-3 prime (= scfa_kernel.h:680-683): AIC pre-loads KVMERGE_RING
+                    # credits so the first KVMERGE_RING tasks' V0 run freely; each credit
+                    # is returned after that task's last-tile PV reads the slot (below).
+                    for _cr in range(KVMERGE_RING):
+                        T.set_cross_flag("MTE2", EV_CREDIT)
                     for g in T.serial(GLOOP + 1):
                         # ---- QK for tile g ----
                         if g < GLOOP:
@@ -1892,6 +1905,11 @@ def _build_scfa(
                                             cl0_iter += 1
                                         # release P for the next tile's PV load.
                                         T.set_flag("mte1", "mte2", P_EV)
+                                        # flag-3 return (= scfa_kernel.h:816-818, isLastS2Loop): after this
+                                        # task's LAST valid tile PV has read its kvMergeGm slot (MTE2), hand
+                                        # back 1 credit so V0(task + KVMERGE_RING) may overwrite that slot.
+                                        if tilem == s2ltm - 1:
+                                            T.set_cross_flag("MTE2", EV_CREDIT)
                             # fire every g>=1 (incl. invalid) for count balance.
                             T.set_cross_flag("FIX", EV_PV)
                     # FreeEventID (= block_cube.h:239): drain the L0AB pair {4,5}, the 3
@@ -1951,6 +1969,17 @@ def _build_scfa(
                                 # but differ for TND B>1 (variable prefix sum) (review #2).
                                 v0tok = q_prefix[v0b] + v0s
                                 if v0s < act_q_lens[v0b]:
+                                    # flag-3 wait (= scfa_kernel.h:801-803, isFirstSInnerLoop):
+                                    # before this task's FIRST tile's V0, take 1 credit so the
+                                    # V0 scatter (async MTE3) cannot run > KVMERGE_RING tasks
+                                    # ahead of the cube reader of the same kvMergeGm slot. A
+                                    # task's first V0 tile is tile 0 (g = task*MAX_TILES); but
+                                    # the vector loop starts at g=1, so task 0's tile 0 (g=0)
+                                    # is never processed -- its credit is taken at g==1 (its
+                                    # first processed V0 tile). One wait per valid task, exactly
+                                    # matching the cube's one return per valid task (last tile).
+                                    if v0tile == 0 or g == 1:
+                                        T.wait_cross_flag(EV_CREDIT)
                                     v0skv = seqused_kv[v0b] - act_q_lens[v0b] + v0s
                                     v0acmp = (v0skv + 1) // cmp_ratio
                                     # sparse merged length = min(topk_cmp, causal act_cmp)
@@ -2362,6 +2391,13 @@ def _build_scfa(
                     T.wait_flag("v", "mte2", ACC_EV)
                     T.wait_flag("mte3", "v", OUT_EV)
                     T.wait_flag("mte3", "v", LSE_EV)
+                    # flag-3 drain (= scfa_kernel.h:777-780): consume the KVMERGE_RING
+                    # credits the cube returned for the LAST KVMERGE_RING tasks (whose
+                    # V0-waits already passed). Balances the cube prime: cube sets
+                    # KVMERGE_RING + Ntask, vector waits Ntask + KVMERGE_RING -> equal, no
+                    # leftover credit (which would loosen the WAR bound), no deadlock.
+                    for _cr in range(KVMERGE_RING):
+                        T.wait_cross_flag(EV_CREDIT)
 
         return sparse_attn_sharedkv_scfa
 
