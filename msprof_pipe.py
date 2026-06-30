@@ -1,31 +1,46 @@
-"""Collect + extract the per-pipe msprof numbers for the sparse_attn_sharedkv
-kernel (cube/vector time + mac/scalar/mte/fixpipe/vec ratios), for TileLang vs
-Ascend C bottleneck localisation.
+"""采集并提取 sparse_attn_sharedkv kernel 的逐-pipe msprof 数据(cube/vector 时间 +
+mac/scalar/mte/fixpipe/vec 各占比),用于 TileLang vs Ascend C 的瓶颈定位。
 
-The decisive question this answers: is the kernel compute-bound, memory-bound, or
-overlap/sync-bound, and on which pipe -- so the next change can target the real
-cost instead of guessing.
+它回答的核心问题:kernel 是算力受限、访存受限、还是 overlap/同步受限,卡在哪个 pipe ——
+这样下一步优化能对症,而不是靠猜。
 
-Two ways to use it (run on the NPU container):
+两种用法(都在 NPU 容器里跑):
 
-  A) Collect AND parse in one shot (runs msprof for you):
+  A) 一键采集 + 解析(自动帮你跑 msprof):
        python msprof_pipe.py --impl tilelang  --scenario swa_prefill
        python msprof_pipe.py --impl ascendc   --scenario swa_prefill
 
-  B) Parse a CSV you already produced your own way (most robust if your msprof
-     CLI differs):
-       # produce op_summary CSV however you normally do, with PipeUtilization, then:
+  B) 解析你自己已经产出的 CSV(若你那边 msprof 命令行不同,这种最稳):
+       # 先用你惯常的方式跑出带 PipeUtilization 的 op_summary CSV,然后:
        python msprof_pipe.py --csv /path/to/op_summary_*.csv
 
-What it prints, for every op row whose name matches --match (default
-"sparse_attn_sharedkv"): the op name + every column whose header mentions
-time / ratio / cycles. It also lists ALL distinct op names found, so if the
-filter misses, you can see the real op name and re-run with --match.
+参数:
+  --impl     tilelang | ascendc    选哪个实现(缺省 tilelang)
+  --scenario 场景名,可选 swa_prefill / cfa_prefill / scfa_prefill /
+             swa_decode / cfa_decode / scfa_decode(缺省 swa_prefill)
+  --csv      直接解析已有的 op_summary CSV(给了它就跳过采集)
+  --match    op 名过滤串(缺省 "sparse_attn_sharedkv")
+  --exclude  跳过名字含此串的 op(缺省 "metadata";传 "" 关闭)
+  --outdir   msprof 输出目录
 
-Key derived check (do it by eye on the printed numbers):
-  * device kernel time ~= max(aicore_time, aiv_time)  -> cube/vector overlap is GOOD
-  * device kernel time ~= aicore_time + aiv_time       -> cube/vector run SERIALLY
-  * aic_scalar_ratio vs the old 0.63                    -> did the scalar load drop
+举例:
+  # 采集 + 解析 TileLang 的 scfa_prefill:
+      python msprof_pipe.py --impl tilelang --scenario scfa_prefill
+  # 采集 + 解析 Ascend C 的 scfa_decode:
+      python msprof_pipe.py --impl ascendc --scenario scfa_decode
+  # 只解析一个已有的 CSV:
+      python msprof_pipe.py --csv ./prof_tilelang_scfa_prefill/PROF_xxx/.../op_summary_x.csv
+
+它会打印:每个名字匹配 --match 的 op 行 —— op 名 + 所有表头含 time/ratio/cycles 的列;
+并列出找到的全部不同 op 名,万一过滤没命中,你能看到真实 op 名再用 --match 重跑。
+
+关键的人工判读(对着打印的数字眼看):
+  * device kernel time ≈ max(aicore_time, aiv_time)  → cube/vector overlap 好
+  * device kernel time ≈ aicore_time + aiv_time      → cube/vector 串行(没 overlap)
+  * aic_scalar_ratio 对比老的 0.63                    → scalar 负载有没有降下来
+
+注:本工具只看逐-pipe 占比/瓶颈;要直接对比 ascendc vs tilelang 的 Task Duration 平均值
+(丢冷启动、算追平百分比),用同目录的 msprof_compare.py。
 """
 
 from __future__ import annotations

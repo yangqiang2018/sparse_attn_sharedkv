@@ -1,67 +1,62 @@
-"""TileLang-vs-Ascend C perf scoreboard for sparse_attn_sharedkv (8K prefill + decode).
+"""sparse_attn_sharedkv 的 TileLang vs Ascend C 性能计分板(8K prefill + decode)。
 
-For each selected scenario it runs msprof TWICE (once with the Ascend C kernel,
-once with the TileLang kernel), reads the op's **Task Duration** from the
-op_summary CSV, **drops the first (cold-start) sample** and averages the rest,
-then prints, per scenario:
+对每个选中的场景,各跑两次 msprof(一次 Ascend C kernel、一次 TileLang kernel),
+从 op_summary CSV 读出该 op 的 **Task Duration**,**丢掉第 1 条(冷启动)样本**、其余取平均,
+然后每个场景打印一行:
 
-    ascendc avg Task Duration | tilelang avg Task Duration | ascendc / tilelang
+    ascendc 平均 Task Duration | tilelang 平均 Task Duration | ascendc / tilelang
 
-The last column is how far TileLang has caught up: ``ascendc / tilelang`` (a
-duration ratio, so >1.0 = TileLang is FASTER, =1.0 = parity, <1.0 = TileLang
-reaches that fraction of Ascend C's speed). It is also printed as a percentage.
+最后一列衡量 TileLang 追平到什么程度:``ascendc / tilelang``(时长之比,所以 >1.0 = TileLang
+更快、=1.0 = 持平、<1.0 = TileLang 达到 Ascend C 速度的该比例),同时以百分比打印。
 
-Run this ON THE NPU CONTAINER (it shells out to ``msprof`` and the bench runner
-``sparse_attn_sharedkv_perf_compare.py``). A full sweep is 6 scenarios x 2 impls
-x (warmup+iters) launches under msprof -- the three *prefill* cases are 8K and
-take minutes each, so narrow with --ops / --phases when iterating.
+在 NPU 容器里跑(它会调用 ``msprof`` 和压测脚本 ``sparse_attn_sharedkv_perf_compare.py``)。
+全量一次是 6 场景 × 2 实现 × (warmup+iters) 次 launch;三个 prefill 是 8K、每个要几分钟,
+迭代时用 --ops / --phases 缩小范围。
 
-WHY "drop the first sample": the first profiled launch carries one-time cost
-(cold i-cache/d-cache, kernel load, HBM/TLB cold, DVFS freq ramp) that is not
-the kernel's steady-state time -- so the first op_summary row reads too long.
-We discard it (configurable via --drop) and average the warm remainder.
+为什么"丢第 1 条样本":第一次被采集的 launch 含一次性开销(i-cache/d-cache 冷、kernel 加载、
+HBM/TLB 冷、DVFS 频率爬坡),不是 kernel 的稳态时间 → op_summary 第一行偏长。我们丢掉它
+(可用 --drop 调),对其余 warm 样本取平均。
 
-Usage
------
---ops and --phases each take ONE OR MORE values; the scenarios actually run are
-the FULL CROSS PRODUCT  (#ops) x (#phases).  Default = all 3 ops x both phases.
+用法
+----
+--ops 和 --phases 都可给"一个或多个"值;实际跑的场景 = 两者的**笛卡尔积** (#ops) × (#phases)。
+缺省 = 全部 3 个 op × 两个 phase。
 
-  # Everything: swa/cfa/scfa x prefill/decode = 6 scenarios (bf16):
+  # 全量:swa/cfa/scfa × prefill/decode = 6 个场景(bf16):
       python msprof_compare.py
 
-  # A SINGLE scenario -- one op + one phase:
+  # 单个场景 —— 一个 op + 一个 phase:
       python msprof_compare.py --ops scfa --phases decode
       #   -> scfa_decode
 
-  # One op, BOTH phases:
+  # 一个 op、两个 phase:
       python msprof_compare.py --ops scfa
       #   -> scfa_prefill, scfa_decode
 
-  # SEVERAL ops, ONE phase:
+  # 多个 op、一个 phase:
       python msprof_compare.py --ops cfa scfa --phases prefill
       #   -> cfa_prefill, scfa_prefill
 
-  # SEVERAL ops x BOTH phases (cross product = 2 x 2 = 4 scenarios):
+  # 多个 op × 两个 phase(笛卡尔积 = 2 × 2 = 4 个场景):
       python msprof_compare.py --ops swa scfa --phases prefill decode
       #   -> swa_prefill, scfa_prefill, swa_decode, scfa_decode
 
-  # All ops, decode only:
+  # 全部 op、只 decode:
       python msprof_compare.py --phases decode
       #   -> swa_decode, cfa_decode, scfa_decode
 
-  # fp16 / more samples / override the duration column header:
+  # fp16 / 多采样 / 覆盖时长列的表头串:
       python msprof_compare.py --ops scfa --dtype float16 --iters 9
       python msprof_compare.py --ops scfa --duration-col "aicore time"
 
-Notes
------
-* --iters N  -> N profiled launches per (scenario, impl); after --drop D leading
-  cold samples, the remaining N-D are averaged. Default N=6, D=1 -> avg of 5.
-* --warmup is passed to the bench runner as UNtimed launches BEFORE the profiled
-  ones; msprof still records them, so we instead rely on --drop. Keep warmup=0
-  (default) so the profiled rows == the N iters and --drop is exact.
-* Needs both kernels available in the container (the runner's --only ascendc /
-  --only tilelang paths). If one side fails to collect, that cell prints "n/a".
+说明
+----
+* --iters N  -> 每个 (场景, 实现) 采集 N 次 launch;丢掉前 --drop D 条冷样本后,其余 N-D 取平均。
+  缺省 N=6、D=1 → 平均 5 条。
+* --warmup 透传给压测脚本,作为"采集前的 untimed 预热 launch";但 msprof 仍会记录它们,
+  所以我们改用 --drop 丢冷样本。保持 warmup=0(缺省),让被采集的行数 == N(iters)、--drop 才精确。
+* 需要容器里两个 kernel 都可用(压测脚本的 --only ascendc / --only tilelang 两条路径);
+  若某一侧采集失败,那一格打印 "n/a"。
 """
 
 from __future__ import annotations
