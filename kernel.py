@@ -1944,81 +1944,74 @@ def _build_scfa(
                                             v0n = T.min(
                                                 S2_BASE, v0asparse - v0rel * S2_BASE
                                             )
-                                            # sub-block 0 merges (Phase A single-threaded;
-                                            # Phase D splits across vid per GetSubBlockIdx).
-                                            if vid == 0:
-                                                # batched merge: gather MERGE_ROWS topk
-                                                # tokens (015 T.copy_gather, no Duplicate),
-                                                # then ONE batched UB->GM scatter. 2 barriers
-                                                # per batch (gather->scatter RAW, scatter->
-                                                # next-gather WAR) instead of per token
-                                                # (= step1; step4 swaps barriers for ping-
-                                                # pong + directed flags).
-                                                for jb in T.serial(V0_NB):
-                                                    for jj in range(MERGE_ROWS):
-                                                        jtok = jb * MERGE_ROWS + jj
-                                                        if jtok < v0n:
-                                                            r2 = cmp_indices[
-                                                                v0tok,
+                                            # Sub-block split (= ref ProcessVec0L s2GmStartOffset/
+                                            # s2GmLimit): BOTH vids merge HALF, so BOTH set EV_V0
+                                            # after a REAL MTE3-fenced scatter. (vid==1 doing no
+                                            # merge but still setting EV_V0 was an UNFENCED "empty
+                                            # set" -> the cube's MODE2 rendezvous could converge
+                                            # before vid==0's scatter landed -> stale/uninit read
+                                            # = cold-start NaN. This = the faithful reference + 2x
+                                            # V0 throughput.) Both vids write DISJOINT kvMergeGm
+                                            # rows; cube waits both (rendezvous) -> reads complete.
+                                            v0half = (v0n + 1) // 2
+                                            v0start = tir.Select(vid == 0, 0, v0half)
+                                            v0lim = tir.Select(vid == 0, v0half, v0n)
+                                            for jb in T.serial(V0_NB):
+                                                for jj in range(MERGE_ROWS):
+                                                    jtok = (
+                                                        v0start + jb * MERGE_ROWS + jj
+                                                    )
+                                                    if jtok < v0lim:
+                                                        r2 = cmp_indices[
+                                                            v0tok,
+                                                            0,
+                                                            v0rel * S2_BASE + jtok,
+                                                        ]
+                                                        blkid = cmp_block_table[
+                                                            v0b, r2 // cmp_block_size
+                                                        ]
+                                                        # 015 gather 1 token GM->UB merge_ub[jj]
+                                                        # (blockCount=1, no Duplicate; POINT
+                                                        # indices not bounded slice -> BufferLoad).
+                                                        T.copy_gather(
+                                                            merge_ub[jj, :],
+                                                            cmp_kv[
+                                                                blkid,
+                                                                r2 % cmp_block_size,
                                                                 0,
-                                                                v0rel * S2_BASE + jtok,
-                                                            ]
-                                                            blkid = cmp_block_table[
-                                                                v0b,
-                                                                r2 // cmp_block_size,
-                                                            ]
-                                                            # 015 gather: 1 token GM->UB
-                                                            # merge_ub[jj] (blockCount=1,
-                                                            # blockLen=D bytes, no Duplicate
-                                                            # -- = CopyInSingleKv bc=1).
-                                                            # POINT indices (jj / off), NOT
-                                                            # bounded slices jj:jj+1 -- the
-                                                            # latter parse to a BufferLoad
-                                                            # that _retrieve_ptr rejects;
-                                                            # point+full-slice = the
-                                                            # BufferRegion copy_pa/015 want.
-                                                            T.copy_gather(
-                                                                merge_ub[jj, :],
-                                                                cmp_kv[
-                                                                    blkid,
-                                                                    r2 % cmp_block_size,
-                                                                    0,
-                                                                    :,
-                                                                ],
-                                                                1,
-                                                                D * kv_dsz,
-                                                                0,
-                                                                0,
-                                                            )
-                                                    T.barrier_all()
-                                                    # batched scatter: this batch's valid
-                                                    # rows UB->GM (= CopyOutMrgeResult, the
-                                                    # blockCount-row contiguous write).
-                                                    if jb * MERGE_ROWS < v0n:
-                                                        bcnt = T.min(
-                                                            MERGE_ROWS,
-                                                            v0n - jb * MERGE_ROWS,
-                                                        )
-                                                        T.copy(
-                                                            merge_ub[0:bcnt, :],
-                                                            kvMergeGm[
-                                                                cid,
-                                                                g % 4,
-                                                                jb * MERGE_ROWS : jb
-                                                                * MERGE_ROWS
-                                                                + bcnt,
                                                                 :,
                                                             ],
+                                                            1,
+                                                            D * kv_dsz,
+                                                            0,
+                                                            0,
                                                         )
-                                                    T.barrier_all()
-                                            # signal cube: this cmp tile's merged KV is
-                                            # ready (= ref syncV0C1). Set on BOTH vids
-                                            # (mode-2 group flag converges; = EV_P pattern)
-                                            # -- only the WRITE above is vid==0. MUST sit
-                                            # inside the SAME predicate as the cube QK wait
-                                            # (tile!=0 && tile<s2lt) -- one EV_V0 set per
-                                            # cmp tile -- else set/wait counts diverge ->
-                                            # cross-core deadlock + wrong slot (review #1).
+                                                T.barrier_all()
+                                                # batched scatter of this batch's valid rows to
+                                                # kvMergeGm[this vid's disjoint row range] (=
+                                                # CopyOutMrgeResult, blockCount-row contiguous).
+                                                if v0start + jb * MERGE_ROWS < v0lim:
+                                                    bcnt = T.min(
+                                                        MERGE_ROWS,
+                                                        v0lim
+                                                        - (v0start + jb * MERGE_ROWS),
+                                                    )
+                                                    T.copy(
+                                                        merge_ub[0:bcnt, :],
+                                                        kvMergeGm[
+                                                            cid,
+                                                            g % 4,
+                                                            v0start
+                                                            + jb * MERGE_ROWS : v0start
+                                                            + jb * MERGE_ROWS
+                                                            + bcnt,
+                                                            :,
+                                                        ],
+                                                    )
+                                                T.barrier_all()
+                                            # both vids did a REAL fenced scatter -> set EV_V0 (= ref
+                                            # syncV0C1 from both sub-blocks). MODE2 rendezvous waits
+                                            # both; both now fenced -> no early-converge stale read.
                                             T.set_cross_flag("MTE3", EV_V0)
                         # ---- softmax for tile g-1 ----
                         if g < GLOOP + 1:
