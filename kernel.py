@@ -1348,6 +1348,14 @@ def _build_scfa(
     # 6/7; MTE2_MTE3 has no other user. Lets gather(batch i+1) overlap scatter(i).
     MRG_EV = 6
 
+    # PROBE (diagnostic, revert): kvMergeGm ring depth. Faithful = 4 (= ref cmpLoop%4).
+    # Bumped to 32 to test the kvMergeGm WAR hypothesis: if the intermittent full-8K
+    # cold NaN vanishes with a deeper ring (more slack between V0-write & cube-read of
+    # the same slot), the race IS a ring WAR; if unchanged, the ring WAR is ruled out.
+    # Workspace is JIT-auto-allocated from the signature shape (api.py:368) so only the
+    # 4 sites below change. core_num*32*512*512*2 ~= 400MB workspace at core_num=24.
+    KVMERGE_RING = 32
+
     q_shape = [total_tokens, N1, D]
     ori_kv_shape = [ori_block_num, ori_block_size, N2, D]
     cmp_kv_shape = [cmp_block_num, cmp_block_size, N2, D]
@@ -1387,7 +1395,9 @@ def _build_scfa(
             # vs cube-read WAR. V0 (vector) gathers topk-selected cmp tokens here; cube
             # cmp QK/PV read it via a plain Nd2Nz copy (= block_cube.h:448-478, NOT
             # paged copy_pa).
-            kvMergeGm: T.Tensor([core_num, 4, S2_BASE, D], dtype),  # 18
+            kvMergeGm: T.Tensor(
+                [core_num, KVMERGE_RING, S2_BASE, D], dtype
+            ),  # 18  (PROBE: ring depth KVMERGE_RING, faithful=4)
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
                 # ---- Cube L1/L0 allocations (kernel scope). ----
@@ -1582,7 +1592,7 @@ def _build_scfa(
                                                         T.copy(
                                                             kvMergeGm[
                                                                 cid,
-                                                                task % 4,
+                                                                task % KVMERGE_RING,
                                                                 cb * BI : cb * BI
                                                                 + ncols,
                                                                 h * D2 : h * D2 + D2,
@@ -1794,7 +1804,7 @@ def _build_scfa(
                                                         T.copy(
                                                             kvMergeGm[
                                                                 cid,
-                                                                taskm % 4,
+                                                                taskm % KVMERGE_RING,
                                                                 ks * BI : ks * BI
                                                                 + krows,
                                                                 nl * PV_NW : nl * PV_NW
@@ -2027,7 +2037,7 @@ def _build_scfa(
                                                         merge_ub[pp, 0:bcnt, :],
                                                         kvMergeGm[
                                                             cid,
-                                                            v0task % 4,
+                                                            v0task % KVMERGE_RING,
                                                             v0start
                                                             + jb * MERGE_ROWS : v0start
                                                             + jb * MERGE_ROWS
