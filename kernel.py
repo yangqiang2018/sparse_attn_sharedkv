@@ -1148,7 +1148,12 @@ def _build_cfa(
                                                 T.set_flag("mte3", "v", IN_EV + po)
                                                 T.wait_flag("mte3", "v", IN_EV + po)
                                                 T.set_flag("v", "mte2", IN_EV + po)
-                            T.set_cross_flag("MTE3", EV_PV)
+                            # (faithful: NO vector set of EV_PV here. Reference syncC2V2
+                            # (= EV_PV) has a SINGLE setter -- the cube (AIC, PIPE_FIX,
+                            # scfa_kernel.h:638); block_vector.h never sets it, only waits
+                            # (:778). An extra vector set over-credits EV_PV so the output's
+                            # wait_cross_flag(EV_PV) passes WITHOUT the cube's PV done ->
+                            # stale ws_o read. EV_PV is now 1 cube-set : 1 vector-wait.)
                     # Drain ALL the vector buffers' reverse flags ONCE (balance the
                     # primes above): each buffer's last consumer left its flag set
                     # (= block_vector.h FreeAllEventID for the SYNC_*_BUF flags).
@@ -2382,7 +2387,12 @@ def _build_scfa(
                                                 T.set_flag("mte3", "v", IN_EV + po)
                                                 T.wait_flag("mte3", "v", IN_EV + po)
                                                 T.set_flag("v", "mte2", IN_EV + po)
-                            T.set_cross_flag("MTE3", EV_PV)
+                            # (faithful: NO vector set of EV_PV here. Reference syncC2V2
+                            # (= EV_PV) has a SINGLE setter -- the cube (AIC, PIPE_FIX,
+                            # scfa_kernel.h:638); block_vector.h never sets it, only waits
+                            # (:778). An extra vector set over-credits EV_PV so the output's
+                            # wait_cross_flag(EV_PV) passes WITHOUT the cube's PV done ->
+                            # stale ws_o read. EV_PV is now 1 cube-set : 1 vector-wait.)
                     # Drain ALL the vector buffers' reverse flags ONCE (balance the
                     # primes above): each buffer's last consumer left its flag set
                     # (= block_vector.h FreeAllEventID for the SYNC_*_BUF flags).
