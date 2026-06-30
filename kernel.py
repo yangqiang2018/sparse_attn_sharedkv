@@ -1275,7 +1275,11 @@ def _build_scfa(
 
     # Max cmp tiles per task (compile-time upper bound). cmp length per task =
     # (s_global+1)//cmp_ratio <= max_seq//cmp_ratio; tiled at S2_BASE.
-    max_cmp_len = (max_seq + cmp_ratio - 1) // cmp_ratio
+    # SCFA: the cmp segment is the topk-MERGED KV, capped at topk_cmp tokens
+    # (NOT dense max_seq/cmp_ratio). So at most ceil(topk_cmp/S2_BASE) cmp tiles;
+    # using the dense count left ~2.5x EMPTY padding-tile pipeline iterations that
+    # still ran the cross-flag handshakes (EV_QK/P/PV/V0). Cap = sparse merged len.
+    max_cmp_len = min((max_seq + cmp_ratio - 1) // cmp_ratio, topk_cmp)
     MAX_CMP_TILES = (max_cmp_len + S2_BASE - 1) // S2_BASE
     MAX_TILES = 1 + MAX_CMP_TILES  # 1 ori tile + cmp tiles
 
