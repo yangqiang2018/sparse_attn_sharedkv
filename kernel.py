@@ -1979,37 +1979,134 @@ def _build_scfa(
                                                     T.wait_flag(
                                                         "mte3", "mte2", MRG_EV + pp
                                                     )
-                                                    for jj in range(MERGE_ROWS):
+                                                    # gather in PAIRS (= ref CopyInKv): fuse 2 topk tokens into ONE
+                                                    # DataCopyPad(blockCount=2, srcStride=gap) when their GM gap fits,
+                                                    # else fall back to 2 single copies (= CopyInSingleKv). This is
+                                                    # 015's raison d'etre. The fused copy reads min-offset token first
+                                                    # (GM-address order) -> may swap the 2 merge rows vs topk order,
+                                                    # but attention is permutation-invariant over keys -> result same.
+                                                    for jpair in range(MERGE_ROWS // 2):
+                                                        jj = jpair * 2
                                                         jtok = (
                                                             v0start
                                                             + jb * MERGE_ROWS
                                                             + jj
                                                         )
                                                         if jtok < v0lim:
-                                                            r2 = cmp_indices[
+                                                            r2a = cmp_indices[
                                                                 v0tok,
                                                                 0,
                                                                 v0rel * S2_BASE + jtok,
                                                             ]
-                                                            blkid = cmp_block_table[
+                                                            pba = cmp_block_table[
                                                                 v0b,
-                                                                r2 // cmp_block_size,
+                                                                r2a // cmp_block_size,
                                                             ]
-                                                            # 015 gather 1 token GM->UB merge_ub[pp,jj]
-                                                            # (no Duplicate; POINT idx not bounded slice).
-                                                            T.copy_gather(
-                                                                merge_ub[pp, jj, :],
-                                                                cmp_kv[
-                                                                    blkid,
-                                                                    r2 % cmp_block_size,
+                                                            wa = r2a % cmp_block_size
+                                                            off_a = (
+                                                                pba * cmp_block_size
+                                                                + wa
+                                                            ) * D
+                                                            if jtok + 1 < v0lim:
+                                                                r2b = cmp_indices[
+                                                                    v0tok,
                                                                     0,
-                                                                    :,
-                                                                ],
-                                                                1,
-                                                                D * kv_dsz,
-                                                                0,
-                                                                0,
-                                                            )
+                                                                    v0rel * S2_BASE
+                                                                    + jtok
+                                                                    + 1,
+                                                                ]
+                                                                pbb = cmp_block_table[
+                                                                    v0b,
+                                                                    r2b
+                                                                    // cmp_block_size,
+                                                                ]
+                                                                wb = (
+                                                                    r2b % cmp_block_size
+                                                                )
+                                                                off_b = (
+                                                                    pbb * cmp_block_size
+                                                                    + wb
+                                                                ) * D
+                                                                absgap = T.max(
+                                                                    off_b - off_a,
+                                                                    off_a - off_b,
+                                                                )
+                                                                # fuse iff 2 distinct tokens (>= D apart); same-token
+                                                                # (absgap==0) -> fallback (degenerate dup topk).
+                                                                if absgap >= D:
+                                                                    # one fused DataCopyPad: 2 blocks of D, src gap =
+                                                                    # (absgap - D) elems, packed in UB[pp, jj:jj+2].
+                                                                    pbmin = tir.Select(
+                                                                        off_a <= off_b,
+                                                                        pba,
+                                                                        pbb,
+                                                                    )
+                                                                    wmin = tir.Select(
+                                                                        off_a <= off_b,
+                                                                        wa,
+                                                                        wb,
+                                                                    )
+                                                                    T.copy_gather(
+                                                                        merge_ub[
+                                                                            pp, jj, :
+                                                                        ],
+                                                                        cmp_kv[
+                                                                            pbmin,
+                                                                            wmin,
+                                                                            0,
+                                                                            :,
+                                                                        ],
+                                                                        2,
+                                                                        D * kv_dsz,
+                                                                        (absgap - D)
+                                                                        * kv_dsz,
+                                                                        0,
+                                                                    )
+                                                                else:
+                                                                    T.copy_gather(
+                                                                        merge_ub[
+                                                                            pp, jj, :
+                                                                        ],
+                                                                        cmp_kv[
+                                                                            pba,
+                                                                            wa,
+                                                                            0,
+                                                                            :,
+                                                                        ],
+                                                                        1,
+                                                                        D * kv_dsz,
+                                                                        0,
+                                                                        0,
+                                                                    )
+                                                                    T.copy_gather(
+                                                                        merge_ub[
+                                                                            pp,
+                                                                            jj + 1,
+                                                                            :,
+                                                                        ],
+                                                                        cmp_kv[
+                                                                            pbb,
+                                                                            wb,
+                                                                            0,
+                                                                            :,
+                                                                        ],
+                                                                        1,
+                                                                        D * kv_dsz,
+                                                                        0,
+                                                                        0,
+                                                                    )
+                                                            else:
+                                                                # odd tail: only token a (single).
+                                                                T.copy_gather(
+                                                                    merge_ub[pp, jj, :],
+                                                                    cmp_kv[
+                                                                        pba, wa, 0, :
+                                                                    ],
+                                                                    1,
+                                                                    D * kv_dsz,
+                                                                    0,
+                                                                    0,
+                                                                )
                                                     # gather(MTE2)->scatter(MTE3) RAW on buf pp (= ref
                                                     # CopyOutMrgeResult's MTE2_MTE3 fence).
                                                     T.set_flag(
