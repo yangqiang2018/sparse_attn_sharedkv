@@ -2249,7 +2249,30 @@ def _build_scfa(
                                 if s < act_q:
                                     act_kv = seqused_kv[b]
                                     s_global = act_kv - act_q + s
-                                    act_cmp = (s_global + 1) // cmp_ratio
+                                    # [FIX cmp-tiles floordiv] The Ascend codegen
+                                    # lowers FloorDiv to C truncated `/`
+                                    # (codegen_ascend.cc FloorDivNode). For THIS
+                                    # delayed (go=g-2) output/LSE stage the arith
+                                    # simplifier distributes (s_global+1)//cmp_ratio
+                                    # into task*(core_num//cmp_ratio) +
+                                    # (act_kv-act_q+cid-(core_num-1))//cmp_ratio,
+                                    # whose split remainder is NEGATIVE for the first
+                                    # tokens (small s_global) -> truncation != floor
+                                    # -> act_cmp is +1 too large. That only flips
+                                    # cmp_tiles when the true act_cmp is 0 (pure-ori
+                                    # token, s_global < cmp_ratio-1), making this stage
+                                    # finalize a NON-existent cmp tile 1 and read uninit
+                                    # denom/m_i/workspace_o (stale GM left by the prior
+                                    # op in a batch) -> NaN Output/LSE on token rows
+                                    # [0,1,2]. Select the provably-exact 0 via a
+                                    # comparison, bypassing the buggy divide. (The QK
+                                    # and softmax stages use task=g//2 / (g-1)//2, whose
+                                    # split remainder stays >=0, so they never hit it.)
+                                    act_cmp = tir.Select(
+                                        s_global < cmp_ratio - 1,
+                                        0,
+                                        (s_global + 1) // cmp_ratio,
+                                    )
                                     cmp_tiles = (
                                         T.min(act_cmp, topk_cmp) + S2_BASE - 1
                                     ) // S2_BASE
