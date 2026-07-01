@@ -2171,6 +2171,20 @@ def _build_scfa(
                                             # PipeBarrier<PIPE_V>:423).
                                             T.pipe_barrier("v")
                                             if is_first:
+                                                # [PROBE-SINK] Force the first-tile in_max seed to a finite
+                                                # constant IN THE V PIPE, right before the softmax read. fill
+                                                # and softmax are both PIPE_V -> program-ordered, so this beats
+                                                # ANY upstream sink_ub corruption (broken sinks load / cold-UB
+                                                # read-before-write / cross-mc WAR / UB aliasing). sinks tensor
+                                                # is finite [-1,1] so a correct load can't be 481804. Fork:
+                                                #   * DIAG 481804 / NaN VANISHES -> garbage entered via sink_ub.
+                                                #   * DIAG unchanged             -> garbage in valid QK column
+                                                #     compact[0:tw] (workspace_s stale-read of cfa residue).
+                                                # REVERT after diagnosis: sink=0 changes numerics; read the
+                                                # DIAG NaN-count, not pass/fail.
+                                                T.tile.fill(
+                                                    sink_ub[ps, :, :], T.float32(0.0)
+                                                )
                                                 T.tile.softmax_flash_v2(
                                                     in_ub[ps, :, :],
                                                     denom[buf, mc, :, :],
