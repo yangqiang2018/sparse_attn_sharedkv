@@ -2171,19 +2171,28 @@ def _build_scfa(
                                             # PipeBarrier<PIPE_V>:423).
                                             T.pipe_barrier("v")
                                             if is_first:
-                                                # [PROBE-SINK] Force the first-tile in_max seed to a finite
-                                                # constant IN THE V PIPE, right before the softmax read. fill
-                                                # and softmax are both PIPE_V -> program-ordered, so this beats
-                                                # ANY upstream sink_ub corruption (broken sinks load / cold-UB
-                                                # read-before-write / cross-mc WAR / UB aliasing). sinks tensor
-                                                # is finite [-1,1] so a correct load can't be 481804. Fork:
-                                                #   * DIAG 481804 / NaN VANISHES -> garbage entered via sink_ub.
-                                                #   * DIAG unchanged             -> garbage in valid QK column
-                                                #     compact[0:tw] (workspace_s stale-read of cfa residue).
-                                                # REVERT after diagnosis: sink=0 changes numerics; read the
-                                                # DIAG NaN-count, not pass/fail.
+                                                # [PROBE-SCORE] probe-1 (sink_ub fill=0)
+                                                # had ZERO effect -> sink is NOT the
+                                                # source. Now zero the whole SCORE tile
+                                                # in_ub[:, 0:tw_a] in the V pipe, right
+                                                # before softmax (sink kept as its real
+                                                # load). This is SELF-VERIFYING: if the
+                                                # fill lands, scores->0 -> uniform softmax
+                                                # -> m_i=max(sink_real,0) finite, LSE far
+                                                # from 481804. Fork:
+                                                #   * DIAG 481804/NaN VANISHES -> garbage
+                                                #     is in the score tile (workspace_s
+                                                #     stale-read); AND proves fills land +
+                                                #     sink_real is finite (cross-checks
+                                                #     probe-1).
+                                                #   * DIAG 481804 UNCHANGED -> the fill is
+                                                #     NOT landing (cache/codegen no-op) OR
+                                                #     the NaN is from a non-softmax path
+                                                #     (PV/rescale/O-merge), not m_i.
+                                                # REVERT after diagnosis (scores=0 wrecks
+                                                # numerics; read DIAG NaN-count only).
                                                 T.tile.fill(
-                                                    sink_ub[ps, :, :], T.float32(0.0)
+                                                    in_ub[ps, :, 0:tw_a], T.float32(0.0)
                                                 )
                                                 T.tile.softmax_flash_v2(
                                                     in_ub[ps, :, :],
