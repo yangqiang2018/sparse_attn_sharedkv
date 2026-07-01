@@ -426,36 +426,6 @@ def _check_result(npu_out: torch.Tensor, expect: torch.Tensor) -> None:
     rel_err = np.abs(real - expt) / b
     max_rel = float(rel_err[~ok].max()) if n_err > 0 else 0.0
 
-    # TEMP DIAGNOSTIC (revert after CFA debug): on failure, show WHERE the error
-    # is -- per-head (is it a pass2 head split: heads 16-31,48-63?) and per-token
-    # (are early thr==0 queries clean and later cmp-bearing ones wrong?).
-    if fulfill_pct < 99.5:
-        try:
-            bad = (~ok).reshape(-1, 64, 512)  # [T, H, D]
-            ph = bad.mean(axis=(0, 2))  # [64]
-            pt = bad.mean(axis=(1, 2))  # [T]
-            print(f"\n[DIAG] fulfill={fulfill_pct:.2f}% max_rel={max_rel:.3f}")
-            print(
-                "[DIAG] bad-frac/head: "
-                + " ".join(f"{i}:{v:.2f}" for i, v in enumerate(ph))
-            )
-            print(
-                "[DIAG] bad-frac/tok first 32: "
-                + " ".join(f"{i}:{pt[i]:.2f}" for i in range(min(32, pt.size)))
-            )
-            print(f"[DIAG] #tok with >50% bad: {int((pt > 0.5).sum())}/{pt.size}")
-            # Value dump for token0 head0 (a thr==0 query, cmp should be a no-op).
-            r3 = real.reshape(-1, 64, 512)
-            e3 = expt.reshape(-1, 64, 512)
-            with np.printoptions(precision=4, suppress=True):
-                print(f"[DIAG] tok0 h0 real[:6]: {r3[0, 0, :6]}")
-                print(f"[DIAG] tok0 h0 expt[:6]: {e3[0, 0, :6]}")
-                print(
-                    f"[DIAG] tok0 h0 ratio[:6]: {r3[0, 0, :6] / (e3[0, 0, :6] + 1e-9)}"
-                )
-        except Exception as e:  # noqa: BLE001
-            print(f"[DIAG] failed: {e}")
-
     assert fulfill_pct >= 99.5, (
         f"only {fulfill_pct:.4f}% of elements within tol "
         f"(rtol={rtol}, atol={atol}); 99.5% required; "
@@ -499,22 +469,6 @@ def _check_lse(
     b = np.maximum(np.maximum(np.abs(real), np.abs(expt)), norm_floor) + 1e-9
     rel_err = np.abs(real - expt) / b
     max_rel = float(rel_err[~ok].max()) if n_err > 0 else 0.0
-
-    # TEMP DIAGNOSTIC (revert after CFA debug): per-head LSE bad fraction.
-    # LSE is derived from the SAME saved softmax state (sumexp_sv/m_i_sv) that
-    # feeds the O-normalize recip -- so if heads 0-15 of each lane are bad here
-    # too, the cmp-flash softmax_flashv2 (deal_row_count=32) corrupted new_sum/
-    # new_max for the first 16-row chunk; if LSE is clean, the bug is O-merge only.
-    if fulfill_pct < 99.5:
-        try:
-            ph = (~ok).reshape(-1, 64).mean(axis=0)  # [64]
-            print(f"\n[DIAG-LSE] fulfill={fulfill_pct:.2f}% max_rel={max_rel:.3f}")
-            print(
-                "[DIAG-LSE] bad-frac/head: "
-                + " ".join(f"{i}:{v:.2f}" for i, v in enumerate(ph))
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"[DIAG-LSE] failed: {e}")
 
     assert fulfill_pct >= 99.5, (
         f"lse: only {fulfill_pct:.4f}% within tol "
