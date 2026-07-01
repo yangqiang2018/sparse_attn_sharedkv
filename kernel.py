@@ -1013,7 +1013,26 @@ def _build_cfa(
                                 if s < act_q:
                                     act_kv = seqused_kv[b]
                                     s_global = act_kv - act_q + s
-                                    act_cmp = (s_global + 1) // cmp_ratio
+                                    # [DEFENSIVE, same class as the SCFA output stage]
+                                    # This DELAYED (go=g-2) stage's task=(g-2)//MAX_TILES
+                                    # simplifies to g//2-1, pulling -core_num into the
+                                    # (s_global+1)//cmp_ratio dividend. The Ascend codegen
+                                    # emits FloorDiv as C truncated `/`, so IF core_num is
+                                    # divisible by cmp_ratio the arith simplifier
+                                    # distributes it and the split remainder goes negative
+                                    # for the first tokens -> act_cmp +1 -> reads a
+                                    # non-existent cmp tile's stale GM (see SCFA fix +
+                                    # [[tilelang-ascend-floordiv-truncation]]). CFA is
+                                    # currently BENIGN because cmp_ratio=128 is NOT a
+                                    # divisor of core_num (24) -> no distribution -> the
+                                    # whole (>=0) dividend truncates correctly. Select the
+                                    # provable 0 anyway so a future divisor-of-core_num
+                                    # cmp_ratio can't silently regress.
+                                    act_cmp = tir.Select(
+                                        s_global < cmp_ratio - 1,
+                                        0,
+                                        (s_global + 1) // cmp_ratio,
+                                    )
                                     cmp_tiles = (act_cmp + S2_BASE - 1) // S2_BASE
                                     s2lt = 1 + cmp_tiles
                                     if tile < s2lt:
