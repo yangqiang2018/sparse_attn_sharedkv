@@ -500,47 +500,6 @@ def _check_lse(
     rel_err = np.abs(real - expt) / b
     max_rel = float(rel_err[~ok].max()) if n_err > 0 else 0.0
 
-    # TEMP DIAGNOSTIC (revert after CFA debug): per-head LSE bad fraction.
-    # LSE is derived from the SAME saved softmax state (sumexp_sv/m_i_sv) that
-    # feeds the O-normalize recip -- so if heads 0-15 of each lane are bad here
-    # too, the cmp-flash softmax_flashv2 (deal_row_count=32) corrupted new_sum/
-    # new_max for the first 16-row chunk; if LSE is clean, the bug is O-merge only.
-    # Also fire on ANY NaN/inf in the npu LSE (the cap-on-max_rel failure path,
-    # where fulfill may still be >99.5%): dump the NaN/inf token rows + per-head
-    # NaN count + the max FINITE |LSE| (fp16 overflows ~65504 -> a softmax/exp
-    # overflow shows up as huge-finite-or-inf here).
-    bad_nan = bool(np.isnan(real).any() or np.isinf(real).any())
-    if fulfill_pct < 99.5 or bad_nan:
-        try:
-            r2 = real.reshape(-1, 64)
-            nan_rows = np.where(np.isnan(r2).any(axis=1))[0]
-            inf_rows = np.where(np.isinf(r2).any(axis=1))[0]
-            ph_nan = np.isnan(r2).sum(axis=0)  # [64] NaN count per head
-            fin = real[np.isfinite(real)]
-            fin_max = float(np.abs(fin).max()) if fin.size else 0.0
-            print(
-                f"\n[DIAG-LSE] fulfill={fulfill_pct:.4f}% max_rel={max_rel} "
-                f"nan={int(np.isnan(real).sum())} inf={int(np.isinf(real).sum())}"
-            )
-            print(
-                f"[DIAG-LSE] NaN token rows ({len(nan_rows)}): {nan_rows[:30].tolist()}"
-            )
-            print(
-                f"[DIAG-LSE] inf token rows ({len(inf_rows)}): {inf_rows[:30].tolist()}"
-            )
-            print(
-                "[DIAG-LSE] NaN-count/head: "
-                + " ".join(f"{i}:{int(v)}" for i, v in enumerate(ph_nan) if v)
-            )
-            print(f"[DIAG-LSE] finite |LSE| max={fin_max:.1f} (fp16 overflow ~65504)")
-            ph = (~ok).reshape(-1, 64).mean(axis=0)  # [64]
-            print(
-                "[DIAG-LSE] bad-frac/head: "
-                + " ".join(f"{i}:{v:.2f}" for i, v in enumerate(ph))
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"[DIAG-LSE] failed: {e}")
-
     assert fulfill_pct >= 99.5, (
         f"lse: only {fulfill_pct:.4f}% within tol "
         f"(rtol={rtol}, atol={atol}); 99.5% required; "
