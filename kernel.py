@@ -1317,7 +1317,16 @@ def _build_scfa(
     # ring/flags are present but redundant -- verifies they BALANCE / never
     # deadlock, correctness still guaranteed by the barriers); flip False to drop
     # the barriers and let the ring + reverse flags overlap the pipes (the perf).
-    DEBUG_SERIAL = False
+    # [PROBE-SERIAL] flipped True to fork race-vs-deterministic on the
+    # scfa_prefill batch NaN: True inserts per-op T.barrier_all + uses
+    # gemm_v0 (standalone fixpipe, NO 0b11 fused-fixpipe overlap), fully
+    # serializing cube<->vector.
+    #   * batch PASSES -> bug in the OVERLAP path (0b11 fused fixpipe
+    #     drain / cross-flag timing), not deterministic.
+    #   * batch STILL FAILS -> DETERMINISTIC (cube computes/writes garbage
+    #     for first-task ori valid col, or wrong-slot); overlap ruled out.
+    # REVERT to False after diagnosis (slow bring-up path).
+    DEBUG_SERIAL = True
     # Shared KV 3-slot L1 ring (= reference kvL1BufIter%3): QK's K D-halves and PV's
     # V tiles rotate the SAME 3 slots; per-slot MTE2_MTE1/MTE1_MTE2 reverse flags let
     # the next copy_pa (the 1961us mte2) overlap the current gemm/mma. Slot is a
@@ -2171,29 +2180,6 @@ def _build_scfa(
                                             # PipeBarrier<PIPE_V>:423).
                                             T.pipe_barrier("v")
                                             if is_first:
-                                                # [PROBE-SCORE] probe-1 (sink_ub fill=0)
-                                                # had ZERO effect -> sink is NOT the
-                                                # source. Now zero the whole SCORE tile
-                                                # in_ub[:, 0:tw_a] in the V pipe, right
-                                                # before softmax (sink kept as its real
-                                                # load). This is SELF-VERIFYING: if the
-                                                # fill lands, scores->0 -> uniform softmax
-                                                # -> m_i=max(sink_real,0) finite, LSE far
-                                                # from 481804. Fork:
-                                                #   * DIAG 481804/NaN VANISHES -> garbage
-                                                #     is in the score tile (workspace_s
-                                                #     stale-read); AND proves fills land +
-                                                #     sink_real is finite (cross-checks
-                                                #     probe-1).
-                                                #   * DIAG 481804 UNCHANGED -> the fill is
-                                                #     NOT landing (cache/codegen no-op) OR
-                                                #     the NaN is from a non-softmax path
-                                                #     (PV/rescale/O-merge), not m_i.
-                                                # REVERT after diagnosis (scores=0 wrecks
-                                                # numerics; read DIAG NaN-count only).
-                                                T.tile.fill(
-                                                    in_ub[ps, :, 0:tw_a], T.float32(0.0)
-                                                )
                                                 T.tile.softmax_flash_v2(
                                                     in_ub[ps, :, :],
                                                     denom[buf, mc, :, :],
