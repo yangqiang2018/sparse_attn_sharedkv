@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BSND 与 TND 布局详解</title>
+<style>
+  :root{
+    --bg:#f7f7f4; --panel:#ffffff; --ink:#1f2328; --muted:#5b6470;
+    --line:#e3e6ea; --accent:#2f6fea; --accent-soft:#eaf1ff;
+    --blue:#3b82f6; --blue-bg:#dbeafe; --blue-ink:#1e40af;
+    --green:#10b981; --green-bg:#d1fae5; --green-ink:#065f46;
+    --amber:#f59e0b; --amber-bg:#fef3c7; --amber-ink:#92400e;
+    --gray:#9ca3af; --gray-bg:#eceef1; --gray-ink:#4b5563;
+    --code-bg:#f4f6f8; --code-ink:#1c2733;
+    --radius:12px;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",Consolas,"Cascadia Code",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:16.5px; line-height:1.85;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:0 22px 120px;}
+
+  /* ---- header ---- */
+  header.hero{
+    max-width:880px; margin:0 auto; padding:54px 22px 26px;
+  }
+  .kicker{
+    display:inline-block; font-size:12.5px; letter-spacing:.16em; font-weight:700;
+    color:var(--accent); background:var(--accent-soft); padding:5px 12px; border-radius:999px;
+    text-transform:uppercase; margin-bottom:18px;
+  }
+  h1{font-size:38px; line-height:1.22; margin:.1em 0 .35em; letter-spacing:-.01em;}
+  .sub{color:var(--muted); font-size:16px; margin:0;}
+
+  /* ---- typography ---- */
+  h2{
+    font-size:25px; margin:64px 0 18px; padding-top:16px; letter-spacing:-.01em;
+    border-top:2px solid var(--line);
+  }
+  h2 .num{color:var(--accent); font-variant-numeric:tabular-nums; margin-right:.45em;}
+  h3{font-size:19px; margin:34px 0 12px; color:#2b3340;}
+  p{margin:14px 0;}
+  a{color:var(--accent); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  strong{font-weight:700; color:#16324f;}
+  ul,ol{margin:14px 0; padding-left:1.4em;}
+  li{margin:7px 0;}
+  hr{border:none; border-top:1px solid var(--line); margin:40px 0;}
+
+  /* inline code */
+  code{
+    font-family:var(--mono); font-size:.88em; background:var(--code-bg);
+    color:#b3344a; padding:2px 6px; border-radius:6px; border:1px solid #e7e2e4;
+  }
+  /* code blocks */
+  pre{
+    background:#0f1b2d; color:#dbe7f3; border-radius:var(--radius);
+    padding:18px 20px; overflow:auto; font-family:var(--mono); font-size:14px;
+    line-height:1.65; margin:18px 0; border:1px solid #0a1320;
+    box-shadow:0 1px 0 rgba(0,0,0,.04);
+  }
+  pre code{background:none; color:inherit; border:none; padding:0; font-size:inherit;}
+  pre .cmt{color:#7d93ad;}
+  pre .hl{color:#ffd479;}
+  pre .ok{color:#7ee0a1;}
+
+  /* blockquote / callout */
+  blockquote{
+    margin:18px 0; padding:14px 18px; background:var(--panel);
+    border-left:4px solid var(--accent); border-radius:0 10px 10px 0;
+    color:#33414f; box-shadow:0 1px 2px rgba(20,40,80,.05);
+  }
+  blockquote p:first-child{margin-top:0}
+  blockquote p:last-child{margin-bottom:0}
+
+  .note{
+    margin:18px 0; padding:16px 18px; background:var(--accent-soft);
+    border:1px solid #d4e2ff; border-radius:var(--radius); font-size:15px; color:#2b4a73;
+  }
+  .note p{margin:6px 0}
+  .note code{background:#fff;}
+
+  /* tables */
+  .tablewrap{overflow-x:auto; margin:18px 0;}
+  table{border-collapse:collapse; width:100%; font-size:15px; background:var(--panel);
+    border-radius:10px; overflow:hidden; box-shadow:0 1px 2px rgba(20,40,80,.05);}
+  th,td{padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{background:#eef2f7; font-weight:700; color:#2b3340;}
+  tr:last-child td{border-bottom:none;}
+  td code,th code{font-size:.85em;}
+
+  /* TOC */
+  nav.toc{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 24px; margin:30px 0;
+  }
+  nav.toc h2{border:none; margin:0 0 10px; padding:0; font-size:16px; color:var(--muted);
+    letter-spacing:.04em; text-transform:uppercase;}
+  nav.toc ol{margin:0; padding-left:1.5em; columns:2; column-gap:34px;}
+  nav.toc li{margin:5px 0; break-inside:avoid;}
+  nav.toc a{color:#33414f;}
+  nav.toc .ix{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums;}
+
+  /* figures */
+  figure{margin:26px 0; padding:0;}
+  figure svg{display:block; width:100%; height:auto;}
+  .figcard{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:22px; box-shadow:0 2px 10px rgba(20,40,80,.05);
+  }
+  figcaption{font-size:13.5px; color:var(--muted); text-align:center; margin-top:12px;}
+  .fig-mono{font-family:var(--mono);}
+
+  /* token strip (logical pages) */
+  .strip{display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;}
+  .page{border:1.5px solid; border-radius:10px; padding:10px 10px 8px; }
+  .page .ptitle{font-size:12px; font-weight:700; margin-bottom:8px; text-align:center;}
+  .page .toks{display:flex; gap:6px;}
+  .tok{
+    width:46px; height:34px; border-radius:7px; display:flex; align-items:center; justify-content:center;
+    font-family:var(--mono); font-size:14px; font-weight:600;
+  }
+  .p0{border-color:var(--blue); background:#f3f8ff;} .p0 .ptitle{color:var(--blue-ink);} .p0 .tok{background:var(--blue-bg); color:var(--blue-ink);}
+  .p1{border-color:var(--green); background:#f2fdf8;} .p1 .ptitle{color:var(--green-ink);} .p1 .tok{background:var(--green-bg); color:var(--green-ink);}
+  .p2{border-color:var(--amber); background:#fffdf2;} .p2 .ptitle{color:var(--amber-ink);} .p2 .tok{background:var(--amber-bg); color:var(--amber-ink);}
+
+  /* tensor shape */
+  .shape{display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin:6px 0;}
+  .dim{border-radius:10px; padding:12px 14px; min-width:120px; text-align:center; border:1.5px solid;}
+  .dim .dname{font-family:var(--mono); font-weight:700; font-size:15px;}
+  .dim .ddesc{font-size:12.5px; margin-top:4px;}
+  .d0{border-color:#c084fc; background:#faf5ff;} .d0 .dname{color:#7c3aed;}
+  .d1{border-color:var(--green); background:#f2fdf8;} .d1 .dname{color:var(--green-ink);}
+  .d2{border-color:var(--gray); background:#f6f7f9;} .d2 .dname{color:var(--gray-ink);}
+  .d3{border-color:var(--blue); background:#f3f8ff;} .d3 .dname{color:var(--blue-ink);}
+
+  /* corridor — fragmentation figures */
+  .corridor{display:flex; gap:5px; margin:6px 0 2px;}
+  .corridor .cell{flex:1; height:38px; border-radius:6px; border:1px solid #d8dde3; background:#eef1f5;}
+  .corridor .cell.used{background:#cfe3ff; border-color:#9bc2ff;}
+  .corridor .cell.empty{background:repeating-linear-gradient(45deg,#fff,#fff 5px,#f1f3f6 5px,#f1f3f6 10px);}
+  .frag-head{margin:0 0 4px; font-size:14px;}
+  .badwaste{color:#b54708; font-weight:700; font-size:13px;}
+
+  /* two cache compare */
+  .twocache{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  .cache{border:1.5px solid var(--line); border-radius:12px; padding:16px; background:var(--panel);}
+  .cache.ori{border-top:4px solid var(--blue);}
+  .cache.cmp{border-top:4px solid #c084fc;}
+  .cache h4{margin:0 0 6px; font-size:15px;}
+  .cache .use{font-size:13px; color:var(--muted); margin-bottom:10px;}
+  .cache .meta{font-family:var(--mono); font-size:12.5px; color:#33414f; background:var(--code-bg);
+    padding:8px 10px; border-radius:8px; border:1px solid #e7e2e4;}
+
+  /* side nav (table of contents) — hidden by default, shown on wide screens */
+  .sidenav{display:none;}
+  @media (min-width:1180px){
+    .sidenav{
+      display:block; position:fixed; top:0; left:0; width:264px; height:100vh;
+      overflow-y:auto; padding:30px 16px 48px; box-sizing:border-box;
+      background:#fbfbf8; border-right:1px solid var(--line);
+    }
+    .sidenav .snav-title{
+      margin:0 0 14px; padding-left:12px; font-size:12px; font-weight:700;
+      letter-spacing:.14em; text-transform:uppercase; color:var(--muted);
+    }
+    .sidenav ol{list-style:none; margin:0; padding:0;}
+    .sidenav li{margin:1px 0;}
+    .sidenav a{
+      display:flex; gap:9px; align-items:baseline; padding:6px 11px;
+      border-radius:8px; border-left:2px solid transparent;
+      color:#475461; font-size:13.5px; line-height:1.45;
+    }
+    .sidenav a .n{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; min-width:16px; text-align:right;}
+    .sidenav a:hover{background:var(--accent-soft); text-decoration:none;}
+    .sidenav a.active{background:var(--accent-soft); color:var(--accent); font-weight:700; border-left-color:var(--accent);}
+    /* hand the top-of-page TOC over to the sidebar; clear the fixed sidebar */
+    nav.toc{display:none;}
+    header.hero{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+    .wrap{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+  }
+
+  /* back to top */
+  .totop{
+    position:fixed; right:22px; bottom:22px; width:44px; height:44px; border-radius:50%;
+    background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center;
+    font-size:20px; box-shadow:0 4px 14px rgba(47,111,234,.4); opacity:.92; z-index:50;
+  }
+  .totop:hover{text-decoration:none; opacity:1;}
+
+  @media (max-width:640px){
+    body{font-size:16px;}
+    h1{font-size:30px;}
+    nav.toc ol{columns:1;}
+    .twocache{grid-template-columns:1fr;}
+  }
+
+  /* ===== 布局文档专用 ===== */
+  .figtitle{margin:0 0 14px; font-size:14.5px; font-weight:700; color:#334155;}
+  .warn{margin:18px 0; padding:14px 18px; background:var(--amber-bg);
+    border:1px solid #f3d27a; border-radius:var(--radius); font-size:15px; color:#7a4d09;}
+  .warn code{background:#fff;} .warn p{margin:6px 0;}
+  /* 一条 token 流（按 batch 上色 + padding） */
+  .seqlabel{font-family:var(--mono); font-size:12.5px; color:#475569; width:70px; flex:none;}
+  .tokrow{display:flex; gap:5px; align-items:center; margin:6px 0; flex-wrap:wrap;}
+  .tcell{min-width:36px; height:34px; padding:0 8px; border-radius:7px; display:flex;
+    align-items:center; justify-content:center; font-family:var(--mono); font-size:12.5px;
+    font-weight:600; border:1.5px solid;}
+  .tb0{background:var(--blue-bg); border-color:var(--blue); color:var(--blue-ink);}
+  .tb1{background:var(--green-bg); border-color:var(--green); color:var(--green-ink);}
+  .tb2{background:var(--amber-bg); border-color:var(--amber); color:var(--amber-ink);}
+  .tpad{background:repeating-linear-gradient(45deg,#fff,#fff 5px,#f1f3f6 5px,#f1f3f6 10px);
+    border-color:#cbd5e1; border-style:dashed; color:#9aa4b1;}
+  .tsep{width:1px; align-self:stretch; background:#cbd5e1; margin:0 5px;}
+  .ruler{display:flex; gap:5px; align-items:center; margin:2px 0 6px;
+    font-family:var(--mono); font-size:11.5px; color:var(--muted);}
+  .ruler .tsep{background:transparent;}
+  .tick{min-width:36px; text-align:center;}
+  /* 流程：输入 → 预处理 → 内核 */
+  .flow{display:flex; align-items:stretch; gap:10px; flex-wrap:wrap; margin:6px 0;}
+  .fbox{flex:1 1 150px; border:1.5px solid var(--line); border-radius:12px; padding:14px; background:var(--panel);}
+  .fbox h4{margin:0 0 8px; font-size:14px;}
+  .fbox .small{font-size:12.5px; color:var(--muted); line-height:1.6;}
+  .farr{display:flex; align-items:center; justify-content:center; font-size:24px; color:var(--accent); flex:0 0 24px;}
+  .kbox{border-top:4px solid var(--accent); background:var(--accent-soft);}
+  .free{color:#0b6b3a; font-weight:700;} .costly{color:#b91c1c; font-weight:700;}
+  .hl-row td{background:#fffaf0;}
+  .kv{font-family:var(--mono);}
+
+</style>
+</head>
+<body>
+<a id="top"></a>
+<aside class="sidenav" aria-label="目录">
+  <p class="snav-title">目录</p>
+  <ol>
+    <li><a href="#s0"><span class="n">0</span><span>布局是什么</span></a></li>
+    <li><a href="#s1"><span class="n">1</span><span>BSND：规整矩形</span></a></li>
+    <li><a href="#s2"><span class="n">2</span><span>TND：紧凑变长</span></a></li>
+    <li><a href="#s3"><span class="n">3</span><span>BSND 是 TND 的特例</span></a></li>
+    <li><a href="#s4"><span class="n">4</span><span>统一：扁平流 + 起点</span></a></li>
+    <li><a href="#s5"><span class="n">5</span><span>索引也随之 reshape</span></a></li>
+    <li><a href="#s6"><span class="n">6</span><span>host 侧代价</span></a></li>
+    <li><a href="#s7"><span class="n">7</span><span>反面教材：物理转换</span></a></li>
+    <li><a href="#s8"><span class="n">8</span><span>输出还原</span></a></li>
+    <li><a href="#s9"><span class="n">9</span><span>速查 + 总结</span></a></li>
+  </ol>
+</aside>
+
+<header class="hero">
+  <span class="kicker">张量布局 · 内存排布</span>
+  <h1>BSND 与 TND · 为什么能统一按 TND 处理</h1>
+  <p class="sub">两种 Q 的摆放约定，一条内核路径 —— 「padding 到等长的矩形」其实是「变长拼接」的一个特例，统一起来只花 O(B) 的小账本，那个大张量一次都不用搬。</p>
+</header>
+
+<div class="wrap">
+
+  <div class="note">
+    <p><strong>这篇讲什么：</strong>注意力的输入 Q（以及输出）在内存里有两种常见摆法 —— <strong>BSND</strong>（规整矩形）和 <strong>TND</strong>（紧凑变长）。本文说清楚它们各自长什么样、为什么<strong>能用同一套内核逻辑统一按 TND 处理</strong>，以及这么做在 host（CPU 主机端）的代价到底有多大。<strong>剧透：几乎为零。</strong></p>
+    <p><strong>需要的前置知识：</strong>知道注意力的 Q 是「很多条序列、每条若干 token、每个 token 一串数」就够了。会一点「连续内存」「数组下标」的概念更好，没有也能跟下来。全文用<strong>同一个小例子</strong>贯穿到底。</p>
+  </div>
+
+  <!-- ===================== TOC ===================== -->
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol start="0">
+      <li><span class="ix">0.</span> <a href="#s0">先说人话：什么是「布局」，为什么 Q 有两种摆法</a></li>
+      <li><span class="ix">1.</span> <a href="#s1">BSND：规整的矩形（padding 到等长）</a></li>
+      <li><span class="ix">2.</span> <a href="#s2">TND：紧凑的变长（首尾拼接，无 padding）</a></li>
+      <li><span class="ix">3.</span> <a href="#s3">关键观察：BSND 其实就是 TND 的一个特例</a></li>
+      <li><span class="ix">4.</span> <a href="#s4">统一处理：内核只认「扁平 token 流 + 每条序列的起点」</a></li>
+      <li><span class="ix">5.</span> <a href="#s5">不只是 Q：凡是「逐 token」的张量都搭同一班 reshape</a></li>
+      <li><span class="ix">6.</span> <a href="#s6">host 侧代价：到底做了什么、有多便宜</a></li>
+      <li><span class="ix">7.</span> <a href="#s7">反面教材：真去做 BSND↔TND 物理转换会多贵</a></li>
+      <li><span class="ix">8.</span> <a href="#s8">收尾：输出按调用方的布局原样还原</a></li>
+      <li><span class="ix">9.</span> <a href="#s9">一页速查 + 总结</a></li>
+    </ol>
+  </nav>
+
+  <!-- ===================== 0 ===================== -->
+  <h2 id="s0"><span class="num">0</span>先说人话：什么是「布局」，为什么 Q 有两种摆法</h2>
+  <p>注意力一次要处理的 Q 是这样一坨数据：<strong>一批序列</strong>（比如同时来的几条请求），<strong>每条序列若干个 token</strong>，<strong>每个 token 又是一串数</strong>（更准确说是 <code>N</code> 个注意力头、每个头 <code>D</code> 维）。问题来了：这一大坨数，要怎么<strong>摆进一块连续的内存</strong>？</p>
+  <p>麻烦在于<strong>每条序列长短不一</strong>：有的 100 个 token，有的 3 个。把长短不齐的东西塞进规整的内存，业界有两种约定 —— 这就是 <strong>BSND</strong> 和 <strong>TND</strong>。</p>
+
+  <blockquote><p>打个比方 📚：你有一摞<strong>长短不一的文章</strong>要装订成册，怎么装？</p></blockquote>
+
+  <figure>
+    <div class="figcard">
+      <div class="twocache">
+        <div class="cache ori">
+          <h4>🟦 BSND ＝ 补白页凑到等长，码成方阵</h4>
+          <div class="use">每篇都<strong>补空白页</strong>补到「最长那篇」的厚度，再码成一个规整的方阵。</div>
+          <p class="small" style="font-size:12.5px;color:#475569;margin:8px 0 0;line-height:1.7">✓ 好查：第 b 篇第 s 页，直接翻到。<br>✗ 浪费：补的那些空白页占着地方。</p>
+        </div>
+        <div class="cache cmp">
+          <h4>🟪 TND ＝ 首尾相接连成一长卷</h4>
+          <div class="use">所有文章<strong>首尾相接</strong>连成一长卷，<strong>不补空白</strong>；另用一张小目录记「第 b 篇从第几页起」。</div>
+          <p class="small" style="font-size:12.5px;color:#475569;margin:8px 0 0;line-height:1.7">✓ 省纸：一页空白都不浪费。<br>✗ 要查目录：每篇起点不规则。</p>
+        </div>
+      </div>
+    </div>
+    <figcaption>BSND = 补 padding 到等长的「规整矩形」；TND = 首尾拼接的「紧凑变长」+ 一张起点目录。本文要回答：内核能不能只用一种逻辑同时吃下这两种？</figcaption>
+  </figure>
+
+  <p><strong>本文的主角问题：</strong>这两种摆法看起来很不一样，内核（真正干活的那段设备代码）要不要为它们各写一套？答案是 <strong>不用 —— 统一按 TND 处理就行</strong>，而且几乎不花钱。下面先把两种布局各自讲清楚。</p>
+
+  <h3>0.1 贯穿全文的小例子</h3>
+  <blockquote><p>一批 <strong>3 条序列</strong>（B = 3），真实长度分别是 <strong>2、3、2</strong> 个 token。我们给它们的 token 起名：</p></blockquote>
+  <ul>
+    <li>序列 <strong>A</strong>（2 个）：<code class="kv">a0, a1</code></li>
+    <li>序列 <strong>B</strong>（3 个）：<code class="kv">b0, b1, b2</code></li>
+    <li>序列 <strong>C</strong>（2 个）：<code class="kv">c0, c1</code></li>
+  </ul>
+  <p>（每个 token 本身还有 <code>N</code>、<code>D</code> 两维，但那两维在两种布局里<strong>都一样、不受影响</strong>，所以下面画图时把它们省掉，只盯着「token 怎么排」。）</p>
+
+  <!-- ===================== 1 ===================== -->
+  <h2 id="s1"><span class="num">1</span>BSND：规整的矩形（padding 到等长）</h2>
+  <p><strong>BSND</strong> 是四个维度的首字母：<code>[B, S, N, D]</code>。</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>维度</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>B</code></td><td>batch —— 序列条数（例子里 = 3）</td></tr>
+      <tr><td><code>S</code></td><td>统一的<strong>最大</strong>序列长度（例子里 = 3，因为最长那条 B 有 3 个 token）</td></tr>
+      <tr><td><code>N</code></td><td>注意力头数</td></tr>
+      <tr><td><code>D</code></td><td>每个头的向量维度</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>因为这是个规整的矩形，<strong>每条序列都得占满 <code>S</code> 个槽位</strong>。本例里 <code>S = 3</code>，但序列 A、C 只有 2 个 token，于是末尾<strong>补一个 padding</strong> 凑齐：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">BSND：补 padding 到等长 S=3 的规整矩形（B=3 行）</p>
+      <div class="tokrow"><span class="seqlabel">序列 A</span><span class="tcell tb0">a0</span><span class="tcell tb0">a1</span><span class="tcell tpad">pad</span></div>
+      <div class="tokrow"><span class="seqlabel">序列 B</span><span class="tcell tb1">b0</span><span class="tcell tb1">b1</span><span class="tcell tb1">b2</span></div>
+      <div class="tokrow"><span class="seqlabel">序列 C</span><span class="tcell tb2">c0</span><span class="tcell tb2">c1</span><span class="tcell tpad">pad</span></div>
+      <p class="small" style="font-size:12.5px;color:#64748b;margin:12px 0 0">3 行 × 3 列 = <strong>9 个槽位</strong>，其中 <strong>2 个是 padding</strong>（斜纹）—— 这就是规整带来的浪费。</p>
+    </div>
+    <figcaption>BSND 把每条序列补齐到 <code>S</code>，码成 <code>B×S</code> 的方阵。寻址直接：第 <code>b</code> 条第 <code>s</code> 个 token 就在 <code>[b, s]</code>。代价是 padding 占内存。</figcaption>
+  </figure>
+
+  <p>所以完整张量是 <code>[B, S, N, D] = [3, 3, N, D]</code>：</p>
+  <figure>
+    <div class="figcard">
+      <div class="shape">
+        <div class="dim d0"><div class="dname">B = 3</div><div class="ddesc">序列条数</div></div>
+        <div class="dim d1"><div class="dname">S = 3</div><div class="ddesc">统一最大长度<br>（短的补 padding）</div></div>
+        <div class="dim d2"><div class="dname">N</div><div class="ddesc">头数</div></div>
+        <div class="dim d3"><div class="dname">D</div><div class="ddesc">每头维度</div></div>
+      </div>
+    </div>
+    <figcaption><span class="fig-mono">[B, S, N, D]</span> —— batch 与 seq 是<strong>两个独立维度</strong>，规整好索引，但短序列要 padding。</figcaption>
+  </figure>
+
+  <!-- ===================== 2 ===================== -->
+  <h2 id="s2"><span class="num">2</span>TND：紧凑的变长（首尾拼接，无 padding）</h2>
+  <p><strong>TND</strong> 是三个维度：<code>[T, N, D]</code>。关键就在第一维 <code>T</code>：</p>
+  <blockquote><p><code>T</code> = total tokens = <strong>所有序列 token 数之和</strong>（Σ 各序列长度）。所有序列<strong>首尾拼接</strong>成一长条，<strong>不补任何 padding</strong>。</p></blockquote>
+  <p>例子里 <code>T = 2 + 3 + 2 = 7</code>。七个 token 排成一条：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">TND：3 条序列首尾拼成一长条，T=7，零 padding</p>
+      <div class="tokrow"><span class="seqlabel">扁平流</span><span class="tcell tb0">a0</span><span class="tcell tb0">a1</span><span class="tsep"></span><span class="tcell tb1">b0</span><span class="tcell tb1">b1</span><span class="tcell tb1">b2</span><span class="tsep"></span><span class="tcell tb2">c0</span><span class="tcell tb2">c1</span></div>
+      <div class="ruler"><span class="seqlabel"></span><span class="tick">0</span><span class="tick">1</span><span class="tsep"></span><span class="tick">2</span><span class="tick">3</span><span class="tick">4</span><span class="tsep"></span><span class="tick">5</span><span class="tick">6</span></div>
+      <p class="small" style="font-size:12.5px;color:#64748b;margin:6px 0 0">边界靠 <code>cu_seqlens = [0, 2, 5, 7]</code>（累积长度）：序列 A 占 <code>[0,2)</code>、B 占 <code>[2,5)</code>、C 占 <code>[5,7)</code>。</p>
+    </div>
+    <figcaption>TND 没有 batch 维，序列边界不再隐含在形状里，而是<strong>显式记在 <code>cu_seqlens</code></strong>（cumulative sequence lengths，累积长度）这张 <code>[B+1]</code> 的小表里。</figcaption>
+  </figure>
+
+  <p><code>cu_seqlens</code> 怎么读：它是<strong>累积长度</strong>，<code>cu = [0, 2, 5, 7]</code> 意思是「第 0 条从 0 起、第 1 条从 2 起、第 2 条从 5 起、总共到 7」。第 <code>b</code> 条序列就占 <code>[cu[b], cu[b+1])</code>。</p>
+
+  <figure>
+    <div class="figcard">
+      <div class="shape">
+        <div class="dim d0"><div class="dname">T = 7</div><div class="ddesc">所有 token 之和<br>（Σ 序列长度）</div></div>
+        <div class="dim d2"><div class="dname">N</div><div class="ddesc">头数</div></div>
+        <div class="dim d3"><div class="dname">D</div><div class="ddesc">每头维度</div></div>
+      </div>
+    </div>
+    <figcaption><span class="fig-mono">[T, N, D]</span> + 一张 <span class="fig-mono">cu_seqlens [B+1]</span>。batch 与 seq <strong>合并成一维</strong> <code>T</code>，零浪费，但每条起点不规则、要查 <code>cu_seqlens</code>。</figcaption>
+  </figure>
+
+  <!-- ===================== 3 ===================== -->
+  <h2 id="s3"><span class="num">3</span>关键观察：BSND 其实就是 TND 的一个特例</h2>
+  <p>现在把两张图叠在一起看，会发现一件事 —— <strong>它们的差别比看上去小得多</strong>。</p>
+  <p>把 BSND 的内存 <code>[B, S, N, D]</code> 按<strong>前两维合并</strong>着看，就是 <code>[B×S, N, D]</code>。而 <code>[B×S, N, D]</code> 不正是 <strong>一个 <code>[T', N, D]</code> 的 TND 张量</strong>吗（这里 <code>T' = B×S = 9</code>）？只不过这个「TND」比较特殊：</p>
+  <ul>
+    <li>它的<strong>每条序列长度都恰好 = <code>S</code></strong>（因为都 padding 到等长了）；</li>
+    <li>它的起点目录是<strong>规则等差</strong>的：<code>cu = [0, S, 2S, …, B×S] = [0, 3, 6, 9]</code>。</li>
+  </ul>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">把 BSND 的「行」首尾接起来，它就变成一条 TND（只是夹着 padding、起点规则）</p>
+      <div class="tokrow"><span class="seqlabel">BSND 展平</span><span class="tcell tb0">a0</span><span class="tcell tb0">a1</span><span class="tcell tpad">pad</span><span class="tsep"></span><span class="tcell tb1">b0</span><span class="tcell tb1">b1</span><span class="tcell tb1">b2</span><span class="tsep"></span><span class="tcell tb2">c0</span><span class="tcell tb2">c1</span><span class="tcell tpad">pad</span></div>
+      <div class="ruler"><span class="seqlabel"></span><span class="tick">0</span><span class="tick">1</span><span class="tick">2</span><span class="tsep"></span><span class="tick">3</span><span class="tick">4</span><span class="tick">5</span><span class="tsep"></span><span class="tick">6</span><span class="tick">7</span><span class="tick">8</span></div>
+      <p class="small" style="font-size:12.5px;color:#64748b;margin:4px 0 14px">↑ <code>[B×S, N, D] = [9, N, D]</code>，起点 <code>cu = [0, 3, 6]</code>（规则的 <code>b×S</code>），每条等长 3、夹着 padding。</p>
+      <div class="tokrow"><span class="seqlabel">真 TND</span><span class="tcell tb0">a0</span><span class="tcell tb0">a1</span><span class="tsep"></span><span class="tcell tb1">b0</span><span class="tcell tb1">b1</span><span class="tcell tb1">b2</span><span class="tsep"></span><span class="tcell tb2">c0</span><span class="tcell tb2">c1</span></div>
+      <div class="ruler"><span class="seqlabel"></span><span class="tick">0</span><span class="tick">1</span><span class="tsep"></span><span class="tick">2</span><span class="tick">3</span><span class="tick">4</span><span class="tsep"></span><span class="tick">5</span><span class="tick">6</span></div>
+      <p class="small" style="font-size:12.5px;color:#64748b;margin:4px 0 0">↑ <code>[T, N, D] = [7, N, D]</code>，起点 <code>cu = [0, 2, 5]</code>（不规则），无 padding。</p>
+    </div>
+    <figcaption>两条<strong>形状一模一样</strong>（都是 <code>[*, N, D]</code> 的扁平 token 流），区别只有两点：BSND 多了 padding；BSND 的起点是规则的 <code>b×S</code>，TND 的起点是不规则的累积长度。</figcaption>
+  </figure>
+
+  <blockquote>
+    <p><strong>结论（本文的核心）：</strong></p>
+    <p><strong>BSND ＝「所有序列等长、且按固定步长 <code>S</code> 排布」的 TND。</strong>TND 是一般情形（变长、起点任意），BSND 是它的一个<strong>规则特例</strong>。</p>
+  </blockquote>
+  <p>这正是「能统一」的根本原因：<strong>只要内核会处理一般的 TND</strong>（扁平 token 流 + 任意起点），BSND <strong>自动落入其中</strong> —— 不需要为它单写一套。</p>
+
+  <!-- ===================== 4 ===================== -->
+  <h2 id="s4"><span class="num">4</span>统一处理：内核只认「扁平 token 流 + 每条序列的起点」</h2>
+  <p>内核内部<strong>只在一个扁平张量 <code>[total_tokens, N, D]</code> 上干活</strong>。它定位第 <code>b</code> 条序列的第 <code>s</code> 个 token，用的是一个<strong>扁平 token 编号</strong>：</p>
+  <div class="eqwrap" style="display:flex;justify-content:center;margin:18px 0">
+    <div style="font-family:var(--mono);font-size:17px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 24px;box-shadow:0 1px 2px rgba(20,40,80,.05);color:#22303f">
+      g = <span style="color:#1e40af;font-weight:700">q_prefix[b]</span> + s
+      <span style="font-family:var(--sans);font-size:12px;color:var(--muted);display:block;margin-top:6px;text-align:center">扁平编号 = 这条序列的起点偏移 + 序列内位置</span>
+    </div>
+  </div>
+  <p>于是内核只需要两张 <strong>O(B) 的小账本</strong>（B 是序列条数，通常几十）：</p>
+  <ul>
+    <li><code class="kv">q_prefix[b]</code>：第 <code>b</code> 条序列在扁平流里的<strong>起点偏移</strong>；</li>
+    <li><code class="kv">act_q_lens[b]</code>：第 <code>b</code> 条序列的<strong>实际长度</strong>（圈定有效范围，别越界算到 padding 或下一条）。</li>
+  </ul>
+  <p>两种布局只是<strong>用不同方式把这两张账本填出来</strong>，填完之后走的是<strong>同一条内核路径</strong>：</p>
+
+  <figure>
+    <div class="figcard">
+      <div class="flow">
+        <div class="fbox" style="border-top:4px solid var(--blue)">
+          <h4>🟦 TND 输入 <code>[T,N,D]</code></h4>
+          <p class="small"><code>q_flat = q</code> <span class="free">（直接透传，零拷贝）</span><br><code>q_prefix = cu[:-1]</code> = <code>[0,2,5]</code><br><code>act_q_lens =</code> cu 差分 = <code>[2,3,2]</code></p>
+        </div>
+        <div class="farr">→</div>
+        <div class="fbox kbox">
+          <h4>⚙️ 同一个内核</h4>
+          <p class="small">在 <code>[total_tokens, N, D]</code> 上，按 <code>g = q_prefix[b] + s</code> 寻址 Q / 输出 / 索引。<br><strong>完全不在乎</strong> q_prefix 是规则还是不规则。</p>
+        </div>
+        <div class="farr">←</div>
+        <div class="fbox" style="border-top:4px solid #c084fc">
+          <h4>🟪 BSND 输入 <code>[B,S,N,D]</code></h4>
+          <p class="small"><code>q_flat = q.reshape(B*S,N,D)</code> <span class="free">（免费 view）</span><br><code>q_prefix = arange(B)*S</code> = <code>[0,3,6]</code><br><code>act_q_lens = S</code>（或按 cu_seqlens）</p>
+        </div>
+      </div>
+    </div>
+    <figcaption>两种布局各自在 host 侧花几行小工夫，算出 <code>q_prefix</code> / <code>act_q_lens</code>，然后<strong>汇入同一个内核</strong>。内核只读 <code>q_prefix[b]</code> 这个数，不关心它从哪来。</figcaption>
+  </figure>
+
+  <p>用例子点一下：内核要取「第 <code>b=1</code> 条（序列 B）的第 <code>s=0</code> 个 token」，</p>
+  <ul>
+    <li>TND：<code>g = q_prefix[1] + 0 = 2 + 0 = 2</code> → 扁平流第 2 格，正是 <code>b0</code> ✅</li>
+    <li>BSND：<code>g = q_prefix[1] + 0 = 3 + 0 = 3</code> → 扁平流第 3 格，也正是 <code>b0</code> ✅</li>
+  </ul>
+  <p>两者算出的 <code>g</code> 不同（2 vs 3，因为 padding 让 BSND 的起点偏了），但<strong>取数那一步的逻辑一模一样</strong>。这就是「统一按 TND」的全部含义：<strong>内核只认一种寻址方式，布局差异被压进 <code>q_prefix</code> 这一张小表里消化掉了。</strong></p>
+
+  <div class="note">
+    <p><strong>关于 BSND 的 padding：</strong>BSND 展平后的扁平流里夹着 padding 槽位（例子里第 2、8 格）。<code>q_prefix[b]</code> 配上 <code>act_q_lens[b]</code> 正好圈定每条的有效区间 <code>[q_prefix[b], q_prefix[b] + act_q_lens[b])</code>，padding 落在区间外、<strong>不参与计算</strong>。这些 padding 槽位占着内存是 BSND 这种布局<strong>本身的特性</strong>，不是「统一处理」引入的额外成本。</p>
+  </div>
+
+  <!-- ===================== 5 ===================== -->
+  <h2 id="s5"><span class="num">5</span>不只是 Q：凡是「逐 token」的张量，都搭同一班 reshape</h2>
+  <p>上一节讲的是 Q 怎么走。但 Q <strong>不是唯一</strong>一个「逐 token」的张量。在稀疏场景（SCFA）里还有一个 <code>cmp_sparse_indices</code> —— 它记录<strong>每个 query token 选中了哪几个压缩 KV 块</strong>（稀疏注意力只看挑出来的少数块，而「挑哪些」是逐 token 各选各的）。</p>
+  <p>关键点：<code>cmp_sparse_indices</code> 既然是<strong>逐 query token</strong> 的，就<strong>必须和 Q 待在同一套 token 布局里</strong> —— 内核取「第 <code>g</code> 个 token 选了哪些块」时，用的是<strong>和取 Q 完全相同的那个</strong> <code>g = q_prefix[b] + s</code>。两者必须对得上，否则就张冠李戴了。</p>
+
+  <h3>5.1 它的形状：前面跟着 token 走，后面是每 token 的载荷</h3>
+  <p><code>cmp_sparse_indices</code> 的形状是 <code>[B, S, Nkv, K]</code>（BSND）或 <code>[T, Nkv, K]</code>（TND），拆成两截看：</p>
+  <ul>
+    <li><strong>最前面的 token 维</strong>（<code>[B, S]</code> 或 <code>[T]</code>）：和 Q <strong>一模一样</strong>地跟着布局走；</li>
+    <li><strong>后面的 <code>[Nkv, K]</code></strong>：每个 token 自己的<strong>载荷</strong>（<code>Nkv</code> 个 KV 头、每头 <code>K</code> 个选中索引），<strong>和布局无关</strong> —— 就像 Q 的 <code>[N, D]</code> 一样，原样不动。</li>
+  </ul>
+  <p>所以它的处理<strong>和 Q 同一招、同一个理由</strong>：TND 透传、BSND 一次免费 <code>reshape</code> 合并最前面的 <code>B</code>、<code>S</code> 两维。</p>
+
+  <figure>
+    <div class="figcard">
+      <div class="flow">
+        <div class="fbox" style="border-top:4px solid #c084fc">
+          <h4>🟪 BSND</h4>
+          <p class="small"><code>cmp_sparse_indices</code><br><code>[B, S, Nkv, K]</code><br><code>reshape</code> 合并 B、S，<span class="free">免费 view</span></p>
+        </div>
+        <div class="farr">→</div>
+        <div class="fbox kbox">
+          <h4>⚙️ 与 Q 对齐的扁平流</h4>
+          <p class="small"><code>[total_tokens, Nkv, K]</code><br>内核按同一个 <code>g = q_prefix[b] + s</code> 取</p>
+        </div>
+        <div class="farr">←</div>
+        <div class="fbox" style="border-top:4px solid var(--blue)">
+          <h4>🟦 TND</h4>
+          <p class="small"><code>[T, Nkv, K]</code><br><span class="free">本来就是这形状，透传</span></p>
+        </div>
+      </div>
+    </div>
+    <figcaption>和 Q 的 <code>[B,S,N,D] → [B*S,N,D]</code> 是<strong>同一次 reshape</strong>：只动最前面的 token 维（<code>B,S → B*S</code>），后面的载荷维 <code>[Nkv, K]</code> 纹丝不动。</figcaption>
+  </figure>
+
+  <h3>5.2 一条统一规则，覆盖所有逐-token 张量</h3>
+  <p>把这件事说穿：<strong>布局差异只存在于「最前面那一截 token 维」</strong>。任何「逐 token」的张量，处理方式都一样 —— <strong>token 维跟着 reshape，载荷维原样不动</strong>。这一条规则，一次性覆盖了 Q、输出、LSE、以及 <code>cmp_sparse_indices</code>：</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>逐-token 张量</th><th>BSND 形状</th><th>展平 / TND 形状</th><th>跟 token 走的维</th><th>每-token 载荷（不动）</th></tr></thead>
+    <tbody>
+      <tr><td>Q（输入）</td><td class="kv">[B, S, N, D]</td><td class="kv">[T, N, D]</td><td class="kv">B, S → T</td><td class="kv">N, D</td></tr>
+      <tr><td><code>cmp_sparse_indices</code></td><td class="kv">[B, S, Nkv, K]</td><td class="kv">[T, Nkv, K]</td><td class="kv">B, S → T</td><td class="kv">Nkv, K</td></tr>
+      <tr><td>输出 out</td><td class="kv">[B, S, N, D]</td><td class="kv">[T, N, D]</td><td class="kv">B, S → T</td><td class="kv">N, D</td></tr>
+      <tr><td>LSE</td><td class="kv">[B, S, N]</td><td class="kv">[T, N]</td><td class="kv">B, S → T</td><td class="kv">N</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>于是整套流程里<strong>只有一处</strong>需要按布局分情况：把这些逐-token 张量的 token 维 <code>reshape</code> 一下（TND 透传、BSND 免费 view），外加算一张 <code>q_prefix</code>。其余一切 —— 内核怎么寻址、怎么算 —— <strong>完全不分布局</strong>。</p>
+
+  <div class="note">
+    <p><strong>用例子收一下：</strong>还是 3 条序列、长度 2/3/2。<code>cmp_sparse_indices</code> 在 BSND 下是 <code>[3, 3, Nkv, K]</code> → <code>reshape</code> 成 <code>[9, Nkv, K]</code>（含 A、C 各 1 个 padding token 的槽位，正好和 Q 展平后的 9 格对齐）；TND 下是 <code>[7, Nkv, K]</code> 直接透传。内核要查「序列 B 第 0 个 token（<code>b=1, s=0</code>）选了哪些块」，算的还是 <code>g = q_prefix[1] + 0</code>（TND 得 2、BSND 得 3）—— <strong>和取 Q 那一格是同一个 <code>g</code></strong>，分毫不差。</p>
+  </div>
+
+  <!-- ===================== 6 ===================== -->
+  <h2 id="s6"><span class="num">6</span>host 侧代价：到底做了什么、有多便宜</h2>
+  <p>把第 4 节 host 侧那几行摊开算账。<strong>先说结论：</strong></p>
+  <blockquote><p><strong>全程没有任何 host 侧布局转换。</strong>那个唯一的「大」张量 —— Q（<code>total_tokens × N × D</code>，动辄几十上百 MB）—— <strong>从头到尾一个字节都没被复制过</strong>。host 只造了几张 <code>O(B)</code> 的小账本。</p></blockquote>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>布局</th><th>host 侧这一步</th><th>做了什么</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="3">🟦 TND</td><td><code>cu_seqlens.cpu()</code></td><td><code>[B+1]</code> 个 int 从设备搬到 CPU（用来切分 batch）</td><td>唯一的 D2H 同步，<strong>B+1 个整数</strong>，可忽略</td></tr>
+      <tr><td><code>q_flat = q</code></td><td>直接用原张量</td><td><span class="free">零拷贝</span></td></tr>
+      <tr><td><code>q_prefix = cu[:-1]</code></td><td>取累积长度的前缀当起点表</td><td><span class="free">切片 view</span></td></tr>
+      <tr><td rowspan="3">🟪 BSND</td><td><code>q.reshape(B*S,N,D)</code></td><td>把 batch 与 seq 两维合并成一维</td><td><span class="free">免费 view</span>（见下）</td></tr>
+      <tr><td><code>q_prefix = arange(B)*S</code></td><td>规则等差起点表 <code>[0,S,2S,…]</code></td><td><code>O(B)</code> 小张量</td></tr>
+      <tr><td><code>act_q_lens</code></td><td>每条实际长度</td><td><code>O(B)</code> 小张量</td></tr>
+      <tr class="hl-row"><td>两者</td><td>大张量 Q <code>(T×N×D)</code></td><td>—— 一次都没复制 ——</td><td><span class="free">0</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>5.1 「reshape 为什么是免费的」</h3>
+  <p>这是整件事最关键、也最容易没想透的一点。BSND 的 <code>[B, S, N, D]</code> 在内存里是<strong>连续</strong>排列的（行优先，一个挨一个）。当你把相邻的 <code>B</code> 和 <code>S</code> 两维合并成 <code>B×S</code> 时，<strong>元素的实际排列顺序、步长统统没变</strong> —— 变的只是「我们怎么称呼这块内存的形状」。</p>
+  <p>所以 <code>reshape(B*S, N, D)</code> 做的事是：PyTorch 改一下「形状元数据」（<code>shape</code> / <code>stride</code> 这么几个小数字），<strong>底层那块大数据连碰都不碰</strong>。新旧张量<strong>共享同一块内存</strong>，零拷贝、零延迟、零额外显存。</p>
+  <blockquote><p>一句话：BSND 和「展平的 TND」<strong>本来就是同一块内存的两种叫法</strong>。reshape 只是换个叫法，不搬家。</p></blockquote>
+
+  <div class="warn">
+    <p>⚠️ <strong>前提是张量连续（contiguous）。</strong>如果调用方传进来的 Q 是某个非连续的视图（比如刚做过 <code>transpose</code> 没 <code>contiguous</code>），那次 <code>reshape</code> 才可能触发一次真实拷贝。但那是<strong>调用方布局没整理好</strong>的问题，不是「统一按 TND」这套逻辑引入的。常规情况下 Q 是连续的，<code>reshape</code> 就是纯 view。</p>
+  </div>
+
+  <h3>5.2 量级对照</h3>
+  <p>把两边的体量摆一起就一目了然：</p>
+  <ul>
+    <li>host 侧造的小账本：<code>q_prefix</code>、<code>act_q_lens</code> 等，量级 <code>O(B)</code> —— <strong>B 是序列条数，通常几十</strong>。</li>
+    <li>那个大张量 Q：量级 <code>O(T×N×D)</code> —— <strong>百万到千万级元素</strong>。</li>
+  </ul>
+  <p>两者差了好几个数量级。host 这点活，相对内核里随后要做的成片矩阵乘法，<strong>完全可以忽略不计</strong>。</p>
+
+  <!-- ===================== 7 ===================== -->
+  <h2 id="s7"><span class="num">7</span>反面教材：真去做 BSND↔TND 物理转换会多贵</h2>
+  <p>为了体会「统一按 TND」省下的是什么，设想一个<strong>笨办法</strong>：内核只支持其中一种布局，于是另一种必须在 host 上<strong>物理转换</strong>过去 —— 真的把数据搬一遍。</p>
+  <ul>
+    <li><strong>BSND → TND</strong>：要把每条序列的 padding 抠掉、把有效 token 紧凑地<strong>重新拷贝</strong>到一块新内存。这要<strong>读 + 写整个 Q</strong>，量级 <code>O(T×N×D)</code>。</li>
+    <li><strong>TND → BSND</strong>：要按 <code>S</code> 给每条序列补 padding、散开拷贝到规整方阵。同样是整张大张量的搬运，还更大（含 padding）。</li>
+  </ul>
+  <p>这种「为了喂给内核，先把大张量搬来搬去」的浪费，和「给每条序列预留一大段连续内存、再整段拷贝」是<strong>同一类病</strong> —— 真正昂贵的从来不是那几个起点数字，而是<strong>动那块大内存</strong>。</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>笨办法：物理转换 BSND↔TND</th><th>本方案：统一按 TND + <code>q_prefix</code></th></tr></thead>
+    <tbody>
+      <tr><td>拷贝大张量 Q？</td><td><span class="costly">要</span>（整份读 + 写）</td><td><span class="free">不要</span>（reshape 只是 view）</td></tr>
+      <tr><td>host 复杂度</td><td><code>O(T×N×D)</code></td><td><code>O(B)</code></td></tr>
+      <tr><td>额外显存</td><td>多占一整份 Q</td><td><span class="free">无</span></td></tr>
+      <tr><td>D2H 同步</td><td>可能多次</td><td>仅 <code>[B+1]</code> 个 int</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>「统一按 TND + <code>q_prefix</code>」把左边那一整列大开销<strong>整个省掉</strong>：内核直接吃调用方原始的内存，host 只额外补一张 <code>O(B)</code> 的起点表。</p>
+
+  <!-- ===================== 8 ===================== -->
+  <h2 id="s8"><span class="num">8</span>收尾：输出按调用方的布局原样还原</h2>
+  <p>内核算完，产出也是扁平的：<code>out_flat [total_tokens, N, D]</code>，以及（如果要）每个 token 的 <code>lse_flat [total_tokens, N]</code>。最后只需按<strong>调用方进来时的布局</strong>还回去 —— 而且<strong>又是零拷贝</strong>：</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>进来的布局</th><th>输出 <code>out</code> 怎么还原</th><th>LSE 形状</th></tr></thead>
+    <tbody>
+      <tr><td>🟦 TND</td><td><code>out = out_flat</code> —— 本来就是 <code>[T,N,D]</code>，<strong>原样返回</strong></td><td><code>[T, N]</code></td></tr>
+      <tr><td>🟪 BSND</td><td><code>out = out_flat.reshape(B,S,N,D)</code> —— <span class="free">又一次免费 view</span></td><td><code>[B, S, N]</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <blockquote><p>所以对调用方来说：<strong>进来什么布局、出去还是什么布局</strong>，中间统一走 TND，<strong>两头都是零拷贝的 view，全程无感。</strong></p></blockquote>
+
+  <!-- ===================== 9 ===================== -->
+  <h2 id="s9"><span class="num">9</span>一页速查 + 总结</h2>
+
+  <h3>BSND vs TND 速查</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>🟦 BSND</th><th>🟪 TND</th></tr></thead>
+    <tbody>
+      <tr><td>形状</td><td class="kv">[B, S, N, D]</td><td class="kv">[T, N, D]</td></tr>
+      <tr><td>一句话</td><td>规整矩形，padding 到等长 S</td><td>首尾拼接，T = Σ 序列长度</td></tr>
+      <tr><td>有无 padding</td><td>有（短序列补到 S）</td><td><strong>无</strong></td></tr>
+      <tr><td>序列边界靠什么</td><td>隐式（每条恰好占 S）</td><td>显式 <code>cu_seqlens [B+1]</code></td></tr>
+      <tr><td>起点 <code>q_prefix[b]</code></td><td class="kv">b × S（规则等差）</td><td class="kv">cu[b]（累积长度）</td></tr>
+      <tr><td>变扁平的代价</td><td><code>reshape</code> <span class="free">免费 view</span></td><td>本来就是扁平，<span class="free">透传</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>三句话总结</h3>
+  <ol>
+    <li><strong>BSND 是「padding 到等长的规整矩形」，TND 是「首尾拼接的紧凑变长」</strong>；后者是一般情形，前者是它「等长 + 规则步长 <code>S</code>」的<strong>特例</strong>。</li>
+    <li><strong>内核只认「扁平 token 流 <code>[total_tokens, N, D]</code> + 每条序列起点 <code>q_prefix[b]</code>」</strong>；TND 原生就是这形状（透传），BSND 只要一次 <code>reshape</code>（免费 view）+ 一张规则的 <code>q_prefix</code>。布局差异全被压进 <code>q_prefix</code> 消化掉。而且这条「token 维跟着 reshape、载荷维原样不动」的规则<strong>不只管 Q</strong> —— 输出、LSE、<code>cmp_sparse_indices</code> 等<strong>一切逐-token 张量</strong>都同此处理（见第 5 节）。</li>
+    <li><strong>全程没有大张量的物理转换</strong>，host 只造 <code>O(B)</code> 的小账本 —— 统一按 TND 处理<strong>几乎零成本</strong>，进出两头还都是零拷贝 view。</li>
+  </ol>
+
+  <h3>例子一览</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>序列（长度）</th><th>TND 扁平位置</th><th>BSND 扁平位置（S=3）</th></tr></thead>
+    <tbody>
+      <tr><td>A（2）：a0 a1</td><td class="kv">0, 1</td><td class="kv">0, 1　<span style="color:#9aa4b1">(2=pad)</span></td></tr>
+      <tr><td>B（3）：b0 b1 b2</td><td class="kv">2, 3, 4</td><td class="kv">3, 4, 5</td></tr>
+      <tr><td>C（2）：c0 c1</td><td class="kv">5, 6</td><td class="kv">6, 7　<span style="color:#9aa4b1">(8=pad)</span></td></tr>
+      <tr class="hl-row"><td><code>q_prefix</code></td><td class="kv">[0, 2, 5]</td><td class="kv">[0, 3, 6] = b×3</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="text-align:center;color:var(--muted);font-size:14px;">同一批序列、同一个内核 —— 差别只在 <code>q_prefix</code> 这三个数，和 BSND 多出来的两个 padding 槽位。</p>
+
+</div>
+
+<a href="#top" class="totop" title="回到顶部">↑</a>
+<script>
+(function(){
+  var heads = Array.prototype.slice.call(document.querySelectorAll('h2[id]'));
+  var links = Array.prototype.slice.call(document.querySelectorAll('.sidenav a'));
+  if(!heads.length || !links.length) return;
+  var ticking = false;
+  function update(){
+    ticking = false;
+    var cur = heads[0];
+    for(var i=0;i<heads.length;i++){
+      if(heads[i].getBoundingClientRect().top <= 130) cur = heads[i];
+    }
+    for(var j=0;j<links.length;j++){
+      links[j].classList.toggle('active', links[j].getAttribute('href') === '#'+cur.id);
+    }
+  }
+  function onScroll(){ if(!ticking){ ticking = true; requestAnimationFrame(update); } }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll, {passive:true});
+  update();
+})();
+</script>
+</body>
+</html>

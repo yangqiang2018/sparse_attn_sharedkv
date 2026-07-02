@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>metadata 数据结构详解</title>
+<style>
+  :root{
+    --bg:#f7f7f4; --panel:#ffffff; --ink:#1f2328; --muted:#5b6470;
+    --line:#e3e6ea; --accent:#2f6fea; --accent-soft:#eaf1ff;
+    --blue:#3b82f6; --blue-bg:#dbeafe; --blue-ink:#1e40af;
+    --green:#10b981; --green-bg:#d1fae5; --green-ink:#065f46;
+    --amber:#f59e0b; --amber-bg:#fef3c7; --amber-ink:#92400e;
+    --gray:#9ca3af; --gray-bg:#eceef1; --gray-ink:#4b5563;
+    --code-bg:#f4f6f8; --code-ink:#1c2733;
+    --radius:12px;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",Consolas,"Cascadia Code",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:16.5px; line-height:1.85;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:0 22px 120px;}
+
+  /* ---- header ---- */
+  header.hero{
+    max-width:880px; margin:0 auto; padding:54px 22px 26px;
+  }
+  .kicker{
+    display:inline-block; font-size:12.5px; letter-spacing:.16em; font-weight:700;
+    color:var(--accent); background:var(--accent-soft); padding:5px 12px; border-radius:999px;
+    text-transform:uppercase; margin-bottom:18px;
+  }
+  h1{font-size:38px; line-height:1.22; margin:.1em 0 .35em; letter-spacing:-.01em;}
+  .sub{color:var(--muted); font-size:16px; margin:0;}
+
+  /* ---- typography ---- */
+  h2{
+    font-size:25px; margin:64px 0 18px; padding-top:16px; letter-spacing:-.01em;
+    border-top:2px solid var(--line);
+  }
+  h2 .num{color:var(--accent); font-variant-numeric:tabular-nums; margin-right:.45em;}
+  h3{font-size:19px; margin:34px 0 12px; color:#2b3340;}
+  p{margin:14px 0;}
+  a{color:var(--accent); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  strong{font-weight:700; color:#16324f;}
+  ul,ol{margin:14px 0; padding-left:1.4em;}
+  li{margin:7px 0;}
+  hr{border:none; border-top:1px solid var(--line); margin:40px 0;}
+
+  /* inline code */
+  code{
+    font-family:var(--mono); font-size:.88em; background:var(--code-bg);
+    color:#b3344a; padding:2px 6px; border-radius:6px; border:1px solid #e7e2e4;
+  }
+  /* code blocks */
+  pre{
+    background:#0f1b2d; color:#dbe7f3; border-radius:var(--radius);
+    padding:18px 20px; overflow:auto; font-family:var(--mono); font-size:14px;
+    line-height:1.65; margin:18px 0; border:1px solid #0a1320;
+    box-shadow:0 1px 0 rgba(0,0,0,.04);
+  }
+  pre code{background:none; color:inherit; border:none; padding:0; font-size:inherit;}
+  pre .cmt{color:#7d93ad;}
+  pre .hl{color:#ffd479;}
+  pre .ok{color:#7ee0a1;}
+
+  /* blockquote / callout */
+  blockquote{
+    margin:18px 0; padding:14px 18px; background:var(--panel);
+    border-left:4px solid var(--accent); border-radius:0 10px 10px 0;
+    color:#33414f; box-shadow:0 1px 2px rgba(20,40,80,.05);
+  }
+  blockquote p:first-child{margin-top:0}
+  blockquote p:last-child{margin-bottom:0}
+
+  .note{
+    margin:18px 0; padding:16px 18px; background:var(--accent-soft);
+    border:1px solid #d4e2ff; border-radius:var(--radius); font-size:15px; color:#2b4a73;
+  }
+  .note p{margin:6px 0}
+  .note code{background:#fff;}
+
+  /* tables */
+  .tablewrap{overflow-x:auto; margin:18px 0;}
+  table{border-collapse:collapse; width:100%; font-size:15px; background:var(--panel);
+    border-radius:10px; overflow:hidden; box-shadow:0 1px 2px rgba(20,40,80,.05);}
+  th,td{padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{background:#eef2f7; font-weight:700; color:#2b3340;}
+  tr:last-child td{border-bottom:none;}
+  td code,th code{font-size:.85em;}
+
+  /* TOC */
+  nav.toc{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 24px; margin:30px 0;
+  }
+  nav.toc h2{border:none; margin:0 0 10px; padding:0; font-size:16px; color:var(--muted);
+    letter-spacing:.04em; text-transform:uppercase;}
+  nav.toc ol{margin:0; padding-left:1.5em; columns:2; column-gap:34px;}
+  nav.toc li{margin:5px 0; break-inside:avoid;}
+  nav.toc a{color:#33414f;}
+  nav.toc .ix{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums;}
+
+  /* figures */
+  figure{margin:26px 0; padding:0;}
+  figure svg{display:block; width:100%; height:auto;}
+  .figcard{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:22px; box-shadow:0 2px 10px rgba(20,40,80,.05);
+  }
+  figcaption{font-size:13.5px; color:var(--muted); text-align:center; margin-top:12px;}
+  .fig-mono{font-family:var(--mono);}
+
+  /* token strip (logical pages) */
+  .strip{display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;}
+  .page{border:1.5px solid; border-radius:10px; padding:10px 10px 8px; }
+  .page .ptitle{font-size:12px; font-weight:700; margin-bottom:8px; text-align:center;}
+  .page .toks{display:flex; gap:6px;}
+  .tok{
+    width:46px; height:34px; border-radius:7px; display:flex; align-items:center; justify-content:center;
+    font-family:var(--mono); font-size:14px; font-weight:600;
+  }
+  .p0{border-color:var(--blue); background:#f3f8ff;} .p0 .ptitle{color:var(--blue-ink);} .p0 .tok{background:var(--blue-bg); color:var(--blue-ink);}
+  .p1{border-color:var(--green); background:#f2fdf8;} .p1 .ptitle{color:var(--green-ink);} .p1 .tok{background:var(--green-bg); color:var(--green-ink);}
+  .p2{border-color:var(--amber); background:#fffdf2;} .p2 .ptitle{color:var(--amber-ink);} .p2 .tok{background:var(--amber-bg); color:var(--amber-ink);}
+
+  /* tensor shape */
+  .shape{display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin:6px 0;}
+  .dim{border-radius:10px; padding:12px 14px; min-width:120px; text-align:center; border:1.5px solid;}
+  .dim .dname{font-family:var(--mono); font-weight:700; font-size:15px;}
+  .dim .ddesc{font-size:12.5px; margin-top:4px;}
+  .d0{border-color:#c084fc; background:#faf5ff;} .d0 .dname{color:#7c3aed;}
+  .d1{border-color:var(--green); background:#f2fdf8;} .d1 .dname{color:var(--green-ink);}
+  .d2{border-color:var(--gray); background:#f6f7f9;} .d2 .dname{color:var(--gray-ink);}
+  .d3{border-color:var(--blue); background:#f3f8ff;} .d3 .dname{color:var(--blue-ink);}
+
+  /* corridor — fragmentation figures */
+  .corridor{display:flex; gap:5px; margin:6px 0 2px;}
+  .corridor .cell{flex:1; height:38px; border-radius:6px; border:1px solid #d8dde3; background:#eef1f5;}
+  .corridor .cell.used{background:#cfe3ff; border-color:#9bc2ff;}
+  .corridor .cell.empty{background:repeating-linear-gradient(45deg,#fff,#fff 5px,#f1f3f6 5px,#f1f3f6 10px);}
+  .frag-head{margin:0 0 4px; font-size:14px;}
+  .badwaste{color:#b54708; font-weight:700; font-size:13px;}
+
+  /* two cache compare */
+  .twocache{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  .cache{border:1.5px solid var(--line); border-radius:12px; padding:16px; background:var(--panel);}
+  .cache.ori{border-top:4px solid var(--blue);}
+  .cache.cmp{border-top:4px solid #c084fc;}
+  .cache h4{margin:0 0 6px; font-size:15px;}
+  .cache .use{font-size:13px; color:var(--muted); margin-bottom:10px;}
+  .cache .meta{font-family:var(--mono); font-size:12.5px; color:#33414f; background:var(--code-bg);
+    padding:8px 10px; border-radius:8px; border:1px solid #e7e2e4;}
+
+  /* side nav (table of contents) — hidden by default, shown on wide screens */
+  .sidenav{display:none;}
+  @media (min-width:1180px){
+    .sidenav{
+      display:block; position:fixed; top:0; left:0; width:264px; height:100vh;
+      overflow-y:auto; padding:30px 16px 48px; box-sizing:border-box;
+      background:#fbfbf8; border-right:1px solid var(--line);
+    }
+    .sidenav .snav-title{
+      margin:0 0 14px; padding-left:12px; font-size:12px; font-weight:700;
+      letter-spacing:.14em; text-transform:uppercase; color:var(--muted);
+    }
+    .sidenav ol{list-style:none; margin:0; padding:0;}
+    .sidenav li{margin:1px 0;}
+    .sidenav a{
+      display:flex; gap:9px; align-items:baseline; padding:6px 11px;
+      border-radius:8px; border-left:2px solid transparent;
+      color:#475461; font-size:13.5px; line-height:1.45;
+    }
+    .sidenav a .n{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; min-width:16px; text-align:right;}
+    .sidenav a:hover{background:var(--accent-soft); text-decoration:none;}
+    .sidenav a.active{background:var(--accent-soft); color:var(--accent); font-weight:700; border-left-color:var(--accent);}
+    /* hand the top-of-page TOC over to the sidebar; clear the fixed sidebar */
+    nav.toc{display:none;}
+    header.hero{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+    .wrap{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+  }
+
+  /* back to top */
+  .totop{
+    position:fixed; right:22px; bottom:22px; width:44px; height:44px; border-radius:50%;
+    background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center;
+    font-size:20px; box-shadow:0 4px 14px rgba(47,111,234,.4); opacity:.92; z-index:50;
+  }
+  .totop:hover{text-decoration:none; opacity:1;}
+
+  @media (max-width:640px){
+    body{font-size:16px;}
+    h1{font-size:30px;}
+    nav.toc ol{columns:1;}
+    .twocache{grid-template-columns:1fr;}
+  }
+
+  /* ===== metadata 文档专用 ===== */
+  .figtitle{margin:0 0 14px; font-size:14.5px; font-weight:700; color:#334155;}
+  .warn{margin:18px 0; padding:14px 18px; background:var(--amber-bg);
+    border:1px solid #f3d27a; border-radius:var(--radius); font-size:15px; color:#7a4d09;}
+  .warn code{background:#fff;} .warn p{margin:6px 0;}
+  .kv{font-family:var(--mono);}
+  .hl-row td{background:#fffaf0;}
+  .small{font-size:12.5px;}
+  /* 流程：三盒 + 箭头 */
+  .flow{display:flex; align-items:stretch; gap:10px; flex-wrap:wrap; margin:6px 0;}
+  .fbox{flex:1 1 150px; border:1.5px solid var(--line); border-radius:12px; padding:14px; background:var(--panel);}
+  .fbox h4{margin:0 0 8px; font-size:14px;}
+  .fbox .small{font-size:12.5px; color:var(--muted); line-height:1.6;}
+  .farr{display:flex; align-items:center; justify-content:center; font-size:24px; color:var(--accent); flex:0 0 24px;}
+  .kbox{border-top:4px solid var(--accent); background:var(--accent-soft);}
+  /* 负载条 */
+  .bars{margin:8px 0; display:flex; flex-direction:column; gap:8px;}
+  .brow{display:grid; grid-template-columns:110px 1fr 96px; align-items:center; gap:10px; font-size:13.5px;}
+  .brow .blab{font-family:var(--mono); color:#475569; text-align:right;}
+  .btrack{height:24px; background:#eef1f5; border-radius:6px; overflow:hidden;}
+  .bfill{height:100%; border-radius:6px; background:linear-gradient(90deg,#7db8ff,#3b82f6); min-width:2px;}
+  .bfill.hot{background:linear-gradient(90deg,#fca5a5,#ef4444);}
+  .bfill.ok{background:linear-gradient(90deg,#6ee7b7,#10b981);}
+  .brow .bval{font-family:var(--mono); color:#1e3a5f; font-weight:600; font-size:12.5px;}
+  /* 内存地图 */
+  .memmap{display:flex; height:56px; border-radius:10px; overflow:hidden; border:1.5px solid var(--line); margin:8px 0; font-size:12.5px; font-weight:700; line-height:1.3;}
+  .mseg{display:flex; align-items:center; justify-content:center; text-align:center; color:#fff; padding:0 6px;}
+  .mseg.fa{background:#3b82f6;} .mseg.fd{background:#8b5cf6;} .mseg.pad{background:#cbd5e1; color:#475569;}
+  /* 三层地址 chips */
+  .addr{display:flex; flex-direction:column; gap:8px; margin:4px 0;}
+  .achip{font-family:var(--sans); font-size:13.5px; border-radius:8px; padding:8px 12px; border:1.5px solid;}
+  .achip strong{font-family:var(--mono); margin-right:8px;}
+  .achip.a0{background:#faf5ff; border-color:#d8b4fe; color:#6b21a8;}
+  .achip.a1{background:#eff6ff; border-color:#93c5fd; color:#1e40af;}
+  .achip.a2{background:#ecfdf5; border-color:#6ee7b7; color:#065f46;}
+  /* 三列对比 */
+  .three{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin:6px 0;}
+  .three .cell{border:1.5px solid var(--line); border-radius:12px; padding:14px; background:var(--panel);}
+  .three .cell h4{margin:0 0 10px; font-size:15px;}
+  .three .cell table{box-shadow:none; font-size:13px;}
+  .three .cell td{padding:5px 8px;}
+  @media (max-width:640px){ .three{grid-template-columns:1fr;} }
+
+</style>
+</head>
+<body>
+<a id="top"></a>
+<aside class="sidenav" aria-label="目录">
+  <p class="snav-title">目录</p>
+  <ol>
+    <li><a href="#s0"><span class="n">0</span><span>metadata 是排班表</span></a></li>
+    <li><a href="#s1"><span class="n">1</span><span>为什么要分匀</span></a></li>
+    <li><a href="#s2"><span class="n">2</span><span>结构：两张表</span></a></li>
+    <li><a href="#s3"><span class="n">3</span><span>FA 排班表</span></a></li>
+    <li><a href="#s4"><span class="n">4</span><span>FD 合并表</span></a></li>
+    <li><a href="#s5"><span class="n">5</span><span>活儿：窗口 + 压缩</span></a></li>
+    <li><a href="#s6"><span class="n">6</span><span>三种场景对比</span></a></li>
+    <li><a href="#s7"><span class="n">7</span><span>完整小例子</span></a></li>
+    <li><a href="#s8"><span class="n">8</span><span>速查 + 总结</span></a></li>
+  </ol>
+</aside>
+
+<header class="hero">
+  <span class="kicker">算子调度 · 负载均衡</span>
+  <h1>metadata 详解 · 一张分给几十个核的「排班表」</h1>
+  <p class="sub">sparse attention shared kv 算子的 metadata 参数<strong>不是要算的数据</strong>，而是一张工单：把一大堆重复计算<strong>公平地分给芯片上几十个计算核</strong>。SWA / CFA / SCFA 三种场景用的是<strong>同一张表</strong>，只是填进去的数字不同。</p>
+</header>
+
+<div class="wrap">
+
+  <div class="note">
+    <p><strong>这篇讲什么：</strong>这个算子有一个叫 <code>metadata</code> 的输入参数。本文说清楚两件事 ——（1）它的<strong>数据结构</strong>到底长什么样（就是一串 1024 个整数、分成两张表）；（2）在 <strong>SWA / CFA / SCFA</strong> 三种场景下，这张表<strong>有什么不同</strong>。</p>
+    <p><strong>目标读者：完全没接触过神经网络的高中生也能读懂。</strong>你只需要会数数、加减，以及一个生活常识：<strong>一堆活儿分给几个人干，怎么分才最快</strong>。「注意力」是什么、算子在算什么，第 0 节用大白话从零讲起。全文用<strong>同一个小例子</strong>贯穿到底。</p>
+  </div>
+
+  <!-- ===================== TOC ===================== -->
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol start="0">
+      <li><span class="ix">0.</span> <a href="#s0">先说人话：metadata 是一张「排班表」</a></li>
+      <li><span class="ix">1.</span> <a href="#s1">为什么排班这么讲究：忙闲不均就慢</a></li>
+      <li><span class="ix">2.</span> <a href="#s2">数据结构：1024 个整数 = 两张表</a></li>
+      <li><span class="ix">3.</span> <a href="#s3">第一张表（FA 排班表）：每个核「从哪干到哪」</a></li>
+      <li><span class="ix">4.</span> <a href="#s4">第二张表（FD 合并表）：大活儿拆开后怎么拼回去</a></li>
+      <li><span class="ix">5.</span> <a href="#s5">活儿是从哪来的：窗口一趟 + 压缩一趟</a></li>
+      <li><span class="ix">6.</span> <a href="#s6">三种场景 SWA / CFA / SCFA：同一张表，不同的数字</a></li>
+      <li><span class="ix">7.</span> <a href="#s7">完整小例子：同 3 条序列，三种场景各排一次班</a></li>
+      <li><span class="ix">8.</span> <a href="#s8">一页速查 + 总结</a></li>
+    </ol>
+  </nav>
+
+  <!-- ===================== 0 ===================== -->
+  <h2 id="s0"><span class="num">0</span>先说人话：metadata 是一张「排班表」</h2>
+  <p>先不管神经网络。你只要知道：这个算子要做的事，是<strong>同一种计算，重复很多很多遍</strong>。</p>
+  <blockquote><p>这个「同一种计算」叫<strong>注意力</strong>：处理当前这个词时，回头看前面的一大批词，给每个词打个「该关注多少」的分，再按分数把它们的信息混合起来。<strong>细节这里不重要</strong> —— 重要的是：要处理的词很多，每个词都要回头扫一大批，<strong>活儿又多又重复</strong>。</p></blockquote>
+  <p>好在，跑这个算子的芯片（一块 NPU）上有<strong>几十个一模一样的计算核</strong>（把它们想成几十个工人），可以<strong>同时开工</strong>。于是问题来了：</p>
+  <blockquote><p>这么一大堆活儿，怎么<strong>分给几十个工人</strong>，才能让大家<strong>几乎同时收工</strong>？</p></blockquote>
+  <p>答案是：开工前，先让一个「工头」（一个专门的<strong>调度器</strong>）把活儿<strong>排好班</strong>，写成一张表。每个工人一看这张表，就知道「<strong>我负责哪一段</strong>」，然后各干各的、互不打扰。</p>
+  <p><strong>这张排班表，就是 <code>metadata</code>。</strong></p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">metadata 的角色：开工前排好的一张工单</p>
+      <div class="flow">
+        <div class="fbox">
+          <h4>🧑‍🏭 工头（调度器）</h4>
+          <p class="small">开工前先估算：一共多少活儿、每块多重，然后<strong>切成几段</strong>。</p>
+        </div>
+        <div class="farr">→</div>
+        <div class="fbox kbox">
+          <h4>📋 排班表 = <code>metadata</code></h4>
+          <p class="small">一串整数。写清楚<strong>每个核负责哪一段活儿</strong>（从哪到哪）。</p>
+        </div>
+        <div class="farr">→</div>
+        <div class="fbox">
+          <h4>👷👷👷 几十个计算核</h4>
+          <p class="small">各自查自己那一行，领走自己那段，<strong>同时开工</strong>。</p>
+        </div>
+      </div>
+    </div>
+    <figcaption>关键：<code>metadata</code> <strong>不是要计算的数据本身</strong>（不是那些词、那些数），而是<strong>怎么分工的计划</strong> —— 像开工前贴在墙上的排班表。</figcaption>
+  </figure>
+
+  <div class="warn"><p>⚠️ 记住这一点，全文都不会绕晕：<strong>metadata 里没有任何「计算结果」，只有「谁干哪一段」的安排。</strong>它是给几十个核看的一张分工表。</p></div>
+
+  <!-- ===================== 1 ===================== -->
+  <h2 id="s1"><span class="num">1</span>为什么排班这么讲究：忙闲不均就慢</h2>
+  <p>为什么不能随便分？因为有一条铁律：</p>
+  <blockquote><p><strong>所有工人一起开工，但要等<em>最慢</em>的那个干完，整件事才算完。</strong></p></blockquote>
+  <p>所以如果分得不匀 —— 比如把一大半活儿堆给一个工人，其他工人各分一点点 —— 那大家就得<strong>干等着</strong>那个被压垮的工人，白白浪费。</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">同样 12 份活儿、3 个工人：分得匀不匀，差别巨大</p>
+      <div class="bars">
+        <div class="brow"><span class="blab">乱分 · 核1</span><div class="btrack"><div class="bfill hot" style="width:100%"></div></div><span class="bval">8 份</span></div>
+        <div class="brow"><span class="blab">乱分 · 核2</span><div class="btrack"><div class="bfill" style="width:25%"></div></div><span class="bval">2 份</span></div>
+        <div class="brow"><span class="blab">乱分 · 核3</span><div class="btrack"><div class="bfill" style="width:25%"></div></div><span class="bval">2 份</span></div>
+      </div>
+      <p class="small" style="margin:4px 0 12px;color:#b91c1c;font-weight:700">↑ 核2、核3 早早干完，却要干等核1 —— 总耗时 = <strong>8</strong>。</p>
+      <div class="bars">
+        <div class="brow"><span class="blab">分匀 · 核1</span><div class="btrack"><div class="bfill ok" style="width:50%"></div></div><span class="bval">4 份</span></div>
+        <div class="brow"><span class="blab">分匀 · 核2</span><div class="btrack"><div class="bfill ok" style="width:50%"></div></div><span class="bval">4 份</span></div>
+        <div class="brow"><span class="blab">分匀 · 核3</span><div class="btrack"><div class="bfill ok" style="width:50%"></div></div><span class="bval">4 份</span></div>
+      </div>
+      <p class="small" style="margin:4px 0 0;color:#0b6b3a;font-weight:700">↑ 三个核几乎同时收工 —— 总耗时 = <strong>4</strong>，快一倍。</p>
+    </div>
+    <figcaption>排班的全部意义，就是把总活儿<strong>尽量均分</strong>到每个核，让「最慢的那个」尽可能轻。这在行话里叫<strong>负载均衡</strong>。</figcaption>
+  </figure>
+
+  <p>还有一个细节：活儿<strong>不是每份一样重</strong>。有的序列长、要看的词多；有的序列短、几下就算完。所以工头不是傻乎乎地「按份数」平均，而是先<strong>估一估每份活儿有多重（成本）</strong>，再按<strong>总重量</strong>去均分。第 5 节会看到「每份活儿的重量」正是三种场景的差别所在。</p>
+
+  <!-- ===================== 2 ===================== -->
+  <h2 id="s2"><span class="num">2</span>数据结构：1024 个整数 = 两张表</h2>
+  <p>现在看这张排班表长什么样。说穿了，<code>metadata</code> 就是<strong>一串 1024 个整数</strong>（都是普通整数），一个挨一个排在内存里。这 1024 个数<strong>分成两大块、也就是两张表</strong>：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">1024 个整数的地图：前一块是「排班表」，后一块是「合并表」，末尾预留</p>
+      <div class="memmap">
+        <div class="mseg fa" style="flex:288">FA 排班表<br>288 个（36 行 × 8）</div>
+        <div class="mseg fd" style="flex:576">FD 合并表<br>576 个（72 行 × 8）</div>
+        <div class="mseg pad" style="flex:160">预留<br>补 0</div>
+      </div>
+    </div>
+    <figcaption><code>288 + 576 = 864</code>，再补一点 0 凑到 <strong>1024</strong>（固定大小，永远这么大）。</figcaption>
+  </figure>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>这张表</th><th>占多少个整数</th><th>形状</th><th>管什么</th></tr></thead>
+    <tbody>
+      <tr><td>🟦 <strong>FA 排班表</strong></td><td class="kv">前 288 个</td><td class="kv">36 行 × 8 列</td><td>把主计算分给<strong>主力核</strong>：一行 = 一个主力核的工单</td></tr>
+      <tr><td>🟪 <strong>FD 合并表</strong></td><td class="kv">中间 576 个</td><td class="kv">72 行 × 8 列</td><td>收尾：一个大活儿被拆给多个核时，<strong>怎么把半成品拼回去</strong></td></tr>
+      <tr><td>⬜ 预留</td><td class="kv">末尾若干</td><td class="kv">—</td><td>凑齐 1024、备用，填 0</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>「一行 8 个数」是什么意思？就是<strong>每个核的工单，用 8 个整数描述完</strong>。下面两节分别拆开这两张表的「一行」。先记住这句话：</p>
+  <blockquote><p><strong>一份 metadata = FA 排班表（谁算哪段）+ FD 合并表（拆开的怎么拼回）+ 预留。大小固定，永远 1024 个整数。</strong></p></blockquote>
+
+  <div class="note">
+    <p><strong>「36 行」是<em>固定预留的槽位数</em>，不等于「实际用几个核」。</strong>这张表<strong>永远</strong>留 36 行（288 个数）—— 这是写死的结构尺寸，传参也改不了。但<strong>实际会点亮几行（开关=1），由一个「可用核数」设定单独决定</strong>：这个设定<strong>默认是 24</strong>（可以传别的值，但必须 ≤ 36 才不会出错）。所以<strong>默认情况下，第 24～35 行永远是 0</strong> —— 它们在结构上就被封掉了，跟这次活儿多少无关。</p>
+    <p>换句话说，一行的开关为 <code>0</code> 有<strong>两种</strong>原因：① <strong>被「可用核数」封掉</strong>（默认第 24～35 行，恒为 0）；② 这次<strong>活儿不够多</strong>，还没轮到这个核（临时歇着）。<span class="small" style="color:#64748b">（FD 合并表的 72 行同理：72 是固定槽位数，实际用几个由另一个默认 48 的设定决定。）</span></p>
+  </div>
+
+  <!-- ===================== 3 ===================== -->
+  <h2 id="s3"><span class="num">3</span>第一张表（FA 排班表）：每个核「从哪干到哪」</h2>
+  <p>FA 排班表有 <strong>36 行</strong>，一行对应一个<strong>主力核槽位</strong>（真正做注意力大计算的核；36 是固定预留的槽位数，实际会点亮几行见上一节说明）。一行是 8 个整数，含义是这样的：</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>第几个数</th><th>叫什么</th><th>大白话</th></tr></thead>
+    <tbody>
+      <tr><td class="kv">① </td><td><strong>开关</strong></td><td><code>1</code> = 这行点亮、有活儿；<code>0</code> = 没点亮 —— 要么<strong>被「可用核数」封掉</strong>（默认第 24～35 行恒为 0），要么这次<strong>活儿不够多</strong>、用不上它</td></tr>
+      <tr class="hl-row"><td class="kv">②③④</td><td><strong>起点</strong>（3 个数）</td><td>这个核<strong>从哪个工位开始</strong>干（工位地址要 3 个数，见下）</td></tr>
+      <tr class="hl-row"><td class="kv">⑤⑥⑦</td><td><strong>终点</strong>（3 个数）</td><td>干<strong>到哪个工位为止</strong></td></tr>
+      <tr><td class="kv">⑧ </td><td>合并记号</td><td>给第二张表（FD 合并表）用的一个编号，第 4 节讲；用不上时是 0</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>所以一个核的活儿，就是<strong>「从起点工位一路干到终点工位」的一整段连续工作</strong> —— 像值班表上写「你从 3 楼 5 号扫到 7 楼 2 号」。</p>
+
+  <h3>3.1 一个「工位地址」为什么要 3 个数？</h3>
+  <p>因为所有活儿是<strong>三层嵌套</strong>编号的。你可以想成「哪本书、第几页、第几行」那样一层套一层：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">一个工位地址 = 三层编号叠在一起</p>
+      <div class="addr">
+        <span class="achip a0"><strong>第 1 层</strong>　哪条序列 ×〔哪个 KV 头〕</span>
+        <span class="achip a1"><strong>第 2 层</strong>　这条序列里 · 哪一组 query 行</span>
+        <span class="achip a2"><strong>第 3 层</strong>　要看的 key 里 · 哪一块</span>
+      </div>
+      <p class="small" style="margin:10px 0 0;color:#475569">把这三个编号写在一起，就精确指到「哪条序列的哪组词、正在看哪一块 key」这一个具体工位。<strong>起点</strong>用 3 个数、<strong>终点</strong>用 3 个数，就圈定了一整段连续的活儿。</p>
+    </div>
+    <figcaption>这里的「头」指 <strong>KV 头</strong>。本算子只有 <strong>1 个 KV 头</strong>，所以第 1 层实际就等于「哪条序列」。至于 Q 那边的很多个头（比如 64 个），它们折进了<strong>第 2 层</strong> —— 一组 query 行 = 一个 query 位置的那些 Q 头。</figcaption>
+  </figure>
+
+  <p><strong>这里的「组」和「块」到底是什么？</strong>它俩是同一件事的两个方向 —— 都是把一个大维度<strong>切成固定大小的小片</strong>。为什么要切？因为芯片的快内存一次装不下一整条，只能<strong>一小片一小片</strong>地处理。注意力说到底是个<strong>大矩阵乘</strong>（一边是 query 行、一边是 key 列），于是两条维度各切各的：</p>
+  <ul>
+    <li><strong>第 2 层「组」= 切 query 行</strong>：把 query 行切成一个个小片，<strong>一组 = 固定行数的一批 query 行</strong>；</li>
+    <li><strong>第 3 层「块」= 切 key</strong>：把要看的 key 切成一个个小片，<strong>一块 = 固定数目的 key</strong>（参考实现里一块 = 512 个）。</li>
+  </ul>
+  <p>所以一个「工位」，就是某个〔序列 × 头〕下的<strong>「第几组 query 行 × 第几块 key」</strong> —— 相当于把那张大矩阵铺成网格后的<strong>一个小格子</strong>。（第 7 节把活儿数成「一个个块、每块 1 分」，指的就是这些格子。）</p>
+
+  <h3>3.2 一个省数字的小心机：相邻两个核首尾相接</h3>
+  <p>你可能注意到：表里既有「起点」又有「终点」，是不是有点重复？其实工头切活儿时，是把一整条活儿<strong>切成不重不漏的几段</strong>：</p>
+  <blockquote><p><strong>上一个核的终点，正好就是下一个核的起点。</strong>就像分蛋糕：切三刀分四块，每一刀既是左边一块的右边界、又是右边一块的左边界。</p></blockquote>
+  <p>所以整段活儿被这些「切点」分给各个核，<strong>不重不漏</strong>，每个核领走相邻两切点之间的那一段。</p>
+
+  <!-- ===================== 4 ===================== -->
+  <h2 id="s4"><span class="num">4</span>第二张表（FD 合并表）：大活儿拆开后怎么拼回去</h2>
+  <p>大多数活儿一个核就能包圆。但偶尔会遇到一个<strong>特别重的工位</strong> —— <strong>同一组 query 行，却要配上特别特别多的 key 块</strong>（回想第 3 节：一个工位 = 一组 query 行 × 一块 key；这里是这一组 query 行要从头扫过<strong>好多好多块 key</strong>），一个核一块一块扫下来太慢。<strong>这，就是所谓的「大活儿」。</strong></p>
+  <p>这时工头会把这一个工位<strong>再拆开</strong>，让<strong>好几个核各扫其中一部分 key 块</strong>。可这样一来，每个核只扫了<strong>一部分</strong> key 块，算出的只是一个<strong>半成品</strong> —— 准确说，是那一段自己的<strong>三个小账本</strong>：见过的最大值 <code>m</code>、累加的分母 <code>d</code>、还没除以分母的输出 <code>O</code>（正是 online softmax 里那套账本）。于是需要有人把这些半成品<strong>正确地合并</strong>成最终答案。</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">一个超重工位：拆给几个核算半成品，再由「合并核」拼回</p>
+      <div class="flow">
+        <div class="fbox" style="border-top:4px solid var(--amber)">
+          <h4>🥵 一个超重工位</h4>
+          <p class="small">某组 query 要看的 key 太多，一个核扛不动。</p>
+        </div>
+        <div class="farr">→</div>
+        <div class="fbox">
+          <h4>✂️ 拆成几份</h4>
+          <p class="small">key 分几段，<strong>几个主力核各算一段</strong>，各出一个半成品。</p>
+        </div>
+        <div class="farr">→</div>
+        <div class="fbox kbox">
+          <h4>🧩 合并核拼回</h4>
+          <p class="small">把各段的 <code>(m, d, O)</code> 账本<strong>换最大值、乘修正因子</strong>对齐后相加，最后除一次。这就是 <strong>FD 合并表</strong>安排的活儿。</p>
+        </div>
+      </div>
+    </div>
+    <figcaption>FD 合并表也有很多行，一行 = 一个「合并核」的任务：负责合并哪一批半成品、对应哪一组 query 行。</figcaption>
+  </figure>
+
+  <div class="note">
+    <p><strong>合并不是把各段的 <code>O</code> 直接相加</strong> —— 因为每段是各自「减过<em>自己那段</em>的最大值」算出来的，尺子不一样，硬加会错。如果你读过姊妹篇 <a href="OnlineSoftmax%20%E5%8E%9F%E7%90%86%E8%AF%A6%E8%A7%A3.html">在线 Softmax 原理详解</a>，这里就是那篇讲的<strong>「跨段合并」</strong>，四步就拼好：</p>
+    <ol style="margin:6px 0 4px">
+      <li>在各段的最大值里取<strong>全局最大的那个 <code>m</code></strong>，当作新尺子；</li>
+      <li>每段的 <code>O</code> 和 <code>d</code> 都乘上自己的<strong>修正因子 <code>exp(段的 m − 全局 m)</code></strong>（换到新尺子上，≤ 1，打个折）；</li>
+      <li>各段对齐后<strong>相加</strong>，得到总的 <code>O</code> 和总的 <code>d</code>；</li>
+      <li><strong>整个过程只除一次</strong>：<code>最终输出 = O / d</code>。</li>
+    </ol>
+    <p>每段其实只要交出一个 <strong><code>LSE = m + ln(d)</code></strong>（把 <code>m</code> 和 <code>d</code> 打包成一个数）再加上自己的 <code>O</code>，合并核就能照这四步拼回去 —— 这正是那篇说 LSE「几乎白送、专为跨段/跨核合并而生」的原因。</p>
+  </div>
+
+  <div class="warn"><p>⚠️ 实际情况：<strong>在这个算子的当前实现里，「把一个工位拆给多个核」这一步并没有启用</strong>，所以 <strong>FD 合并表始终是空的（整块 576 个数全是 0）</strong>。但它的位置<strong>一直预留在那</strong> —— 这样不管用不用得上，metadata 的大小和结构都<strong>固定不变</strong>，读表的一方永远知道去哪找什么。</p></div>
+
+  <!-- ===================== 5 ===================== -->
+  <h2 id="s5"><span class="num">5</span>活儿是从哪来的：窗口一趟 + 压缩一趟</h2>
+  <p>现在回到最关键的问题：<strong>每个 query 的活儿到底有多少？</strong>这决定了工头怎么切分，也<strong>正是 SWA / CFA / SCFA 三种场景的分水岭</strong>。</p>
+  <p>每个 query（当前这个词）要看的 key，<strong>最多分两趟</strong>：</p>
+
+  <figure>
+    <div class="figcard">
+      <div class="twocache">
+        <div class="cache ori">
+          <h4>🟦 窗口趟（window）</h4>
+          <div class="use">只看<strong>最近一段</strong>的原始 key（一个滑动窗口，比如最近 128 个词）。</div>
+          <p class="small" style="font-size:12.5px;color:#475569;margin:8px 0 0;line-height:1.7">✓ 便宜：窗口大小固定，活儿量基本不随序列变长而变多。<br><strong>三种场景都有这一趟。</strong></p>
+        </div>
+        <div class="cache cmp">
+          <h4>🟪 压缩趟（compressed）</h4>
+          <div class="use">把<strong>更早、更远</strong>的大量 key 先<strong>压缩</strong>成少量「摘要块」（比如每 16 个原始 key 压成 1 个摘要），再看这些摘要。</div>
+          <p class="small" style="font-size:12.5px;color:#475569;margin:8px 0 0;line-height:1.7">解决「窗口看不到远处、但把远处全看一遍又太贵」的两难。<br><strong>只有 CFA / SCFA 有这一趟。</strong></p>
+        </div>
+      </div>
+    </div>
+    <figcaption>窗口趟 = 近处看原文；压缩趟 = 远处看摘要。摘要块的数量 ≈ 远处 key 数 ÷ <strong>压缩比</strong>，序列越长，摘要块越多。</figcaption>
+  </figure>
+
+  <p>压缩趟里还藏着一个区别，它把 CFA 和 SCFA 分开：<strong>摘要块可能也很多，是全看，还是只看最相关的几个？</strong></p>
+  <ul>
+    <li><strong>全看</strong>：把（到目前为止的）<strong>所有</strong>摘要块都过一遍 —— 这是 <strong>CFA</strong>。摘要块数随序列变长而<strong>越来越多</strong>。</li>
+    <li><strong>只看最相关的 top-K 个</strong>：只挑<strong>最相关的 K 个</strong>摘要块看，其余不看 —— 这是 <strong>SCFA</strong>（S = sparse 稀疏）。不管序列多长，<strong>最多看 K 个</strong>，活儿有上限。</li>
+  </ul>
+
+  <!-- ===================== 6 ===================== -->
+  <h2 id="s6"><span class="num">6</span>三种场景 SWA / CFA / SCFA：同一张表，不同的数字</h2>
+  <p>先把最重要的结论摆上来：</p>
+  <blockquote><p><strong>三种场景的 metadata，数据结构<em>完全一样</em></strong> —— 都是 1024 个整数、FA 排班表 36×8 + FD 合并表 72×8。<strong>变的只是工头填进表里的那些数字</strong>，因为每个 query 的<strong>工作量不一样</strong>，工头据此把每个核的边界画在不同地方。</p></blockquote>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>场景</th><th>窗口趟</th><th>压缩趟</th><th>每 query 的活儿</th><th>序列变长时</th></tr></thead>
+    <tbody>
+      <tr><td><strong>SWA</strong><br><span class="small">滑窗</span></td><td>✓</td><td>✗ 没有压缩 KV</td><td><strong>最轻</strong>（只有窗口）</td><td>基本不变（窗口固定）</td></tr>
+      <tr><td><strong>CFA</strong><br><span class="small">压缩·全看</span></td><td>✓</td><td>✓ <strong>全部</strong>摘要块</td><td>中～重</td><td><strong>越来越重</strong>（摘要随长度增长）</td></tr>
+      <tr><td><strong>SCFA</strong><br><span class="small">压缩·稀疏</span></td><td>✓</td><td>✓ 只看 <strong>top-K</strong> 个</td><td>中等，<strong>有上限</strong></td><td>封顶（窗口 + K，不再涨）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">同一个 query，一条「活儿量」在三种场景下的长短（🟦窗口固定 + 🟪压缩不同）</p>
+      <div class="bars">
+        <div class="brow"><span class="blab">SWA</span><div class="btrack" style="display:flex"><div class="bfill" style="width:30%"></div></div><span class="bval">窗口</span></div>
+        <div class="brow"><span class="blab">CFA</span><div class="btrack" style="display:flex"><div class="bfill" style="width:30%"></div><div class="bfill hot" style="width:55%"></div></div><span class="bval">窗口+全压缩</span></div>
+        <div class="brow"><span class="blab">SCFA</span><div class="btrack" style="display:flex"><div class="bfill" style="width:30%"></div><div class="bfill ok" style="width:22%"></div></div><span class="bval">窗口+topK</span></div>
+      </div>
+    </div>
+    <figcaption>🟦 窗口那一截三种场景一样长；🟪 压缩那一截：SWA 没有、CFA 最长且随序列膨胀、SCFA 短且封顶。活儿量不同 → 总成本不同 → 工头切分点不同 → FA 表里的起点/终点数字不同。</figcaption>
+  </figure>
+
+  <p>换成工头的视角（大白话）：</p>
+  <ul>
+    <li><strong>SWA</strong>：每个工位只有「窗口块」，压缩块数 = 0 → 活儿最轻、最规整，最好分。</li>
+    <li><strong>CFA</strong>：每个工位 = 窗口块 + 压缩块，压缩块数 ≈ 序列长 ÷ 压缩比 → <strong>长序列的工位特别重</strong>，还容易分得不匀（要靠拆工位 + FD 合并）。</li>
+    <li><strong>SCFA</strong>：每个工位 = 窗口块 + 压缩块，但压缩块<strong>封顶在 K</strong> → 比 CFA 轻、比 SWA 重，且长序列也不会失控。</li>
+  </ul>
+
+  <!-- ===================== 7 ===================== -->
+  <h2 id="s7"><span class="num">7</span>完整小例子：同 3 条序列，三种场景各排一次班</h2>
+  <p>把上面的话变成数字。设定（<strong>为了手算，全部简化</strong>）：</p>
+  <ul>
+    <li>3 条序列 <strong>A、B、C</strong>（A、C 短，B 长），只有 1 个「头」，所以第 1 层地址就是序列号。</li>
+    <li>有 <strong>3 个主力核</strong>可用。</li>
+    <li>把活儿简化成一个个「<strong>块</strong>」，每块算 <strong>1 分</strong>。窗口趟：每条序列固定 <strong>4 块</strong>。</li>
+    <li>为看得清，工位地址用<strong>一个总编号</strong>（0、1、2…）代替真实的三层地址。</li>
+  </ul>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>场景</th><th>压缩块（A / B / C）</th><th>每条总分（窗口4 + 压缩）</th><th>总分</th><th>3 核各分</th></tr></thead>
+    <tbody>
+      <tr><td><strong>SWA</strong></td><td class="kv">0 / 0 / 0</td><td class="kv">4 / 4 / 4</td><td class="kv">12</td><td class="kv">每核 4</td></tr>
+      <tr><td><strong>CFA</strong></td><td class="kv">1 / 3 / 2 <span class="small">（随长度）</span></td><td class="kv">5 / 7 / 6</td><td class="kv">18</td><td class="kv">每核 6</td></tr>
+      <tr><td><strong>SCFA</strong> <span class="small">(K=1)</span></td><td class="kv">1 / 1 / 1 <span class="small">（封顶 K）</span></td><td class="kv">5 / 5 / 5</td><td class="kv">15</td><td class="kv">每核 5</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>工头按「每核平均分」切一刀，排出的 FA 表（只列有活儿的 3 行，每行 = <code>开关 / 起点编号 / 终点编号</code>）：</p>
+
+  <div class="three">
+    <div class="cell" style="border-top:4px solid var(--blue)">
+      <h4>SWA · 每核 4 分</h4>
+      <table><tbody>
+        <tr><td class="kv">核0</td><td class="kv">1 / 0 / 4</td><td>= A</td></tr>
+        <tr><td class="kv">核1</td><td class="kv">1 / 4 / 8</td><td>= B</td></tr>
+        <tr><td class="kv">核2</td><td class="kv">1 / 8 / 12</td><td>= C</td></tr>
+      </tbody></table>
+      <p class="small" style="margin:8px 0 0;color:#0b6b3a">正好一核一条序列，干净。</p>
+    </div>
+    <div class="cell" style="border-top:4px solid var(--amber)">
+      <h4>CFA · 每核 6 分</h4>
+      <table><tbody>
+        <tr><td class="kv">核0</td><td class="kv">1 / 0 / 6</td><td>A + B 一点</td></tr>
+        <tr><td class="kv">核1</td><td class="kv">1 / 6 / 12</td><td>B 剩下的</td></tr>
+        <tr><td class="kv">核2</td><td class="kv">1 / 12 / 18</td><td>= C</td></tr>
+      </tbody></table>
+      <p class="small" style="margin:8px 0 0;color:#b91c1c"><strong>B 被从中间切开</strong>给了核0、核1 → 需要 FD 合并表登记一行。</p>
+    </div>
+    <div class="cell" style="border-top:4px solid var(--green)">
+      <h4>SCFA · 每核 5 分</h4>
+      <table><tbody>
+        <tr><td class="kv">核0</td><td class="kv">1 / 0 / 5</td><td>= A</td></tr>
+        <tr><td class="kv">核1</td><td class="kv">1 / 5 / 10</td><td>= B</td></tr>
+        <tr><td class="kv">核2</td><td class="kv">1 / 10 / 15</td><td>= C</td></tr>
+      </tbody></table>
+      <p class="small" style="margin:8px 0 0;color:#0b6b3a">封顶后又变规整，一核一条。</p>
+    </div>
+  </div>
+
+  <p>看出门道了吗？<strong>三张表长得一模一样（都是 3 行「开关 / 起点 / 终点」），但里面的数字全不同</strong> —— 因为三种场景的总活儿（12 / 18 / 15）和每条的轻重都不一样。本例把「可用核数」设成 3，所以<strong>核3～核35 那些行的开关全是 0</strong>（用不上的行一律填 0；换成默认的 24，则第 24～35 行恒为 0，见第 2 节）。这就是「同一张表，不同的数字」。</p>
+
+  <!-- ===================== 8 ===================== -->
+  <h2 id="s8"><span class="num">8</span>一页速查 + 总结</h2>
+
+  <h3>速查：metadata 数据结构</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>块</th><th>范围</th><th>形状</th><th>一行 8 个数的含义</th></tr></thead>
+    <tbody>
+      <tr><td>🟦 FA 排班表</td><td class="kv">前 288 个</td><td class="kv">36 行 × 8</td><td>开关①ㆍ起点②③④ㆍ终点⑤⑥⑦ㆍ合并记号⑧</td></tr>
+      <tr><td>🟪 FD 合并表</td><td class="kv">中 576 个</td><td class="kv">72 行 × 8</td><td>哪个合并核ㆍ合并哪批半成品ㆍ对应哪组 query 行（常为空）</td></tr>
+      <tr><td>⬜ 预留</td><td class="kv">末尾</td><td class="kv">—</td><td>补 0，凑齐 <strong>1024</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>三句话总结</h3>
+  <ol>
+    <li><strong>metadata 不是数据，是一张「排班表」。</strong>它把海量重复的注意力计算，按<strong>工作量</strong>尽量均分给芯片上几十个计算核 —— 因为「最慢的核决定总时间」，所以必须分匀（负载均衡）。</li>
+    <li><strong>结构固定：1024 个整数 = FA 排班表（36 行×8）+ FD 合并表（72 行×8）+ 预留。</strong>FA 每行 = 开关 + 起点(3 个数) + 终点(3 个数) + 合并记号；工位地址是「序列×头 / query 行组 / key 块」三层；相邻核首尾相接、不重不漏。FD 表管「大活儿拆开后怎么拼回」，当前实现里始终是空的、但位置永远预留。</li>
+    <li><strong>SWA / CFA / SCFA 结构完全相同，只是数字不同。</strong>差别的根源是每个 query 的活儿量：<strong>SWA</strong>（只窗口）最轻、<strong>CFA</strong>（窗口 + 全压缩）最重且随序列膨胀、<strong>SCFA</strong>（窗口 + top-K 压缩）居中且封顶。活儿量不同 → 工头切分点不同 → FA 表里的起点/终点数字不同。</li>
+  </ol>
+
+  <h3>例子一览</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>场景</th><th>总活儿</th><th>好不好分</th><th>要不要 FD 合并</th></tr></thead>
+    <tbody>
+      <tr><td>SWA</td><td class="kv">12（最轻）</td><td>规整，一核一条序列</td><td>不用</td></tr>
+      <tr class="hl-row"><td>CFA</td><td class="kv">18（最重）</td><td>不匀，长序列被切开</td><td><strong>要</strong>（B 被拆）</td></tr>
+      <tr><td>SCFA</td><td class="kv">15（封顶）</td><td>又变规整</td><td>不用</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>和姊妹篇的关系</h3>
+  <p>本系列的几篇详解，从不同侧面讲这个算子：</p>
+  <ul>
+    <li><strong>本文</strong>：<code>metadata</code> 参数 —— 几十个核怎么<strong>分工</strong>（负载均衡调度）；</li>
+    <li><a href="OnlineSoftmax%20%E5%8E%9F%E7%90%86%E8%AF%A6%E8%A7%A3.html">在线 Softmax 原理详解</a>：分数怎么变权重、<strong>拆开的半成品怎么合并</strong>（数值算法 · 就是第 4 节说的 LSE）；</li>
+    <li><a href="PagedAttention%20%E5%8E%9F%E7%90%86%E8%AF%A6%E8%A7%A3.html">PagedAttention 原理详解</a>：KV 存在哪、怎么取（内存管理）；</li>
+    <li><a href="BSND%20%E4%B8%8E%20TND%20%E5%B8%83%E5%B1%80%E8%AF%A6%E8%A7%A3.html">BSND 与 TND 布局详解</a>：输入 Q 的两种摆法怎么统一（张量布局）。</li>
+  </ul>
+
+</div>
+
+<a href="#top" class="totop" title="回到顶部">↑</a>
+<script>
+(function(){
+  var heads = Array.prototype.slice.call(document.querySelectorAll('h2[id]'));
+  var links = Array.prototype.slice.call(document.querySelectorAll('.sidenav a'));
+  if(!heads.length || !links.length) return;
+  var ticking = false;
+  function update(){
+    ticking = false;
+    var cur = heads[0];
+    for(var i=0;i<heads.length;i++){
+      if(heads[i].getBoundingClientRect().top <= 130) cur = heads[i];
+    }
+    for(var j=0;j<links.length;j++){
+      links[j].classList.toggle('active', links[j].getAttribute('href') === '#'+cur.id);
+    }
+  }
+  function onScroll(){ if(!ticking){ ticking = true; requestAnimationFrame(update); } }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll, {passive:true});
+  update();
+})();
+</script>
+</body>
+</html>
