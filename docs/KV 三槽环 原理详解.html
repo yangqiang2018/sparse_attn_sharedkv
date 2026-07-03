@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KV 三槽环 原理详解</title>
+<style>
+  :root{
+    --bg:#f7f7f4; --panel:#ffffff; --ink:#1f2328; --muted:#5b6470;
+    --line:#e3e6ea; --accent:#2f6fea; --accent-soft:#eaf1ff;
+    --blue:#3b82f6; --blue-bg:#dbeafe; --blue-ink:#1e40af;
+    --green:#10b981; --green-bg:#d1fae5; --green-ink:#065f46;
+    --amber:#f59e0b; --amber-bg:#fef3c7; --amber-ink:#92400e;
+    --purple:#8b5cf6; --purple-bg:#ede9fe; --purple-ink:#5b21b6;
+    --red:#ef4444; --red-ink:#b91c1c;
+    --gray:#9ca3af; --gray-bg:#eceef1; --gray-ink:#4b5563;
+    --code-bg:#f4f6f8; --code-ink:#1c2733;
+    --radius:12px;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",Consolas,"Cascadia Code",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:16.5px; line-height:1.85;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:0 22px 120px;}
+
+  /* ---- header ---- */
+  header.hero{ max-width:880px; margin:0 auto; padding:54px 22px 26px; }
+  .kicker{
+    display:inline-block; font-size:12.5px; letter-spacing:.16em; font-weight:700;
+    color:var(--accent); background:var(--accent-soft); padding:5px 12px; border-radius:999px;
+    text-transform:uppercase; margin-bottom:18px;
+  }
+  h1{font-size:38px; line-height:1.22; margin:.1em 0 .35em; letter-spacing:-.01em;}
+  .sub{color:var(--muted); font-size:16px; margin:0;}
+
+  /* ---- typography ---- */
+  h2{
+    font-size:25px; margin:64px 0 18px; padding-top:16px; letter-spacing:-.01em;
+    border-top:2px solid var(--line);
+  }
+  h2 .num{color:var(--accent); font-variant-numeric:tabular-nums; margin-right:.45em;}
+  h3{font-size:19px; margin:34px 0 12px; color:#2b3340;}
+  p{margin:14px 0;}
+  a{color:var(--accent); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  strong{font-weight:700; color:#16324f;}
+  ul,ol{margin:14px 0; padding-left:1.4em;}
+  li{margin:7px 0;}
+  hr{border:none; border-top:1px solid var(--line); margin:40px 0;}
+
+  /* inline code */
+  code{
+    font-family:var(--mono); font-size:.88em; background:var(--code-bg);
+    color:#b3344a; padding:2px 6px; border-radius:6px; border:1px solid #e7e2e4;
+  }
+  /* code blocks */
+  pre{
+    background:#0f1b2d; color:#dbe7f3; border-radius:var(--radius);
+    padding:18px 20px; overflow:auto; font-family:var(--mono); font-size:14px;
+    line-height:1.7; margin:18px 0; border:1px solid #0a1320;
+    box-shadow:0 1px 0 rgba(0,0,0,.04);
+  }
+  pre code{background:none; color:inherit; border:none; padding:0; font-size:inherit;}
+  pre .cmt{color:#7d93ad;} pre .hl{color:#ffd479;} pre .ok{color:#7ee0a1;}
+  pre .kw{color:#c792ea;} pre .fn{color:#82aaff;}
+
+  /* blockquote / callout */
+  blockquote{
+    margin:18px 0; padding:14px 18px; background:var(--panel);
+    border-left:4px solid var(--accent); border-radius:0 10px 10px 0;
+    color:#33414f; box-shadow:0 1px 2px rgba(20,40,80,.05);
+  }
+  blockquote p:first-child{margin-top:0}
+  blockquote p:last-child{margin-bottom:0}
+
+  .note{
+    margin:18px 0; padding:16px 18px; background:var(--accent-soft);
+    border:1px solid #d4e2ff; border-radius:var(--radius); font-size:15px; color:#2b4a73;
+  }
+  .note p{margin:6px 0}
+  .note code{background:#fff;}
+  .warn{
+    margin:18px 0; padding:14px 18px; background:var(--amber-bg);
+    border:1px solid #f3d27a; border-radius:var(--radius); font-size:15px; color:#7a4d09;
+  }
+  .warn code{background:#fff;}
+
+  /* tables */
+  .tablewrap{overflow-x:auto; margin:18px 0;}
+  table{border-collapse:collapse; width:100%; font-size:15px; background:var(--panel);
+    border-radius:10px; overflow:hidden; box-shadow:0 1px 2px rgba(20,40,80,.05);}
+  th,td{padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{background:#eef2f7; font-weight:700; color:#2b3340;}
+  tr:last-child td{border-bottom:none;}
+  td code,th code{font-size:.85em;}
+  .hl-row td{background:#fffaf0;}
+  .num-cell{font-family:var(--mono); font-variant-numeric:tabular-nums;}
+
+  /* TOC */
+  nav.toc{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 24px; margin:30px 0;
+  }
+  nav.toc h2{border:none; margin:0 0 10px; padding:0; font-size:16px; color:var(--muted);
+    letter-spacing:.04em; text-transform:uppercase;}
+  nav.toc ol{margin:0; padding-left:1.5em; columns:2; column-gap:34px;}
+  nav.toc li{margin:5px 0; break-inside:avoid;}
+  nav.toc a{color:#33414f;}
+  nav.toc .ix{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums;}
+
+  /* figures */
+  figure{margin:26px 0; padding:0;}
+  figure svg{display:block; width:100%; height:auto;}
+  .figcard{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:22px; box-shadow:0 2px 10px rgba(20,40,80,.05);
+  }
+  figcaption{font-size:13.5px; color:var(--muted); text-align:center; margin-top:12px;}
+  .fig-mono{font-family:var(--mono);}
+  .figtitle{margin:0 0 14px; font-size:14.5px; font-weight:700; color:#334155;}
+
+  /* ===== equations ===== */
+  .eqwrap{display:flex; justify-content:center; margin:22px 0;}
+  .eq{font-family:var(--mono); font-size:17px; display:inline-flex; align-items:center;
+      gap:.45em; flex-wrap:wrap; justify-content:center; background:var(--panel);
+      border:1px solid var(--line); border-radius:12px; padding:18px 24px;
+      box-shadow:0 1px 2px rgba(20,40,80,.05); color:#22303f;}
+  .eq .op{color:var(--muted); padding:0 .12em; font-size:.95em;}
+  .t-blue{color:var(--blue-ink);} .t-amber{color:var(--amber-ink);} .t-green{color:var(--green-ink);} .t-purple{color:var(--purple-ink);}
+
+  /* ===== chips / pills ===== */
+  .chip{font-family:var(--mono); font-size:13.5px; border-radius:9px; padding:6px 12px; border:1.5px solid; font-weight:600;}
+  .chip.k{background:#eff6ff; border-color:#93c5fd; color:#1e40af;}
+  .chip.v{background:#ecfdf5; border-color:#6ee7b7; color:#065f46;}
+  .chip.f{background:#f8fafc; border-color:#cbd5e1; color:#64748b; border-style:dashed;}
+  .chiprow{display:flex; gap:9px; flex-wrap:wrap; margin:10px 0; justify-content:center;}
+  .pill{font-family:var(--mono); font-size:12px; padding:2px 9px; border-radius:999px; font-weight:700;}
+  .pill.b1{background:var(--blue-bg); color:var(--blue-ink);}
+  .pill.b2{background:var(--green-bg); color:var(--green-ink);}
+  .pill.up{background:var(--amber-bg); color:var(--amber-ink);}
+
+  /* compare two results */
+  .vs{display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:14px; margin:8px 0;}
+  .vscard{border:1.5px solid var(--line); border-radius:12px; padding:14px 16px; text-align:center; background:var(--panel);}
+  .vscard .lab{font-size:12.5px; color:var(--muted); margin-bottom:6px;}
+  .vscard .val{font-family:var(--mono); font-size:20px; font-weight:700; color:#0b3d91;}
+  .vsmid{font-size:26px; color:var(--green); font-weight:700;}
+  .vscard.bad{border-top:4px solid var(--red);}
+  .vscard.good{border-top:4px solid var(--green);}
+
+  /* side nav (table of contents) */
+  .sidenav{display:none;}
+  @media (min-width:1180px){
+    .sidenav{
+      display:block; position:fixed; top:0; left:0; width:264px; height:100vh;
+      overflow-y:auto; padding:30px 16px 48px; box-sizing:border-box;
+      background:#fbfbf8; border-right:1px solid var(--line);
+    }
+    .sidenav .snav-title{
+      margin:0 0 14px; padding-left:12px; font-size:12px; font-weight:700;
+      letter-spacing:.14em; text-transform:uppercase; color:var(--muted);
+    }
+    .sidenav ol{list-style:none; margin:0; padding:0;}
+    .sidenav li{margin:1px 0;}
+    .sidenav a{
+      display:flex; gap:9px; align-items:baseline; padding:6px 11px;
+      border-radius:8px; border-left:2px solid transparent;
+      color:#475461; font-size:13.5px; line-height:1.45;
+    }
+    .sidenav a .n{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; min-width:16px; text-align:right;}
+    .sidenav a:hover{background:var(--accent-soft); text-decoration:none;}
+    .sidenav a.active{background:var(--accent-soft); color:var(--accent); font-weight:700; border-left-color:var(--accent);}
+    nav.toc{display:none;}
+    header.hero{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+    .wrap{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+  }
+
+  /* back to top */
+  .totop{
+    position:fixed; right:22px; bottom:22px; width:44px; height:44px; border-radius:50%;
+    background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center;
+    font-size:20px; box-shadow:0 4px 14px rgba(47,111,234,.4); opacity:.92; z-index:50;
+  }
+  .totop:hover{text-decoration:none; opacity:1;}
+
+  @media (max-width:640px){
+    body{font-size:16px;}
+    h1{font-size:30px;}
+    nav.toc ol{columns:1;}
+    .vs{grid-template-columns:1fr;}
+    .vsmid{transform:rotate(90deg);}
+  }
+</style>
+</head>
+<body>
+<a id="top"></a>
+<!-- shared SVG defs (arrow markers) — resolved document-wide by every inline figure below -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ar" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#2f6fea"/>
+  </marker>
+  <marker id="arg" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#10b981"/>
+  </marker>
+  <marker id="arr" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#ef4444"/>
+  </marker>
+</defs></svg>
+
+<aside class="sidenav" aria-label="目录">
+  <p class="snav-title">目录</p>
+  <ol>
+    <li><a href="#s0"><span class="n">0</span><span>这个三槽环在忙什么</span></a></li>
+    <li><a href="#s1"><span class="n">1</span><span>数据通路与瓶颈</span></a></li>
+    <li><a href="#s2"><span class="n">2</span><span>一个 L1 槽 · 搬算干等</span></a></li>
+    <li><a href="#s3"><span class="n">3</span><span>两个 L1 槽 · 乒乓重叠</span></a></li>
+    <li><a href="#s4"><span class="n">4</span><span>真实场景 · 一任务搬 6 次</span></a></li>
+    <li><a href="#s5"><span class="n">5</span><span>为什么偏偏 3 个槽</span></a></li>
+    <li><a href="#s6"><span class="n">6</span><span>搬入是「覆盖」</span></a></li>
+    <li><a href="#s7"><span class="n">7</span><span>速查 + 总结</span></a></li>
+  </ol>
+</aside>
+
+<header class="hero">
+  <span class="kicker">昇腾流水线 · 数据搬运</span>
+  <h1>KV 三槽环 原理详解</h1>
+  <p class="sub">KV 的 GM→L1 搬运，为什么要在 L1 上开一圈缓冲槽轮流用，而且偏偏是「3 个」—— 让 MTE2 的搬与 Cube 的算重叠着跑、谁也不等谁</p>
+</header>
+
+<div class="wrap">
+
+  <div class="note">
+    <p><strong>本文假设你已经熟悉昇腾的基本盘：</strong>GM / L1 / L0A / L0B / L0C 各级内存，Cube 单元做矩阵乘、操作数得先在 L0 里，数据靠 MTE 在各级之间搬。这些不再赘述。</p>
+    <p>要讲清楚的是<strong>一个具体机制</strong>：<strong>KV</strong>（本算子里 <strong>K 和 V 是同一份数据</strong>、共享同一块存储，下文统称 KV）从 GM 搬进 L1 时，为什么要开<strong>一圈（3 个）缓冲槽轮流用</strong> —— 这个「3」是怎么来的。你只要会算<strong>余数</strong>（<code>%</code>）就能一路跟下来，全文用同一个搬运例子贯穿到底。</p>
+  </div>
+
+  <!-- ===================== TOC ===================== -->
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol start="0">
+      <li><span class="ix">0.</span> <a href="#s0">先说结论：这个三槽环到底在忙什么</a></li>
+      <li><span class="ix">1.</span> <a href="#s1">数据通路与瓶颈：慢在 GM→L1 这一跳</a></li>
+      <li><span class="ix">2.</span> <a href="#s2">只有一个 L1 槽：MTE2 和 Cube 互相干等</a></li>
+      <li><span class="ix">3.</span> <a href="#s3">两个 L1 槽：一边算一边搬（双缓冲 / 乒乓）</a></li>
+      <li><span class="ix">4.</span> <a href="#s4">回到真实场景：一个任务要搬 6 次</a></li>
+      <li><span class="ix">5.</span> <a href="#s5">核心：为什么偏偏是 3 个槽</a></li>
+      <li><span class="ix">6.</span> <a href="#s6">一个易错点：搬入是「覆盖」，不是「槽间搬移」</a></li>
+      <li><span class="ix">7.</span> <a href="#s7">一页速查 + 总结</a></li>
+    </ol>
+  </nav>
+
+  <!-- ===================== 0 ===================== -->
+  <h2 id="s0"><span class="num">0</span>先说结论：这个三槽环到底在忙什么</h2>
+  <p>注意力的两次矩阵乘（QK 打分、PV 汇总）都由 <strong>Cube 单元</strong>完成，而 Cube 的操作数必须先落在 <strong>L0</strong> 里。可这份 <strong>KV</strong> 原本躺在 <strong>GM</strong>（再强调一次：本算子的 K、V 是<strong>同一份数据</strong>），中间要靠 <strong>MTE2</strong> 一路搬到 <strong>L1</strong>，再由 MTE1 送进 L0。问题是：</p>
+  <blockquote><p><strong>GM→L1 这一跳（MTE2）延迟很大。</strong>如果老老实实「搬一块、算一块、再搬一块、再算一块」，Cube 大半时间都卡在等 MTE2 上，昂贵的算力白白空转。</p></blockquote>
+  <p><strong>KV 三槽环</strong>就是来消掉这段空转的：<strong>在 L1 上开几个缓冲槽轮流装 KV，让 MTE2 的搬和 Cube 的算错开、重叠</strong>，谁也不必停下来等谁。下面我们从「为什么要开槽」推到「开几个」，最后回答招牌问题 —— <strong>为什么偏偏是 3 个</strong>。</p>
+
+  <figure>
+    <div class="figcard">
+      <svg viewBox="0 0 840 210" role="img" aria-label="Cube 只能就着 L0 算，KV 在 GM，中间靠 MTE2 搬到 L1，MTE2 慢">
+        <!-- GM -->
+        <rect x="20" y="58" width="190" height="104" rx="12" fill="#eef2f7" stroke="#94a3b8"/>
+        <text x="115" y="44" text-anchor="middle" font-size="13.5" font-weight="700" fill="#334155">GM（显存）</text>
+        <text x="115" y="96" text-anchor="middle" font-size="14" fill="#475569">全部 KV</text>
+        <text x="115" y="122" text-anchor="middle" font-size="11.5" fill="#94a3b8">容量大，但访问延迟高</text>
+        <!-- haul arrow MTE2 -->
+        <path d="M212,110 L322,110" stroke="#f59e0b" stroke-width="3" marker-end="url(#ar)"/>
+        <text x="267" y="96" text-anchor="middle" font-size="12" fill="#92400e" font-weight="700">MTE2 搬入（慢）</text>
+        <text x="267" y="130" text-anchor="middle" font-size="11" fill="#b45309">这一跳最费时间</text>
+        <!-- L1 slot -->
+        <rect x="326" y="64" width="150" height="92" rx="12" fill="#ede9fe" stroke="#8b5cf6"/>
+        <text x="401" y="44" text-anchor="middle" font-size="13.5" font-weight="700" fill="#5b21b6">L1 环槽</text>
+        <text x="401" y="104" text-anchor="middle" font-size="13" fill="#5b21b6">当前这一小块 KV</text>
+        <text x="401" y="126" text-anchor="middle" font-size="11.5" fill="#7c3aed">片上，容量小、访问快</text>
+        <!-- feed arrow MTE1->L0 -->
+        <path d="M478,110 L560,110" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <text x="519" y="96" text-anchor="middle" font-size="11" fill="#2f6fea" font-weight="700">MTE1→L0</text>
+        <!-- Cube -->
+        <rect x="564" y="64" width="180" height="92" rx="12" fill="#dbeafe" stroke="#3b82f6"/>
+        <text x="654" y="44" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1e40af">Cube 单元</text>
+        <text x="654" y="104" text-anchor="middle" font-size="14" fill="#1e40af">矩阵乘（快）</text>
+        <text x="654" y="126" text-anchor="middle" font-size="11.5" fill="#3b82f6">只认 L0 里的操作数</text>
+        <!-- bottom warning -->
+        <text x="420" y="190" text-anchor="middle" font-size="12.5" fill="#b91c1c" font-weight="700">⚠ 问题：MTE2 这么慢，飞快的 Cube 会不会大半时间都在等它？</text>
+      </svg>
+    </div>
+    <figcaption>KV 在 <strong>GM</strong>，Cube 只认 <strong>L0</strong>，中间隔着一跳慢慢的 <strong>MTE2（GM→L1）</strong>。三槽环就是为了让这段搬运和 Cube 的计算<strong>同时发生</strong>、别互相干等。</figcaption>
+  </figure>
+
+  <!-- ===================== 1 ===================== -->
+  <h2 id="s1"><span class="num">1</span>数据通路与瓶颈：慢在 GM→L1 这一跳</h2>
+
+  <p>先把 KV 从 GM 到被算掉的完整通路摆出来（你都熟，这里只是标出<strong>瓶颈在哪一跳</strong>）：</p>
+
+  <div class="eqwrap">
+    <div class="eq" style="font-size:15px;">
+      <span class="t-amber">GM</span><span class="op">──MTE2（慢）──▶</span>
+      <span class="t-purple">L1 环槽</span><span class="op">──MTE1──▶</span>
+      <span>L0B</span><span class="op">──▶</span>
+      <span class="t-blue">Cube</span><span class="op">──▶</span>
+      <span>L0C</span>
+    </div>
+  </div>
+
+  <p>几个要点：</p>
+  <ul>
+    <li>KV 环槽开在 <strong>L1</strong>。QK 里的 K、PV 里的 V，最后都经 MTE1 送进 <strong>L0B</strong> 当矩阵乘的右矩阵，算出的结果落在 <strong>L0C</strong>。</li>
+    <li>这条链上，<strong>GM→L1（MTE2）这一跳延迟最大</strong> —— GM 是片外内存，一次访问够 Cube 算好几刀了。片内的 L1→L0（MTE1）相比之下快得多。</li>
+    <li>所以胜负手只有一个：<strong>能不能让 MTE2 的搬，和 Cube 的算，在时间上重叠起来。</strong></li>
+  </ul>
+
+  <div class="note">
+    <p>📌 为了让时间线图干净，下文把「一个槽被消费掉」笼统说成 <strong>Cube 算这个槽</strong> —— 其实它包含<strong>MTE1 把槽读进 L0B</strong>加上<strong>Cube 算</strong>两步。对「搬 vs 算 要不要重叠」这件事，关键就是 <strong>MTE2（往槽里写）</strong> 和 <strong>消费这个槽（读走）</strong> 这两件事能不能并行。</p>
+  </div>
+
+  <!-- ===================== 2 ===================== -->
+  <h2 id="s2"><span class="num">2</span>只有一个 L1 槽：MTE2 和 Cube 互相干等</h2>
+
+  <p>最朴素的做法：L1 上<strong>只开一个槽</strong>。那流程只能是：</p>
+  <ol>
+    <li>MTE2 把第 1 块 KV 从 GM 搬进这个槽；</li>
+    <li>搬完了，Cube 才能消费这个槽、算第 1 块；</li>
+    <li>算完了，MTE2 才敢把第 2 块搬进来（只有一个槽，<strong>没算完就搬会把还在用的数据覆盖掉</strong>）；</li>
+    <li>……如此循环。</li>
+  </ol>
+
+  <p>画成时间线，问题一目了然：<strong>MTE2 和 Cube 从来没有同时在干活</strong>。搬的时候 Cube 空转，算的时候 MTE2 空转。</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">一个槽：搬 → 算 → 搬 → 算，全串成一条线，各有一半时间在空等</p>
+      <svg viewBox="0 0 840 226" role="img" aria-label="只有一个 L1 槽时，MTE2 和 Cube 必须严格轮流，谁干活另一个就干等">
+        <text x="20" y="30" font-size="12.5" font-weight="700" fill="#334155">时间 →</text>
+        <text x="96" y="78" text-anchor="end" font-size="13" font-weight="700" fill="#92400e">MTE2（搬）</text>
+        <text x="96" y="140" text-anchor="end" font-size="13" font-weight="700" fill="#1e40af">Cube（算）</text>
+        <g stroke="#eef1f5" stroke-width="1">
+          <line x1="110" y1="50" x2="110" y2="170"/><line x1="210" y1="50" x2="210" y2="170"/>
+          <line x1="310" y1="50" x2="310" y2="170"/><line x1="410" y1="50" x2="410" y2="170"/>
+          <line x1="510" y1="50" x2="510" y2="170"/><line x1="610" y1="50" x2="610" y2="170"/>
+          <line x1="710" y1="50" x2="710" y2="170"/>
+        </g>
+        <!-- MTE2 lane -->
+        <rect x="110" y="56" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="160" y="81" text-anchor="middle" font-size="12.5" fill="#7a4d09" font-weight="700">搬 1</text>
+        <rect x="310" y="56" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="360" y="81" text-anchor="middle" font-size="12.5" fill="#7a4d09" font-weight="700">搬 2</text>
+        <rect x="510" y="56" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="560" y="81" text-anchor="middle" font-size="12.5" fill="#7a4d09" font-weight="700">搬 3</text>
+        <rect x="210" y="56" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="260" y="81" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="410" y="56" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="460" y="81" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="610" y="56" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="660" y="81" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <!-- Cube lane -->
+        <rect x="110" y="118" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="160" y="143" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="210" y="118" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="260" y="143" text-anchor="middle" font-size="12.5" fill="#1e40af" font-weight="700">算 1</text>
+        <rect x="310" y="118" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="360" y="143" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="410" y="118" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="460" y="143" text-anchor="middle" font-size="12.5" fill="#1e40af" font-weight="700">算 2</text>
+        <rect x="510" y="118" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="560" y="143" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="610" y="118" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="660" y="143" text-anchor="middle" font-size="12.5" fill="#1e40af" font-weight="700">算 3</text>
+        <path d="M110,186 L110,196 L710,196 L710,186" fill="none" stroke="#94a3b8" stroke-width="1.4"/>
+        <text x="410" y="214" text-anchor="middle" font-size="12.5" fill="#475569">总耗时 = 搬 + 算 + 搬 + 算 + 搬 + 算，<tspan font-weight="700" fill="#b91c1c">全部串起来（很长）</tspan></text>
+      </svg>
+    </div>
+    <figcaption>只有一个槽时，红色「空等」占了一半时间。Cube 明明很快，却被 MTE2 拖成「一半时间在发呆」。</figcaption>
+  </figure>
+
+  <p>根子在于：<strong>只有一个槽，同一时刻只能一个人碰它</strong>。MTE2 要往里写，就得等 Cube 先读完；Cube 要读，又得等 MTE2 先写完。<strong>同一个槽，写和读没法同时发生</strong>，于是两边被迫轮流，各浪费一半时间。</p>
+
+  <!-- ===================== 3 ===================== -->
+  <h2 id="s3"><span class="num">3</span>两个 L1 槽：一边算一边搬（双缓冲 / 乒乓）</h2>
+
+  <p>改进只要一句话：<strong>多开一个槽</strong>。有了两个槽（记作 A、B），就能这样安排：</p>
+  <blockquote>
+    <p><strong>Cube 正在消费 A 槽算</strong>的时候，<strong>MTE2 同时把下一块搬进 B 槽</strong>。等 A 算完，B 也刚好搬好 —— Cube 扭头消费 B 接着算，MTE2 则回头往 A 搬再下一块。两个槽<strong>你来我往、轮流坐庄</strong>，这就是 <strong>双缓冲</strong>（也叫「乒乓」）。</p>
+  </blockquote>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">两个槽：MTE2 往「空着的那个」搬，正好和 Cube「读另一个」错开 → 同时进行</p>
+      <svg viewBox="0 0 840 250" role="img" aria-label="两个 L1 槽时，搬下一块和算这一块可以同时进行，时间大大缩短">
+        <text x="20" y="30" font-size="12.5" font-weight="700" fill="#334155">时间 →</text>
+        <text x="96" y="76" text-anchor="end" font-size="13" font-weight="700" fill="#92400e">MTE2（搬）</text>
+        <text x="96" y="138" text-anchor="end" font-size="13" font-weight="700" fill="#1e40af">Cube（算）</text>
+        <g stroke="#eef1f5" stroke-width="1">
+          <line x1="110" y1="48" x2="110" y2="168"/><line x1="210" y1="48" x2="210" y2="168"/>
+          <line x1="310" y1="48" x2="310" y2="168"/><line x1="410" y1="48" x2="410" y2="168"/>
+          <line x1="510" y1="48" x2="510" y2="168"/><line x1="610" y1="48" x2="610" y2="168"/>
+        </g>
+        <!-- MTE2 lane: back to back, alternating slots A/B -->
+        <rect x="110" y="54" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="160" y="72" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">搬 1</text><text x="160" y="88" text-anchor="middle" font-size="10" fill="#7a4d09">→槽 A</text>
+        <rect x="210" y="54" width="100" height="40" rx="7" fill="#fde68a" stroke="#f59e0b"/><text x="260" y="72" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">搬 2</text><text x="260" y="88" text-anchor="middle" font-size="10" fill="#7a4d09">→槽 B</text>
+        <rect x="310" y="54" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="360" y="72" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">搬 3</text><text x="360" y="88" text-anchor="middle" font-size="10" fill="#7a4d09">→槽 A</text>
+        <rect x="410" y="54" width="100" height="40" rx="7" fill="#fde68a" stroke="#f59e0b"/><text x="460" y="72" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">搬 4</text><text x="460" y="88" text-anchor="middle" font-size="10" fill="#7a4d09">→槽 B</text>
+        <!-- Cube lane: starts after 搬1, back to back -->
+        <rect x="210" y="116" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="260" y="134" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 1</text><text x="260" y="150" text-anchor="middle" font-size="10" fill="#1e40af">读槽 A</text>
+        <rect x="310" y="116" width="100" height="40" rx="7" fill="#c7ddfe" stroke="#3b82f6"/><text x="360" y="134" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 2</text><text x="360" y="150" text-anchor="middle" font-size="10" fill="#1e40af">读槽 B</text>
+        <rect x="410" y="116" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="460" y="134" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 3</text><text x="460" y="150" text-anchor="middle" font-size="10" fill="#1e40af">读槽 A</text>
+        <rect x="510" y="116" width="100" height="40" rx="7" fill="#c7ddfe" stroke="#3b82f6"/><text x="560" y="134" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 4</text><text x="560" y="150" text-anchor="middle" font-size="10" fill="#1e40af">读槽 B</text>
+        <!-- overlap highlight -->
+        <rect x="210" y="48" width="100" height="114" rx="8" fill="none" stroke="#10b981" stroke-width="2" stroke-dasharray="6 4"/>
+        <text x="260" y="182" text-anchor="middle" font-size="11" fill="#065f46" font-weight="700">同时进行 ✓</text>
+        <text x="260" y="197" text-anchor="middle" font-size="10.5" fill="#065f46">搬 2 进 B / 算 1 读 A</text>
+        <path d="M110,214 L110,224 L610,224 L610,214" fill="none" stroke="#94a3b8" stroke-width="1.4"/>
+        <text x="360" y="242" text-anchor="middle" font-size="12.5" fill="#475569">两条并行，总耗时 ≈ <tspan font-weight="700" fill="#065f46">较长的那条</tspan>（不是搬与算相加）</text>
+      </svg>
+    </div>
+    <figcaption>两个槽后，除了开头第一次搬不可避免，后面的搬和算就<strong>并排同时进行</strong>了，不再一前一后干等 —— 这就是双缓冲的威力。（时间线图为看得清把每次搬、算画成等宽；实际<strong>搬比算慢</strong>、真正定总时长的是搬那条，但「串行→重叠」省时间的道理不变。）</figcaption>
+  </figure>
+
+  <p>看懂这张图，就抓住了整篇的<strong>灵魂</strong>：</p>
+  <blockquote><p><strong>多开槽的唯一目的，是让 MTE2 的搬和 Cube 的算重叠并行、同时发生。</strong>槽的本质是一层缓冲垫 —— 有了它，MTE2 不必等 Cube，Cube 也不必等 MTE2，两件事叠着跑。</p></blockquote>
+
+  <div class="note"><p>📎 「一圈槽轮流用」有个通用名字叫 <strong>环形缓冲</strong>（ring）：<strong>把几个槽首尾接成一个圈，按 0、1、2、…… 的顺序一个个用，用到最后一个再绕回第 0 个</strong>。两个槽的乒乓，其实就是「2 个槽的环」。接下来会看到，这个具体场景需要的不是 2 个，而是 3 个。</p></div>
+
+  <!-- ===================== 4 ===================== -->
+  <h2 id="s4"><span class="num">4</span>回到真实场景：一个任务要搬 6 次</h2>
+
+  <p>前面为讲道理把「搬一块、算一块」说得很笼统。现在看真实的 SWA 里，<strong>一个任务</strong>到底要搬几次、搬什么。先记住两点：</p>
+  <ul>
+    <li>开头就说过 <strong>K 和 V 是同一份数据</strong>（sharedkv）。<strong>正因如此，才只用得着这一圈槽</strong> —— 同一个槽这会儿装它、待会儿还装它，不必给 K、V 各开一圈。</li>
+    <li>一个任务分<strong>先后两阶段</strong>：先用这份数据做 <strong>QK 打分</strong>（此阶段它扮演 <strong>K</strong>），再用打出的分把它 <strong>PV 汇总</strong>成输出（此阶段它扮演 <strong>V</strong>）。下文说的「K 段」「V 块」，都是<strong>同一份数据在这两个阶段里的不同切法</strong>，不是两个东西。</li>
+  </ul>
+
+  <p>关键在于：这两个阶段的操作数都<strong>一次进不完 L0</strong>，得沿维度切块、分几次搬。</p>
+
+  <div class="note"><p>📌 <strong>先把层级分清（这里最容易绕）</strong>：<strong>三槽环在 L1</strong>（第 1 节说过）。下面 4.1 / 4.2 会提到 <strong>L0B</strong>（喂给 Cube 的操作数缓冲）和 <strong>L0C</strong>（放矩阵乘结果的缓冲）—— 它们更靠里、紧挨 Cube，是<strong>它们的容量</strong>决定了「K 要切 2 段、V 要产 4 条」；但这 2 段、4 条被「<strong>搬</strong>」进去的落点，始终是 <strong>L1 的环槽</strong>。数据走向不变：<code>GM ─搬(MTE2)→ L1 环槽 ─MTE1→ L0B ─Cube→ L0C</code>。</p></div>
+
+  <h3>4.1 QK 打分：K 要搬 2 次</h3>
+  <p>QK 里 K 要搬进 <strong>L0B</strong> 参与矩阵乘。可 K 的一整块是 <code>[128,512]</code>（128 个 token、每个 512 维），按 2 字节算就是 <strong>128&nbsp;KB</strong>，塞不进约 <strong>64&nbsp;KB</strong> 的 L0B。于是沿 <code>D=512</code> 切成 <strong>2 个 256 宽的 D 半块</strong>，每半 <code>[128,256]=64&nbsp;KB</code> 正好放得下；两半各算一次、把部分和累加进 L0C。所以：<strong>QK = 搬 2 次 K</strong>（K 段 0、K 段 1）。</p>
+
+  <h3>4.2 PV 汇总：V 要搬 4 次</h3>
+  <p>PV 算 <code>O[64,512] = P[64,128] · V[128,512]</code>，结果要写进 L0C —— 而 <strong>PV 用的这块 L0C 结果缓冲，跟 QK 打分用的是<em>同一块</em>，形状 <code>[64,128]</code></strong>（QK 的分数、PV 的每条输出<em>都是</em> <code>[64,128]</code>，形状一样才好轮流合用同一块、靠一个计数器错开，省 L0C；那个 <code>64</code> 就是 <code>O[64,512]</code> 的 64 行）。它<strong>宽只有 128</strong>，所以 512 宽的输出只能一次产 128 宽的一条、分 <strong>4 条</strong>来产，每产一条就要 V 的一个 <code>[128,128]</code> 小片。所以：<strong>PV = 搬 4 次 V</strong>（V 块 0、1、2、3）。</p>
+
+  <blockquote><p>具体数字不用记，记住结论就行：<strong>一个任务里，先搬 2 次 K（QK 用），再搬 4 次 V（PV 用），一共搬 6 次。</strong></p></blockquote>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">一个任务的 6 次搬运：先 2 次 K（QK），后 4 次 V（PV）</p>
+      <svg viewBox="0 0 840 168" role="img" aria-label="一个任务里依次搬 6 次：K段0 K段1 V块0 V块1 V块2 V块3">
+        <path d="M40,44 L40,34 L250,34 L250,44" fill="none" stroke="#3b82f6" stroke-width="1.6"/>
+        <text x="145" y="26" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">QK 打分 · 用 K</text>
+        <path d="M300,44 L300,34 L800,34 L800,44" fill="none" stroke="#10b981" stroke-width="1.6"/>
+        <text x="550" y="26" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">PV 汇总 · 用 V</text>
+        <g font-size="12.5" text-anchor="middle">
+          <rect x="40"  y="58" width="100" height="58" rx="10" fill="#eff6ff" stroke="#3b82f6"/><text x="90"  y="82" fill="#1e40af" font-weight="700">第 1 次</text><text x="90"  y="102" fill="#1e40af">K 段 0</text>
+          <rect x="150" y="58" width="100" height="58" rx="10" fill="#eff6ff" stroke="#3b82f6"/><text x="200" y="82" fill="#1e40af" font-weight="700">第 2 次</text><text x="200" y="102" fill="#1e40af">K 段 1</text>
+          <rect x="300" y="58" width="100" height="58" rx="10" fill="#ecfdf5" stroke="#10b981"/><text x="350" y="82" fill="#065f46" font-weight="700">第 3 次</text><text x="350" y="102" fill="#065f46">V 块 0</text>
+          <rect x="410" y="58" width="100" height="58" rx="10" fill="#ecfdf5" stroke="#10b981"/><text x="460" y="82" fill="#065f46" font-weight="700">第 4 次</text><text x="460" y="102" fill="#065f46">V 块 1</text>
+          <rect x="520" y="58" width="100" height="58" rx="10" fill="#ecfdf5" stroke="#10b981"/><text x="570" y="82" fill="#065f46" font-weight="700">第 5 次</text><text x="570" y="102" fill="#065f46">V 块 2</text>
+          <rect x="630" y="58" width="100" height="58" rx="10" fill="#ecfdf5" stroke="#10b981"/><text x="680" y="82" fill="#065f46" font-weight="700">第 6 次</text><text x="680" y="102" fill="#065f46">V 块 3</text>
+        </g>
+        <text x="435" y="146" text-anchor="middle" font-size="12.5" fill="#475569">一个任务 = 依次搬 <tspan font-weight="700">6</tspan> 次；下一个任务又是同样的 6 次，如此循环。</text>
+      </svg>
+    </div>
+    <figcaption>这 6 次搬运在时间上是<strong>连着的一串</strong>：先 2 次 K，再 4 次 V。</figcaption>
+  </figure>
+
+  <h3>4.3 顺带定一下：一个槽多大？K 填满，V 只用一半</h3>
+  <p>上面已经看到：K 半块是 <code>[128,256]</code>、V 块是 <code>[128,128]</code> —— <strong>K 半块比 V 块宽一倍</strong>。而 K、V 本是同一份数据、<strong>共用同一批槽</strong>，所以每个槽的大小就按<strong>更大的那位租客 K</strong> 来定 = <code>[128,256]</code>（128 个 token 行 × 256 列，256 = 半个 D）：</p>
+  <ul>
+    <li>装 <strong>K 半块</strong>：正好<strong>填满</strong>整个 <code>[128,256]</code> 槽；</li>
+    <li>装 <strong>V 块</strong>：只用到槽的<strong>前 <code>[128,128]</code></strong>（前 128 列），<strong>后 128 列空着不用</strong>。</li>
+  </ul>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">同一个槽固定 128 行 × 256 列：装 K 填满，装 V 只用前一半</p>
+      <svg viewBox="0 0 840 224" role="img" aria-label="一个槽是 128 行乘 256 列；K 半块填满整个槽，V 块只用前 128 列、后 128 列空着">
+        <!-- panel 1: K fills whole slot -->
+        <text x="210" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">① 装 K 半块 → 填满</text>
+        <rect x="60" y="56" width="300" height="116" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+        <text x="210" y="108" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">K 半块</text>
+        <text x="210" y="132" text-anchor="middle" font-size="12.5" fill="#1e40af">填满 [128,256]</text>
+        <text x="210" y="196" text-anchor="middle" font-size="11.5" fill="#475569">256 列（半个 D）· 全用上</text>
+        <!-- panel 2: V uses front half only -->
+        <text x="630" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#065f46">② 装 V 块 → 只用前一半</text>
+        <rect x="480" y="56" width="150" height="116" fill="#d1fae5" stroke="#10b981" stroke-width="2"/>
+        <text x="555" y="106" text-anchor="middle" font-size="13" font-weight="700" fill="#065f46">V 块</text>
+        <text x="555" y="128" text-anchor="middle" font-size="11.5" fill="#065f46">[128,128]</text>
+        <rect x="630" y="56" width="150" height="116" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="5 4"/>
+        <text x="705" y="106" text-anchor="middle" font-size="12.5" fill="#94a3b8">空着</text>
+        <text x="705" y="128" text-anchor="middle" font-size="11" fill="#94a3b8">后 128 列不用</text>
+        <text x="555" y="196" text-anchor="middle" font-size="11.5" fill="#065f46" font-weight="700">前 128（用）</text>
+        <text x="705" y="196" text-anchor="middle" font-size="11.5" fill="#94a3b8">后 128（空）</text>
+      </svg>
+    </div>
+    <figcaption>槽按更大的 K 半块定尺寸。所以装 V 时天然只用得到前一半、后半闲置 —— 这是「拿同一批槽装两种大小的数据」的必然，不是多搬了东西。</figcaption>
+  </figure>
+
+  <p>这 6 次搬运在时间上连着来。下一节就用这一串，推出「到底要几个槽」。</p>
+
+  <!-- ===================== 5 ===================== -->
+  <h2 id="s5"><span class="num">5</span>核心：为什么偏偏是 3 个槽</h2>
+
+  <p>第 3 节说过，双缓冲（2 个槽）就能让搬和算重叠。那为什么这里要 <strong>3 个</strong>？答案藏在 QK 阶段一个特殊之处：</p>
+
+  <blockquote><p><strong>QK 的 K 要分成 2 个半块、搬 2 次。</strong>这 2 个半块放进 <strong>2 个不同的槽</strong>，而不是挤同一个槽轮流用 —— 这样慢吞吞的 MTE2 能把两个半块<strong>连着搬完</strong>，不必「搬完第一个 → 干等它算完腾槽 → 再搬第二个」。所以 QK 期间，这 <strong>2 个槽</strong>正被两个 K 半块占着。</p></blockquote>
+
+  <p>矛盾来了。我们希望像第 3 节那样重叠：<strong>趁 QK 还在算，就让 MTE2 提前把 PV 要用的第一块 V（V 块 0）搬进来</strong>，这样 PV 一开始就有料、不用等。可要搬 V 进来，得有<strong>一个空槽</strong>接它 ——</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">只有 2 个槽：两个都被 K 半块占着，V 得等 K 腾槽才能搬（晚一截）</p>
+      <svg viewBox="0 0 840 210" role="img" aria-label="两个槽都被 K 段占住时，想预搬 V 却没有空槽，重叠失败">
+        <text x="200" y="30" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">QK 进行中，手上只有 2 个槽</text>
+        <rect x="70" y="48" width="150" height="72" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+        <text x="145" y="76" text-anchor="middle" font-size="12.5" fill="#1e40af" font-weight="700">槽 0</text>
+        <text x="145" y="98" text-anchor="middle" font-size="12.5" fill="#1e40af">K 段 0（占用中）</text>
+        <rect x="240" y="48" width="150" height="72" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+        <text x="315" y="76" text-anchor="middle" font-size="12.5" fill="#1e40af" font-weight="700">槽 1</text>
+        <text x="315" y="98" text-anchor="middle" font-size="12.5" fill="#1e40af">K 段 1（占用中）</text>
+        <text x="230" y="140" text-anchor="middle" font-size="11.5" fill="#1e40af">两个半块刚搬完，眼下两个槽都满</text>
+        <rect x="470" y="52" width="150" height="64" rx="12" fill="#ecfdf5" stroke="#10b981" stroke-dasharray="6 4"/>
+        <text x="545" y="80" text-anchor="middle" font-size="12.5" fill="#065f46" font-weight="700">MTE2 想预搬 V 块 0</text>
+        <text x="545" y="100" text-anchor="middle" font-size="11.5" fill="#065f46">好让 PV 提前有料</text>
+        <path d="M462,84 L400,84" stroke="#ef4444" stroke-width="2" marker-end="url(#arr)"/>
+        <rect x="640" y="56" width="176" height="56" rx="10" fill="#fef2f2" stroke="#ef4444"/>
+        <text x="728" y="80" text-anchor="middle" font-size="12.5" fill="#b91c1c" font-weight="700">⏳ 眼下没有空槽</text>
+        <text x="728" y="100" text-anchor="middle" font-size="11.5" fill="#b91c1c">V 得等 K 段 0 算完腾槽</text>
+        <text x="420" y="176" text-anchor="middle" font-size="12.5" fill="#b91c1c" font-weight="700">结果：V 要等 K 段 0 算完腾出槽才能开搬 —— 比有专属空槽晚一截</text>
+        <text x="420" y="196" text-anchor="middle" font-size="11.5" fill="#64748b">2 个槽在这个场景里不够用</text>
+      </svg>
+    </div>
+    <figcaption>两个槽都被 K 半块占着，V 想预搬却没有空槽，只能<strong>等 K 段 0 被算完、腾出它的槽</strong>才能开始搬 —— 比「有个专属空槽、立刻开搬」晚了一截。</figcaption>
+  </figure>
+
+  <p>解决办法自然而然：<strong>再加一个槽，凑成 3 个</strong>。这样 QK 占掉 2 个，<strong>永远还剩 1 个空的</strong>，正好给 MTE2 拿去预搬下一块 V：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">3 个槽：QK 占 2 个，第 3 个正好接 V → MTE2 搬 V 和 Cube 算 QK 同时进行</p>
+      <svg viewBox="0 0 840 208" role="img" aria-label="三个槽时，两个给 K 段，第三个空着接预搬的 V，重叠成功">
+        <text x="230" y="30" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">QK 进行中，手上有 3 个槽</text>
+        <rect x="60" y="48" width="140" height="72" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+        <text x="130" y="76" text-anchor="middle" font-size="12.5" fill="#1e40af" font-weight="700">槽 0</text>
+        <text x="130" y="98" text-anchor="middle" font-size="12" fill="#1e40af">K 段 0（占用）</text>
+        <rect x="210" y="48" width="140" height="72" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+        <text x="280" y="76" text-anchor="middle" font-size="12.5" fill="#1e40af" font-weight="700">槽 1</text>
+        <text x="280" y="98" text-anchor="middle" font-size="12" fill="#1e40af">K 段 1（占用）</text>
+        <rect x="360" y="48" width="140" height="72" rx="12" fill="#ecfdf5" stroke="#10b981" stroke-width="2"/>
+        <text x="430" y="76" text-anchor="middle" font-size="12.5" fill="#065f46" font-weight="700">槽 2（空）</text>
+        <text x="430" y="98" text-anchor="middle" font-size="12" fill="#065f46">← 预搬 V 块 0</text>
+        <path d="M560,84 L508,84" stroke="#10b981" stroke-width="2.5" marker-end="url(#arg)"/>
+        <rect x="562" y="54" width="176" height="60" rx="10" fill="#ecfdf5" stroke="#10b981"/>
+        <text x="650" y="79" text-anchor="middle" font-size="12" fill="#065f46" font-weight="700">趁 QK 还在算，</text>
+        <text x="650" y="99" text-anchor="middle" font-size="12" fill="#065f46">MTE2 把 V 先搬进空槽</text>
+        <rect x="150" y="152" width="540" height="40" rx="10" fill="#d1fae5" stroke="#10b981"/>
+        <text x="420" y="177" text-anchor="middle" font-size="12.5" fill="#065f46" font-weight="700">✓ 搬 V 和 算 QK 同时进行 —— PV 一开始就有料，不用等</text>
+      </svg>
+    </div>
+    <figcaption>「QK 的两个 K 半块要占掉 2 个槽」是这个场景的硬约束。要让第一块 V 从 QK 一开头就能搬、不必等 K 腾槽，就得有<strong>第 3 个</strong>一直空着的槽。这，就是「3」的由来。</figcaption>
+  </figure>
+
+  <div class="note">
+    <p><strong>一句话记住「为什么是 3」：</strong>QK 的两个 K 半块占掉 <span class="chip k" style="padding:1px 7px">2 个槽</span>，想让第一块 V 紧接着就搬、不必等 K 腾槽，就得多留 <span class="chip v" style="padding:1px 7px">1 个空槽</span> —— <code>2 + 1 = 3</code>。</p>
+  </div>
+
+  <div class="note">
+    <p>🤔 <strong>你可能会追问</strong>：K 段 0 一旦算完，它那个槽不就空出来了、腾给 V 不就够了（还是只要 2 个槽）？<br><strong>没错</strong> —— 只有 2 个槽时，V 确实可以「<strong>等 K 段 0 算完、腾出槽</strong>」再挤进去。代价是：V 得等到 QK 都算了一半才开始搬；而<strong>搬本来就是慢的瓶颈，越早开搬越好</strong>。给它<strong>第 3 个一直空着的槽</strong>，V 不必等任何 K 半块算完，紧跟在 2 个 K 半块后面就能连着搬 —— 这第 3 个槽买来的，正是「V 提前那一截开搬」的重叠。（内核里也正是这么做的：K 段 0 算完会立刻释放它的槽，但第一块 V 走的是<em>另一个</em>从头就空着的槽。）</p>
+  </div>
+
+  <h3>5.1 三个槽怎么轮流用：0 → 1 → 2 → 0 → 1 → 2</h3>
+  <p>回到第 4 节那 6 次搬运。3 个槽首尾接成一个环，第 <code>k</code> 次搬运用第 <code>k % 3</code> 个槽。数一遍：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">一个任务的 6 次搬运，绕着 3 个槽转一圈半（正好回到起点）</p>
+      <svg viewBox="0 0 840 250" role="img" aria-label="6 次搬运依次落在槽 0 1 2 0 1 2，第 4 次起绕回起点">
+        <text x="230" y="28" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">槽 0</text>
+        <text x="430" y="28" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">槽 1</text>
+        <text x="630" y="28" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">槽 2</text>
+        <g fill="#faf5ff" stroke="#e9d5ff">
+          <rect x="160" y="38" width="140" height="196" rx="10"/>
+          <rect x="360" y="38" width="140" height="196" rx="10"/>
+          <rect x="560" y="38" width="140" height="196" rx="10"/>
+        </g>
+        <g font-size="11.5" fill="#94a3b8" text-anchor="end">
+          <text x="150" y="66">第1次</text><text x="150" y="98">第2次</text><text x="150" y="130">第3次</text>
+          <text x="150" y="162">第4次</text><text x="150" y="194">第5次</text><text x="150" y="226">第6次</text>
+        </g>
+        <g font-size="12" text-anchor="middle" font-weight="700">
+          <rect x="172" y="52" width="116" height="24" rx="6" fill="#dbeafe" stroke="#3b82f6"/><text x="230" y="69" fill="#1e40af">K 段 0</text>
+          <rect x="372" y="84" width="116" height="24" rx="6" fill="#dbeafe" stroke="#3b82f6"/><text x="430" y="101" fill="#1e40af">K 段 1</text>
+          <rect x="572" y="116" width="116" height="24" rx="6" fill="#d1fae5" stroke="#10b981"/><text x="630" y="133" fill="#065f46">V 块 0</text>
+          <rect x="172" y="148" width="116" height="24" rx="6" fill="#d1fae5" stroke="#10b981"/><text x="230" y="165" fill="#065f46">V 块 1</text>
+          <rect x="372" y="180" width="116" height="24" rx="6" fill="#d1fae5" stroke="#10b981"/><text x="430" y="197" fill="#065f46">V 块 2</text>
+          <rect x="572" y="212" width="116" height="24" rx="6" fill="#d1fae5" stroke="#10b981"/><text x="630" y="229" fill="#065f46">V 块 3</text>
+        </g>
+        <path d="M688,128 C 735,128 735,162 288,160" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+        <text x="772" y="150" text-anchor="middle" font-size="10.5" fill="#b45309">绕回槽 0</text>
+      </svg>
+    </div>
+    <figcaption>第 4 次（V 块 1）绕回<strong>槽 0</strong> —— 而槽 0 里原来的 K 段 0，此时 QK 早已用完，正好可以让位。<code>6 % 3 = 0</code>，所以每个任务搬完 6 次<strong>都停在同一个起点</strong>，下个任务又干干净净从槽 0 开始。</figcaption>
+  </figure>
+
+  <p>最妙的一点：第 4 次要把 V 块 1 搬进槽 0，而槽 0 原来装的是 K 段 0。<strong>这时 QK 早算完了，K 段 0 已经没人要，正好被新数据覆盖</strong> —— 刚刚好，不冲突。</p>
+
+  <!-- ===================== 6 ===================== -->
+  <h2 id="s6"><span class="num">6</span>一个易错点：搬入是「覆盖」，不是「槽间搬移」</h2>
+
+  <p>容易误解成：槽 0 里先放 K 段 0，后来要放 V 块 1，是不是得<strong>先把 K 段 0 挪到别的槽</strong>、腾空再放 V？<strong>不是的。</strong></p>
+
+  <blockquote><p>每一次「搬」，都是 MTE2 <strong>从 GM 拉一份全新的数据，直接覆盖槽里的旧内容</strong>。旧的 K 段 0 不会被搬去任何地方 —— 它<strong>就地作废</strong>，被新来的 V 块 1 盖掉。<strong>槽和槽之间从不互相搬运数据</strong>，全程只有 GM→L1 一个方向。</p></blockquote>
+
+  <figure>
+    <div class="figcard">
+      <svg viewBox="0 0 840 200" role="img" aria-label="覆盖而非搬移：MTE2 从 GM 直接覆盖槽的旧内容，覆盖前先确认旧内容已被读走">
+        <rect x="24" y="70" width="150" height="70" rx="12" fill="#eef2f7" stroke="#94a3b8"/>
+        <text x="99" y="58" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">GM</text>
+        <text x="99" y="112" text-anchor="middle" font-size="12.5" fill="#475569">新数据 V 块 1</text>
+        <rect x="316" y="66" width="150" height="78" rx="12" fill="#fef9c3" stroke="#eab308"/>
+        <text x="391" y="92" text-anchor="middle" font-size="12" fill="#854d0e" font-weight="700">先问一句：</text>
+        <text x="391" y="112" text-anchor="middle" font-size="12" fill="#854d0e">旧内容读走没？</text>
+        <text x="391" y="132" text-anchor="middle" font-size="12.5" fill="#16a34a" font-weight="700">读走了 ✓ 才动手</text>
+        <path d="M176,105 L312,105" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <text x="244" y="95" text-anchor="middle" font-size="11" fill="#92400e" font-weight="700">MTE2</text>
+        <rect x="560" y="60" width="180" height="90" rx="12" fill="#ecfdf5" stroke="#10b981" stroke-width="2"/>
+        <text x="650" y="48" text-anchor="middle" font-size="12.5" font-weight="700" fill="#5b21b6">L1 槽 0</text>
+        <text x="650" y="92" text-anchor="middle" font-size="12" fill="#cbd5e1" text-decoration="line-through">旧：K 段 0（作废）</text>
+        <text x="650" y="120" text-anchor="middle" font-size="13" fill="#065f46" font-weight="700">新：V 块 1 覆盖进来</text>
+        <path d="M468,105 L556,105" stroke="#10b981" stroke-width="2.5" marker-end="url(#arg)"/>
+        <text x="512" y="94" text-anchor="middle" font-size="11" fill="#065f46" font-weight="700">覆盖</text>
+        <text x="420" y="182" text-anchor="middle" font-size="12" fill="#475569">全程只有「GM → L1 槽」这一个方向；槽和槽之间<tspan font-weight="700">从不互相倒腾</tspan>。</text>
+      </svg>
+    </div>
+    <figcaption>「搬」= MTE2 从 GM 拉新数据<strong>覆盖</strong>槽。覆盖前有一道「旧内容读走没？」的确认（每个槽各有一个），确保<strong>绝不冲掉还没被消费的数据</strong>。</figcaption>
+  </figure>
+
+  <p>那道「旧内容读走没？」的确认很关键。它是每个槽各自的一个<strong>反向 flag</strong>（写-读次序的保护）：MTE2 要往某个槽写新数据前，<strong>必须先等到「这个槽上一位租客已被 Cube 消费完」的信号</strong>才动手。有了它，即使搬和算在拼命重叠，也<strong>永远不会把还没读走的数据覆盖掉</strong> —— 快，但不出错。</p>
+
+  <div class="warn">
+    <p>⚠️ 呼应 <strong>4.3</strong> 那张「V 只用槽的前一半」：V 只写槽的前 <code>[128,128]</code>、后 128 列原样空着 —— 这<strong>不是「把后半搬走了」</strong>，而是新搬进来的 V 本来就只写前半、剩下的不理会。</p>
+  </div>
+
+  <!-- ===================== 7 ===================== -->
+  <h2 id="s7"><span class="num">7</span>一页速查 + 总结</h2>
+
+  <h3>整张图</h3>
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">GM → L1 三个槽轮流用 → Cube，MTE2 搬与 Cube 算全程重叠</p>
+      <svg viewBox="0 0 840 240" role="img" aria-label="总览：GM 把 KV 轮流搬进 3 个 L1 槽，Cube 依次消费，搬算并行重叠">
+        <rect x="24" y="86" width="140" height="80" rx="12" fill="#eef2f7" stroke="#94a3b8"/>
+        <text x="94" y="74" text-anchor="middle" font-size="12.5" font-weight="700" fill="#334155">GM</text>
+        <text x="94" y="122" text-anchor="middle" font-size="12.5" fill="#475569">全部 KV</text>
+        <text x="94" y="144" text-anchor="middle" font-size="11" fill="#94a3b8">大 · 延迟高</text>
+        <text x="420" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">L1 上 3 个槽（首尾成环，轮流用）</text>
+        <g>
+          <rect x="330" y="56" width="180" height="40" rx="9" fill="#faf5ff" stroke="#c4b5fd"/><text x="420" y="81" text-anchor="middle" font-size="12.5" fill="#5b21b6" font-weight="700">槽 0</text>
+          <rect x="330" y="104" width="180" height="40" rx="9" fill="#faf5ff" stroke="#c4b5fd"/><text x="420" y="129" text-anchor="middle" font-size="12.5" fill="#5b21b6" font-weight="700">槽 1</text>
+          <rect x="330" y="152" width="180" height="40" rx="9" fill="#faf5ff" stroke="#c4b5fd"/><text x="420" y="177" text-anchor="middle" font-size="12.5" fill="#5b21b6" font-weight="700">槽 2</text>
+        </g>
+        <path d="M520,172 C 560,172 560,76 520,76" fill="none" stroke="#8b5cf6" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+        <text x="566" y="128" text-anchor="middle" font-size="10.5" fill="#7c3aed" transform="rotate(90 566 128)">绕回 0</text>
+        <path d="M166,120 C 250,120 250,76 326,76" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#ar)"/>
+        <path d="M166,126 L326,124" stroke="#f59e0b" stroke-width="2" marker-end="url(#ar)"/>
+        <path d="M166,132 C 250,132 250,172 326,172" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#ar)"/>
+        <text x="245" y="200" text-anchor="middle" font-size="11.5" fill="#92400e" font-weight="700">① MTE2 搬（慢，但与算并行）</text>
+        <path d="M514,76 C 600,76 600,120 660,120" fill="none" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <path d="M514,124 L660,124" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <path d="M514,172 C 600,172 600,128 660,128" fill="none" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <rect x="664" y="86" width="150" height="80" rx="12" fill="#dbeafe" stroke="#3b82f6"/>
+        <text x="739" y="74" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">Cube</text>
+        <text x="739" y="122" text-anchor="middle" font-size="12.5" fill="#1e40af">矩阵乘</text>
+        <text x="739" y="144" text-anchor="middle" font-size="11" fill="#3b82f6">算得飞快</text>
+        <text x="600" y="200" text-anchor="middle" font-size="11.5" fill="#1e40af" font-weight="700">② 经 MTE1→L0 消费（与搬并行）</text>
+        <text x="420" y="228" text-anchor="middle" font-size="12" fill="#475569">3 个槽 = QK 占的 2 个 + 预搬用的 1 个空的；MTE2 与 Cube 就此错开、重叠。</text>
+      </svg>
+    </div>
+    <figcaption>把前面所有小图并成一张：KV 从 GM <strong>轮流</strong>搬进 3 个 L1 槽，Cube <strong>依次</strong>消费，MTE2 的搬和 Cube 的算全程重叠。</figcaption>
+  </figure>
+
+  <h3>2 个够不够？—— 一眼对照</h3>
+  <figure>
+    <div class="figcard">
+      <div class="vs">
+        <div class="vscard bad"><div class="lab">只有 2 个槽</div><div class="val" style="color:#b91c1c">QK 占 2 个<br>V 得等 K 腾槽 → 晚搬</div></div>
+        <div class="vsmid" style="color:#b91c1c">✗</div>
+        <div class="vscard good"><div class="lab">用 3 个槽</div><div class="val" style="color:#065f46">QK 占 2 个 + 空 1 个<br>V 提前搬 → 重叠</div></div>
+      </div>
+    </div>
+    <figcaption>同样是想让 MTE2 的搬和 Cube 的算重叠并行，2 个槽在「QK 要同时占 2 个」的场景下不够，<strong>3 个才刚好</strong>。</figcaption>
+  </figure>
+
+  <h3>三句话总结</h3>
+  <ol>
+    <li><strong>瓶颈在 GM→L1（MTE2）</strong>：Cube 只认 L0 里的操作数，KV 却在 GM，每次算前都得先经 MTE2 搬进 L1，而这一跳延迟很大。</li>
+    <li><strong>开槽是为了重叠</strong>：L1 上开不止一个槽，MTE2 往空槽搬下一块时，Cube 正在消费另一个槽 —— 搬和算并排同时进行，不再串着干等（这就是双缓冲 / 环形缓冲）。</li>
+    <li><strong>这里偏偏要 3 个</strong>：QK 的两个 K 半块要占 <code>2</code> 个槽（好让 MTE2 把两半<strong>连着搬完</strong>，不必搬完第一半就干等它算完再搬第二半）；想让第一块 V <strong>紧接着</strong>就搬、不必等某个 K 半块算完腾槽，就得再留 <code>1</code> 个空的 —— <code>2 + 1 = 3</code>。6 次搬运绕 3 个槽转（<code>k % 3</code>：0,1,2,0,1,2，因 <code>6 % 3 = 0</code> 每任务归零），每次都是 MTE2 从 GM 拉新数据<strong>覆盖</strong>旧的，覆盖前用每槽一个反向 flag 把关，快而不错。</li>
+  </ol>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>问题</th><th>答案</th></tr></thead>
+    <tbody>
+      <tr><td>为什么要开槽？</td><td>让 MTE2 的搬和 Cube 的算重叠，别让 Cube 干等 GM→L1。</td></tr>
+      <tr><td>一个任务搬几次？</td><td>6 次：QK 用 K 搬 2 次（D 切 2 半，卡 L0B 容量），PV 用 V 搬 4 次（输出 512 分 4 条产，卡共享 L0C 结果缓冲的 128 宽）。</td></tr>
+      <tr class="hl-row"><td><strong>为什么偏偏 3 个槽？</strong></td><td><strong>QK 的两个 K 半块占 2 个槽，第一块 V 要紧接着搬（不必等 K 腾槽）就得再留 1 个空的 → 2+1=3。</strong></td></tr>
+      <tr><td>槽怎么轮流用？</td><td>第 <code>k</code> 次搬运用第 <code>k % 3</code> 个：0→1→2→0→1→2。<code>6 % 3 = 0</code>，每个任务都干净地回到起点。</td></tr>
+      <tr><td>换数据是搬移还是覆盖？</td><td>覆盖 —— MTE2 从 GM 拉新数据盖掉旧的；覆盖前用反向 flag 确认旧内容已被消费。槽间从不互搬。</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p style="text-align:center; color:var(--muted); font-size:14px; margin-top:26px;">L1 上一圈小小的槽，看着不起眼，却让 MTE2 的搬和 Cube 的算彻底重叠着跑、谁也不等谁 —— 这就是 KV 三槽环的全部用意。</p>
+
+</div>
+
+<a href="#top" class="totop" title="回到顶部">↑</a>
+<script>
+(function(){
+  var heads = Array.prototype.slice.call(document.querySelectorAll('h2[id]'));
+  var links = Array.prototype.slice.call(document.querySelectorAll('.sidenav a'));
+  if(!heads.length || !links.length) return;
+  var ticking = false;
+  function update(){
+    ticking = false;
+    var cur = heads[0];
+    for(var i=0;i<heads.length;i++){
+      if(heads[i].getBoundingClientRect().top <= 130) cur = heads[i];
+    }
+    for(var j=0;j<links.length;j++){
+      links[j].classList.toggle('active', links[j].getAttribute('href') === '#'+cur.id);
+    }
+  }
+  function onScroll(){ if(!ticking){ ticking = true; requestAnimationFrame(update); } }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll, {passive:true});
+  update();
+})();
+</script>
+</body>
+</html>
