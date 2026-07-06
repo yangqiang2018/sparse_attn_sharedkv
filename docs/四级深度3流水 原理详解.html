@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>四级深度3流水 原理详解</title>
+<style>
+  :root{
+    --bg:#f7f7f4; --panel:#ffffff; --ink:#1f2328; --muted:#5b6470;
+    --line:#e3e6ea; --accent:#2f6fea; --accent-soft:#eaf1ff;
+    --blue:#3b82f6; --blue-bg:#dbeafe; --blue-ink:#1e40af;
+    --green:#10b981; --green-bg:#d1fae5; --green-ink:#065f46;
+    --amber:#f59e0b; --amber-bg:#fef3c7; --amber-ink:#92400e;
+    --purple:#8b5cf6; --purple-bg:#ede9fe; --purple-ink:#5b21b6;
+    --red:#ef4444; --red-ink:#b91c1c;
+    --gray:#9ca3af; --gray-bg:#eceef1; --gray-ink:#4b5563;
+    --code-bg:#f4f6f8; --code-ink:#1c2733;
+    --radius:12px;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",Consolas,"Cascadia Code",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:16.5px; line-height:1.85;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:0 22px 120px;}
+
+  /* ---- header ---- */
+  header.hero{ max-width:880px; margin:0 auto; padding:54px 22px 26px; }
+  .kicker{
+    display:inline-block; font-size:12.5px; letter-spacing:.16em; font-weight:700;
+    color:var(--accent); background:var(--accent-soft); padding:5px 12px; border-radius:999px;
+    text-transform:uppercase; margin-bottom:18px;
+  }
+  h1{font-size:38px; line-height:1.22; margin:.1em 0 .35em; letter-spacing:-.01em;}
+  .sub{color:var(--muted); font-size:16px; margin:0;}
+
+  /* ---- typography ---- */
+  h2{
+    font-size:25px; margin:64px 0 18px; padding-top:16px; letter-spacing:-.01em;
+    border-top:2px solid var(--line);
+  }
+  h2 .num{color:var(--accent); font-variant-numeric:tabular-nums; margin-right:.45em;}
+  h3{font-size:19px; margin:34px 0 12px; color:#2b3340;}
+  p{margin:14px 0;}
+  a{color:var(--accent); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  strong{font-weight:700; color:#16324f;}
+  ul,ol{margin:14px 0; padding-left:1.4em;}
+  li{margin:7px 0;}
+  hr{border:none; border-top:1px solid var(--line); margin:40px 0;}
+
+  /* inline code */
+  code{
+    font-family:var(--mono); font-size:.88em; background:var(--code-bg);
+    color:#b3344a; padding:2px 6px; border-radius:6px; border:1px solid #e7e2e4;
+  }
+  /* code blocks */
+  pre{
+    background:#0f1b2d; color:#dbe7f3; border-radius:var(--radius);
+    padding:18px 20px; overflow:auto; font-family:var(--mono); font-size:14px;
+    line-height:1.7; margin:18px 0; border:1px solid #0a1320;
+    box-shadow:0 1px 0 rgba(0,0,0,.04);
+  }
+  pre code{background:none; color:inherit; border:none; padding:0; font-size:inherit;}
+  pre .cmt{color:#7d93ad;} pre .hl{color:#ffd479;} pre .ok{color:#7ee0a1;}
+  pre .kw{color:#c792ea;} pre .fn{color:#82aaff;}
+
+  /* blockquote / callout */
+  blockquote{
+    margin:18px 0; padding:14px 18px; background:var(--panel);
+    border-left:4px solid var(--accent); border-radius:0 10px 10px 0;
+    color:#33414f; box-shadow:0 1px 2px rgba(20,40,80,.05);
+  }
+  blockquote p:first-child{margin-top:0}
+  blockquote p:last-child{margin-bottom:0}
+
+  .note{
+    margin:18px 0; padding:16px 18px; background:var(--accent-soft);
+    border:1px solid #d4e2ff; border-radius:var(--radius); font-size:15px; color:#2b4a73;
+  }
+  .note p{margin:6px 0}
+  .note code{background:#fff;}
+  .warn{
+    margin:18px 0; padding:14px 18px; background:var(--amber-bg);
+    border:1px solid #f3d27a; border-radius:var(--radius); font-size:15px; color:#7a4d09;
+  }
+  .warn code{background:#fff;}
+
+  /* tables */
+  .tablewrap{overflow-x:auto; margin:18px 0;}
+  table{border-collapse:collapse; width:100%; font-size:15px; background:var(--panel);
+    border-radius:10px; overflow:hidden; box-shadow:0 1px 2px rgba(20,40,80,.05);}
+  th,td{padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{background:#eef2f7; font-weight:700; color:#2b3340;}
+  tr:last-child td{border-bottom:none;}
+  td code,th code{font-size:.85em;}
+  .hl-row td{background:#fffaf0;}
+  .num-cell{font-family:var(--mono); font-variant-numeric:tabular-nums;}
+
+  /* TOC */
+  nav.toc{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 24px; margin:30px 0;
+  }
+  nav.toc h2{border:none; margin:0 0 10px; padding:0; font-size:16px; color:var(--muted);
+    letter-spacing:.04em; text-transform:uppercase;}
+  nav.toc ol{margin:0; padding-left:1.5em; columns:2; column-gap:34px;}
+  nav.toc li{margin:5px 0; break-inside:avoid;}
+  nav.toc a{color:#33414f;}
+  nav.toc .ix{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums;}
+
+  /* figures */
+  figure{margin:26px 0; padding:0;}
+  figure svg{display:block; width:100%; height:auto;}
+  .figcard{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:22px; box-shadow:0 2px 10px rgba(20,40,80,.05);
+  }
+  figcaption{font-size:13.5px; color:var(--muted); text-align:center; margin-top:12px;}
+  .fig-mono{font-family:var(--mono);}
+  .figtitle{margin:0 0 14px; font-size:14.5px; font-weight:700; color:#334155;}
+
+  /* ===== equations ===== */
+  .eqwrap{display:flex; justify-content:center; margin:22px 0;}
+  .eq{font-family:var(--mono); font-size:17px; display:inline-flex; align-items:center;
+      gap:.45em; flex-wrap:wrap; justify-content:center; background:var(--panel);
+      border:1px solid var(--line); border-radius:12px; padding:18px 24px;
+      box-shadow:0 1px 2px rgba(20,40,80,.05); color:#22303f;}
+  .eq .op{color:var(--muted); padding:0 .12em; font-size:.95em;}
+  .t-blue{color:var(--blue-ink);} .t-amber{color:var(--amber-ink);} .t-green{color:var(--green-ink);} .t-purple{color:var(--purple-ink);}
+
+  /* ===== chips / pills ===== */
+  .chip{font-family:var(--mono); font-size:13.5px; border-radius:9px; padding:6px 12px; border:1.5px solid; font-weight:600;}
+  .chip.a{background:#eff6ff; border-color:#93c5fd; color:#1e40af;}
+  .chip.b{background:#ecfdf5; border-color:#6ee7b7; color:#065f46;}
+  .chiprow{display:flex; gap:9px; flex-wrap:wrap; margin:10px 0; justify-content:center;}
+  .pill{font-family:var(--mono); font-size:12px; padding:2px 9px; border-radius:999px; font-weight:700;}
+  .pill.b1{background:var(--blue-bg); color:var(--blue-ink);}
+  .pill.b2{background:var(--green-bg); color:var(--green-ink);}
+  .pill.up{background:var(--amber-bg); color:var(--amber-ink);}
+
+  /* side nav (table of contents) */
+  .sidenav{display:none;}
+  @media (min-width:1180px){
+    .sidenav{
+      display:block; position:fixed; top:0; left:0; width:264px; height:100vh;
+      overflow-y:auto; padding:30px 16px 48px; box-sizing:border-box;
+      background:#fbfbf8; border-right:1px solid var(--line);
+    }
+    .sidenav .snav-title{
+      margin:0 0 14px; padding-left:12px; font-size:12px; font-weight:700;
+      letter-spacing:.14em; text-transform:uppercase; color:var(--muted);
+    }
+    .sidenav ol{list-style:none; margin:0; padding:0;}
+    .sidenav li{margin:1px 0;}
+    .sidenav a{
+      display:flex; gap:9px; align-items:baseline; padding:6px 11px;
+      border-radius:8px; border-left:2px solid transparent;
+      color:#475461; font-size:13.5px; line-height:1.45;
+    }
+    .sidenav a .n{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; min-width:16px; text-align:right;}
+    .sidenav a:hover{background:var(--accent-soft); text-decoration:none;}
+    .sidenav a.active{background:var(--accent-soft); color:var(--accent); font-weight:700; border-left-color:var(--accent);}
+    nav.toc{display:none;}
+    header.hero{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+    .wrap{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+  }
+
+  /* back to top */
+  .totop{
+    position:fixed; right:22px; bottom:22px; width:44px; height:44px; border-radius:50%;
+    background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center;
+    font-size:20px; box-shadow:0 4px 14px rgba(47,111,234,.4); opacity:.92; z-index:50;
+  }
+  .totop:hover{text-decoration:none; opacity:1;}
+
+  @media (max-width:640px){
+    body{font-size:16px;}
+    h1{font-size:30px;}
+    nav.toc ol{columns:1;}
+  }
+</style>
+</head>
+<body>
+<a id="top"></a>
+<!-- shared SVG defs (arrow markers) — resolved document-wide by every inline figure below -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ar" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#2f6fea"/>
+  </marker>
+  <marker id="arg" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#10b981"/>
+  </marker>
+  <marker id="arp" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#8b5cf6"/>
+  </marker>
+  <marker id="arr" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#ef4444"/>
+  </marker>
+</defs></svg>
+
+<aside class="sidenav" aria-label="目录">
+  <p class="snav-title">目录</p>
+  <ol>
+    <li><a href="#s0"><span class="n">0</span><span>结论：四级 · 深度3</span></a></li>
+    <li><a href="#s1"><span class="n">1</span><span>一个任务的四步</span></a></li>
+    <li><a href="#s2"><span class="n">2</span><span>为什么要错开</span></a></li>
+    <li><a href="#s3"><span class="n">3</span><span>四级流水主图</span></a></li>
+    <li><a href="#s4"><span class="n">4</span><span>两种读法 · 半拍</span></a></li>
+    <li><a href="#s5"><span class="n">5</span><span>四级 ≠ 深度3</span></a></li>
+    <li><a href="#s6"><span class="n">6</span><span>预热与排空</span></a></li>
+    <li><a href="#s7"><span class="n">7</span><span>中转缓冲为何 2 份</span></a></li>
+    <li><a href="#s8"><span class="n">8</span><span>四层重叠 · 怎么嵌套</span></a></li>
+    <li><a href="#s9"><span class="n">9</span><span>速查 + 总结</span></a></li>
+  </ol>
+</aside>
+
+<header class="hero">
+  <span class="kicker">昇腾流水线 · 任务分核 + 软件流水</span>
+  <h1>四级深度3流水 原理详解</h1>
+  <p class="sub">一个注意力任务要走 QK → softmax → PV → 输出 四步，两步在 Cube、两步在 Vector —— 怎么让相邻任务错开叠着跑，让四个阶段同时运转、Cube 与 Vector 都不闲。</p>
+</header>
+
+<div class="wrap">
+
+  <div class="note">
+    <p><strong>本文假设读者已熟悉昇腾的基本盘：</strong>一个核里有 <strong>1 个 Cube 单元 + 2 个 Vector 单元</strong>（1 : 2）：<strong>Cube</strong> 专做矩阵乘；<strong>两个 Vector</strong> 一起做 softmax / 归一化这类逐元素运算（一个任务的行对半分、各算一半）。Cube 与 Vector 是核内<strong>不同的执行单元、能同时开工</strong>。下文把这两个 Vector 合起来当「Vector 一侧」看。</p>
+    <p>要讲清楚的是：把一大批注意力任务分给各个核之后，<strong>每个核内部怎么用「软件流水」把这些任务错开叠着跑</strong>。这条流水有<strong>四个阶段</strong>（因此叫「四级」）、任何时刻有<strong>三个任务同时在飞</strong>（因此叫「深度 3」）。只需会分<strong>奇偶</strong>即可跟下来。</p>
+  </div>
+
+  <!-- ===================== TOC ===================== -->
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol start="0">
+      <li><span class="ix">0.</span> <a href="#s0">先说结论：四个阶段、三个任务在飞</a></li>
+      <li><span class="ix">1.</span> <a href="#s1">一个任务的四步：QK → softmax → PV → 输出</a></li>
+      <li><span class="ix">2.</span> <a href="#s2">为什么要错开：同一单元串行、Cube 与 Vector 才并行</a></li>
+      <li><span class="ix">3.</span> <a href="#s3">让 Vector 慢一拍 —— 四级流水主图</a></li>
+      <li><span class="ix">4.</span> <a href="#s4">两种读法：竖读一轮 / 斜读一个任务；前后半拍</a></li>
+      <li><span class="ix">5.</span> <a href="#s5">「四级」和「深度 3」是两个不同的数</a></li>
+      <li><span class="ix">6.</span> <a href="#s6">预热 2 轮、排空 2 轮</a></li>
+      <li><span class="ix">7.</span> <a href="#s7">中转缓冲为什么只开 2 份、不开 3 份</a></li>
+      <li><span class="ix">8.</span> <a href="#s8">四层重叠：从任务到内存，怎么层层嵌套</a></li>
+      <li><span class="ix">9.</span> <a href="#s9">一页速查 + 总结</a></li>
+    </ol>
+  </nav>
+
+  <!-- ===================== 0 ===================== -->
+  <h2 id="s0"><span class="num">0</span>先说结论：四个阶段、三个任务在飞</h2>
+  <p>把一整批注意力任务分给各个核之后，<strong>每个核要一个接一个地处理分给自己的那一批任务</strong>。一个任务不是一步算完，而是要依次走四步，前一步的结果喂给后一步：</p>
+
+  <div class="eqwrap">
+    <div class="eq" style="font-size:15.5px;">
+      <span class="t-blue">① QK 打分</span><span class="op">──▶</span>
+      <span class="t-green">② softmax</span><span class="op">──▶</span>
+      <span class="t-blue">③ PV 汇总</span><span class="op">──▶</span>
+      <span class="t-green">④ 输出整理</span>
+    </div>
+  </div>
+
+  <p>关键点有两个：<strong>①③ 在 Cube 上做、②④ 在 Vector 上做</strong>（Cube、Vector 是核内两种执行单元）；而<strong>「真正同时」只发生在 Cube 和 Vector 之间</strong> —— 同一个单元一次只能干一件事。如果老老实实「一个任务走完四步，再开下一个」，那任何时刻都只有 Cube、Vector 一方在动、另一方闲着，白白浪费一半算力。</p>
+
+  <blockquote><p><strong>办法：让相邻任务错开叠着跑。</strong>让 Vector 整体比 Cube 慢一拍，于是同一时刻 Cube 在忙<strong>这个</strong>任务、Vector 在忙<strong>上一个</strong>任务 —— 四个阶段像流水线上的四个工位一样<strong>同时运转</strong>，Cube 与 Vector 都不闲。因为一个任务从进到出要跨好几轮，<strong>任何时刻都有三个不同的任务同时「在飞」</strong>（一个刚进、一个在中间、一个快出）—— 这就是<strong>「深度 3」</strong>。</p></blockquote>
+
+  <p>「四级」= 阶段数（4 个工位），「深度 3」= 同时在飞的任务数（3 个）。下面从「一个任务的四步」讲起，一步步搭出这条流水，最后解释这两个数为什么不相等。</p>
+
+  <!-- ===================== 1 ===================== -->
+  <h2 id="s1"><span class="num">1</span>一个任务的四步：QK → softmax → PV → 输出</h2>
+
+  <p>先看单个任务要干什么。一个任务 = 给某个查询位置算注意力，它要依次走这四步，<strong>前一步的半成品交给后一步</strong>：</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>步</th><th>阶段</th><th>在哪个单元</th><th>干什么</th></tr></thead>
+    <tbody>
+      <tr><td><strong>①</strong></td><td><strong>Q</strong> · QK 打分</td><td class="t-blue"><strong>Cube</strong></td><td>查询向量和历史各词的键做矩阵乘，得到每个历史词的「相关度分数」。</td></tr>
+      <tr><td><strong>②</strong></td><td><strong>S</strong> · softmax</td><td class="t-green"><strong>Vector</strong></td><td>把一行分数归一成一组和为 1 的权重（减最大值、取 exp、除以总和）。</td></tr>
+      <tr><td><strong>③</strong></td><td><strong>P</strong> · PV 汇总</td><td class="t-blue"><strong>Cube</strong></td><td>用这组权重去加权求和历史各词的值向量，得到「加权和」。</td></tr>
+      <tr><td><strong>④</strong></td><td><strong>O</strong> · 输出整理</td><td class="t-green"><strong>Vector</strong></td><td>把加权和除以总权重归一化、转成输出精度、写回结果。</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">一个任务的四步流水线：蓝＝Cube 做，绿＝Vector 做；箭头＝半成品交接</p>
+      <svg viewBox="0 0 840 176" role="img" aria-label="一个任务依次走四步 Q S P O，Q 和 P 在 Cube、S 和 O 在 Vector，前一步结果喂给后一步">
+        <!-- Q -->
+        <rect x="26" y="60" width="150" height="64" rx="12" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.6"/>
+        <text x="101" y="86" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">① Q · QK 打分</text>
+        <text x="101" y="108" text-anchor="middle" font-size="11.5" fill="#3b82f6">Cube · 出「分数」</text>
+        <!-- arrow -->
+        <path d="M178,92 L214,92" stroke="#64748b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <!-- S -->
+        <rect x="218" y="60" width="150" height="64" rx="12" fill="#d1fae5" stroke="#10b981" stroke-width="1.6"/>
+        <text x="293" y="86" text-anchor="middle" font-size="14" font-weight="700" fill="#065f46">② S · softmax</text>
+        <text x="293" y="108" text-anchor="middle" font-size="11.5" fill="#059669">Vector · 出「权重」</text>
+        <path d="M370,92 L406,92" stroke="#64748b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <!-- P -->
+        <rect x="410" y="60" width="150" height="64" rx="12" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.6"/>
+        <text x="485" y="86" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">③ P · PV 汇总</text>
+        <text x="485" y="108" text-anchor="middle" font-size="11.5" fill="#3b82f6">Cube · 出「加权和」</text>
+        <path d="M562,92 L598,92" stroke="#64748b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <!-- O -->
+        <rect x="602" y="60" width="150" height="64" rx="12" fill="#d1fae5" stroke="#10b981" stroke-width="1.6"/>
+        <text x="677" y="86" text-anchor="middle" font-size="14" font-weight="700" fill="#065f46">④ O · 输出整理</text>
+        <text x="677" y="108" text-anchor="middle" font-size="11.5" fill="#059669">Vector · 出「结果」</text>
+        <!-- lane labels -->
+        <text x="389" y="34" text-anchor="middle" font-size="12.5" fill="#334155"><tspan fill="#1e40af" font-weight="700">①③ 在 Cube</tspan>　·　<tspan fill="#065f46" font-weight="700">②④ 在 Vector</tspan>　—— 两种单元，交替接力</text>
+        <text x="389" y="152" text-anchor="middle" font-size="12" fill="#475569">四步严格前后相依：后一步要等前一步的半成品，所以单看一个任务，这四步是<tspan font-weight="700">先后</tspan>做的、不是同时。</text>
+      </svg>
+    </div>
+    <figcaption>单个任务的四步 Q→S→P→O 交替落在 Cube 和 Vector 上。注意：<strong>只看一个任务，这四步只能先后做</strong>（后一步等前一步）—— 并行的机会要靠「不同任务错开」才挤得出来，见下一节。</figcaption>
+  </figure>
+
+  <div class="note"><p>📦 半成品放哪？Cube 和 Vector 同一时刻处理的是不同任务，一个单元算出的半成品得先<strong>放进 GM 里几块「中转区」</strong>（分数、权重、加权和各一块），另一个单元下一步再来取。后面第 7 节会讲这些中转区为什么各开「两份」。</p></div>
+
+  <!-- ===================== 2 ===================== -->
+  <h2 id="s2"><span class="num">2</span>为什么要错开：同一单元串行、Cube 与 Vector 才并行</h2>
+
+  <p>先看<strong>不</strong>错开会怎样。假设死板地「一个任务从头走到尾，再开下一个」：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">不错开（串行）：任一时刻只有一种单元在动，另一种空等 —— 一半算力白扔</p>
+      <svg viewBox="0 0 840 188" role="img" aria-label="串行做四步时，Cube 做 Q 和 P 时 Vector 空等，Vector 做 S 和 O 时 Cube 空等，任一时刻只有一种单元在忙">
+        <text x="20" y="28" font-size="12.5" font-weight="700" fill="#334155">时间 →</text>
+        <text x="96" y="80" text-anchor="end" font-size="13" font-weight="700" fill="#1e40af">Cube</text>
+        <text x="96" y="140" text-anchor="end" font-size="13" font-weight="700" fill="#065f46">Vector</text>
+        <g stroke="#eef1f5" stroke-width="1">
+          <line x1="120" y1="52" x2="120" y2="168"/><line x1="270" y1="52" x2="270" y2="168"/>
+          <line x1="420" y1="52" x2="420" y2="168"/><line x1="570" y1="52" x2="570" y2="168"/>
+          <line x1="720" y1="52" x2="720" y2="168"/>
+        </g>
+        <!-- Cube lane -->
+        <rect x="120" y="58" width="150" height="40" rx="7" fill="#dbeafe" stroke="#3b82f6"/><text x="195" y="83" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">Q（任务1）</text>
+        <rect x="270" y="58" width="150" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="345" y="83" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="420" y="58" width="150" height="40" rx="7" fill="#dbeafe" stroke="#3b82f6"/><text x="495" y="83" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">P（任务1）</text>
+        <rect x="570" y="58" width="150" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="645" y="83" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <!-- Vector lane -->
+        <rect x="120" y="118" width="150" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="195" y="143" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="270" y="118" width="150" height="40" rx="7" fill="#d1fae5" stroke="#10b981"/><text x="345" y="143" text-anchor="middle" font-size="12" fill="#065f46" font-weight="700">S（任务1）</text>
+        <rect x="420" y="118" width="150" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="495" y="143" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="570" y="118" width="150" height="40" rx="7" fill="#d1fae5" stroke="#10b981"/><text x="645" y="143" text-anchor="middle" font-size="12" fill="#065f46" font-weight="700">O（任务1）</text>
+        <text x="420" y="182" text-anchor="middle" font-size="12" fill="#b91c1c" font-weight="700">Q→S→P→O 一步接一步，Cube 与 Vector 轮流干活、总有一个在空等 —— 吞吐只有一半。</text>
+      </svg>
+    </div>
+    <figcaption>串行的浪费很直观：<strong>Cube 做 Q、P 时 Vector 闲，Vector 做 S、O 时 Cube 闲</strong>。根子在于同一个任务的四步前后相依、必须先后做。</figcaption>
+  </figure>
+
+  <p>要消掉这些空等，得给闲着的单元找活干。而它唯一能同时干的，是<strong>别的任务</strong>的活 —— 因为同一个任务的相邻两步有先后依赖，不同任务之间却<strong>互不依赖</strong>。于是思路就来了：</p>
+
+  <blockquote><p>当 Cube 在给<strong>任务 <code>j</code></strong> 做 Q 时，让 Vector 同时给<strong>另一个任务</strong>做它的 S；当 Cube 转去做 P 时，让 Vector 去做<strong>又一个任务</strong>的 O。每一刻凑成一对「Cube 干一件 ‖ Vector 干另一件」，而这一对分属<strong>不同任务、互不依赖</strong>，才能真正同时跑。要凑成这种对子，就得让相邻任务在时间上<strong>错开</strong>。</p></blockquote>
+
+  <div class="note"><p>🔑 一句话记住：<strong>并行只发生在 Cube 与 Vector「之间」，且必须是不同任务</strong>。同一个单元内部（比如 Cube 的 Q 和 P）永远是先后做的，不是同时。</p></div>
+
+  <!-- ===================== 3 ===================== -->
+  <h2 id="s3"><span class="num">3</span>让 Vector 慢一拍 —— 四级流水主图</h2>
+
+  <p>把「错开」落实成一句话：<strong>让 Vector 整体比 Cube 慢一拍</strong>，处理的永远是 Cube 上一轮已经备好的半成品。这样一排，四个阶段就同时转起来了。先定义「一轮」：</p>
+  <blockquote><p><strong>「一轮」= 处理循环往前迭代一次。</strong>注意关键：<strong>一轮里推进的不是一个任务的一步，而是四个工位各推进一个<em>不同</em>任务</strong>。下面这张表，一列 = 一轮（往右是时间），格子里填「该轮这个工位正在处理第几号任务」：</p></blockquote>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">四级流水主图：一列＝一轮；蓝行＝Cube 干，绿行＝Vector 干；格子＝该轮该工位在做几号任务</p>
+      <svg viewBox="0 0 840 372" role="img" aria-label="四级流水表：四行 Q S P O，Q 做任务 r，S 和 P 做任务 r 减 1，O 做任务 r 减 2，每一列有三个不同任务号即深度 3">
+        <!-- column headers -->
+        <text x="92" y="44" text-anchor="middle" font-size="12.5" font-weight="700" fill="#334155">工位 ＼ 轮</text>
+        <text x="252" y="44" text-anchor="middle" font-size="13" font-weight="700" fill="#475569">第 3 轮</text>
+        <text x="404" y="44" text-anchor="middle" font-size="13" font-weight="700" fill="#475569">第 4 轮</text>
+        <text x="556" y="44" text-anchor="middle" font-size="13" font-weight="700" fill="#475569">第 5 轮</text>
+        <text x="708" y="44" text-anchor="middle" font-size="13" font-weight="700" fill="#475569">第 6 轮</text>
+        <!-- highlight round 4 column -->
+        <rect x="328" y="54" width="152" height="254" rx="10" fill="#fff7ed" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6 4"/>
+        <!-- rows -->
+        <!-- Q row -->
+        <text x="150" y="88" text-anchor="end" font-size="12.5" font-weight="700" fill="#1e40af">Q · QK打分</text>
+        <text x="150" y="104" text-anchor="end" font-size="10.5" fill="#3b82f6">Cube</text>
+        <rect x="192" y="66" width="120" height="42" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="252" y="93" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">任务 3</text>
+        <rect x="344" y="66" width="120" height="42" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="404" y="93" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">任务 4</text>
+        <rect x="496" y="66" width="120" height="42" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="556" y="93" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">任务 5</text>
+        <rect x="648" y="66" width="120" height="42" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="708" y="93" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">任务 6</text>
+        <!-- S row -->
+        <text x="150" y="152" text-anchor="end" font-size="12.5" font-weight="700" fill="#065f46">S · softmax</text>
+        <text x="150" y="168" text-anchor="end" font-size="10.5" fill="#059669">Vector</text>
+        <rect x="192" y="130" width="120" height="42" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="252" y="157" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">任务 2</text>
+        <rect x="344" y="130" width="120" height="42" rx="8" fill="#a7f3d0" stroke="#10b981" stroke-width="2"/><text x="404" y="157" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">任务 3</text>
+        <rect x="496" y="130" width="120" height="42" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="556" y="157" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">任务 4</text>
+        <rect x="648" y="130" width="120" height="42" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="708" y="157" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">任务 5</text>
+        <!-- P row -->
+        <text x="150" y="216" text-anchor="end" font-size="12.5" font-weight="700" fill="#1e40af">P · PV汇总</text>
+        <text x="150" y="232" text-anchor="end" font-size="10.5" fill="#3b82f6">Cube</text>
+        <rect x="192" y="194" width="120" height="42" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="252" y="221" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">任务 2</text>
+        <rect x="344" y="194" width="120" height="42" rx="8" fill="#bfdbfe" stroke="#3b82f6" stroke-width="2"/><text x="404" y="221" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">任务 3</text>
+        <rect x="496" y="194" width="120" height="42" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="556" y="221" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">任务 4</text>
+        <rect x="648" y="194" width="120" height="42" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="708" y="221" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">任务 5</text>
+        <!-- O row -->
+        <text x="150" y="280" text-anchor="end" font-size="12.5" font-weight="700" fill="#065f46">O · 输出整理</text>
+        <text x="150" y="296" text-anchor="end" font-size="10.5" fill="#059669">Vector</text>
+        <rect x="192" y="258" width="120" height="42" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="252" y="285" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">任务 1</text>
+        <rect x="344" y="258" width="120" height="42" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="404" y="285" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">任务 2</text>
+        <rect x="496" y="258" width="120" height="42" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="556" y="285" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">任务 3</text>
+        <rect x="648" y="258" width="120" height="42" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="708" y="285" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">任务 4</text>
+        <!-- bottom note -->
+        <text x="404" y="332" text-anchor="middle" font-size="12" fill="#92400e" font-weight="700">竖看第 4 轮：任务 4、3、2 —— 三个不同任务同时在飞 ＝ 深度 3</text>
+        <text x="428" y="360" text-anchor="middle" font-size="11.5" fill="#475569">规律：第 r 轮里 Q 做任务 r、S 和 P 做任务 r−1、O 做任务 r−2（Vector 比 Cube 慢一拍）。</text>
+      </svg>
+    </div>
+    <figcaption>这张表是全篇的核心。<strong>四行四个工位同一轮都在忙，但各自服务不同任务</strong> —— 这就是四级流水同时运转、Cube 与 Vector 都不闲。竖看任意一列（如第 4 轮）里出现三个不同任务号，就是「深度 3」。</figcaption>
+  </figure>
+
+  <p>先记住这条<strong>错位规律</strong>：第 <code>r</code> 轮里，<strong>Q 做任务 <code>r</code>、S 和 P 做任务 <code>r−1</code>、O 做任务 <code>r−2</code></strong>。Vector 那两行（S、O）永远比 Cube 慢，处理的都是前面轮次早已备好的数据，所以从不停下等 —— 吞吐拉满。</p>
+
+  <!-- ===================== 4 ===================== -->
+  <h2 id="s4"><span class="num">4</span>两种读法：竖读一轮 / 斜读一个任务；前后半拍</h2>
+
+  <p>同一张表有两种读法，各回答一个问题。</p>
+
+  <h3>4.1 竖读一列 = 这一轮同时干的四件事</h3>
+  <p>竖着读第 4 轮那一列：<strong>Q=任务4、S=任务3、P=任务3、O=任务2</strong>。四个工位同一轮都在忙，服务三个不同任务。再把这一轮切成<strong>前后两个半拍</strong>，每半拍恰好是一对「Cube ‖ Vector」的真并行：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">把第 4 轮切成前后半拍：每半拍是一对 Cube ‖ Vector，各做不同任务 → 真并行</p>
+      <svg viewBox="0 0 840 220" role="img" aria-label="第 4 轮分前后半拍，前半拍 Cube 做任务 4 的 Q 同时 Vector 做任务 3 的 S，后半拍 Cube 做任务 3 的 P 同时 Vector 做任务 2 的 O">
+        <!-- first half -->
+        <text x="228" y="34" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">前半拍</text>
+        <rect x="70" y="48" width="316" height="64" rx="12" fill="#fbfdff" stroke="#c7d2fe"/>
+        <rect x="84" y="60" width="140" height="40" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="154" y="79" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">Cube：Q</text><text x="154" y="94" text-anchor="middle" font-size="10.5" fill="#3b82f6">任务 4</text>
+        <text x="238" y="85" text-anchor="middle" font-size="15" font-weight="700" fill="#10b981">‖</text>
+        <rect x="252" y="60" width="122" height="40" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="313" y="79" text-anchor="middle" font-size="12" font-weight="700" fill="#065f46">Vector：S</text><text x="313" y="94" text-anchor="middle" font-size="10.5" fill="#059669">任务 3</text>
+        <!-- second half -->
+        <text x="612" y="34" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">后半拍</text>
+        <rect x="454" y="48" width="316" height="64" rx="12" fill="#fbfdff" stroke="#c7d2fe"/>
+        <rect x="468" y="60" width="140" height="40" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="538" y="79" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">Cube：P</text><text x="538" y="94" text-anchor="middle" font-size="10.5" fill="#3b82f6">任务 3</text>
+        <text x="622" y="85" text-anchor="middle" font-size="15" font-weight="700" fill="#10b981">‖</text>
+        <rect x="636" y="60" width="122" height="40" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="697" y="79" text-anchor="middle" font-size="12" font-weight="700" fill="#065f46">Vector：O</text><text x="697" y="94" text-anchor="middle" font-size="10.5" fill="#059669">任务 2</text>
+        <!-- S->P relay note -->
+        <path d="M313,104 C 313,150 538,150 538,104" fill="none" stroke="#8b5cf6" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arp)"/>
+        <text x="426" y="146" text-anchor="middle" font-size="11.5" fill="#5b21b6" font-weight="700">任务 3：前半拍刚算出的 S，后半拍紧接着拿去算 P（S→P 接力）</text>
+        <text x="420" y="184" text-anchor="middle" font-size="12" fill="#475569">每半拍里 Cube 那件和 Vector 那件<tspan font-weight="700">分属不同任务、互不依赖</tspan>，才能真正同时跑。</text>
+        <text x="420" y="206" text-anchor="middle" font-size="11.5" fill="#5b21b6">而任务 3 在这一轮内走完自己的第②③步（S 前半拍、P 后半拍）—— 所以它被叫作这一轮的「当前」任务。</text>
+      </svg>
+    </div>
+    <figcaption>一轮内的两对真并行：<strong>前半拍 Cube 做任务 4 的 Q ‖ Vector 做任务 3 的 S；后半拍 Cube 做任务 3 的 P ‖ Vector 做任务 2 的 O</strong>。每对都是「不同任务、互不依赖」才能同时。顺带：任务 3 的 S 和 P 都在这一轮（先后半拍），是它前后脚的两步、不是同时。</figcaption>
+  </figure>
+
+  <h3>4.2 斜读追一个任务 = 它自己的 Q→S→P→O</h3>
+  <p>换一种读法：在表里跟着<strong>同一个任务号</strong>走。盯住<strong>任务 3</strong>：它在<strong>第 3 轮做 Q → 第 4 轮做 S → 还是第 4 轮做 P → 第 5 轮做 O</strong>，一路沿对角线往右下角走。这也点破一个容易迷惑的地方：<strong>任务 3 的 S 和 P 都落在第 4 轮</strong>（S 前半拍、P 后半拍），它俩是同一个任务前后脚的两步（S 先算好、P 再用它的结果），<strong>不是同时</strong>。</p>
+
+  <div class="note"><p>🧭 两种读法别混：<strong>竖读一列</strong>回答「这一轮四个工位在同时忙什么」（不同任务）；<strong>斜读一条对角线</strong>回答「某一个任务是怎么一步步走完的」（同一任务）。竖看到的「同时」是真并行；斜看到的「相邻」是先后依赖。</p></div>
+
+  <!-- ===================== 5 ===================== -->
+  <h2 id="s5"><span class="num">5</span>「四级」和「深度 3」是两个不同的数</h2>
+
+  <p>普通流水线里，<strong>阶段数 = 同时在飞的任务数</strong>（有几个工位就有几个任务各占一个）。可这里偏偏是<strong>四级、深度 3</strong> —— 少了 1。原因就在上一节那个细节：</p>
+
+  <blockquote><p><strong>一个任务的 S 和 P 被挤进了同一轮</strong>（S 前半拍、P 后半拍）。于是一个任务从 Q 到 O，本该跨 4 轮，实际只跨 <strong>3 轮</strong>就走完 —— 四个阶段只占了三轮的宽度。</p></blockquote>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">追任务 3：四个阶段，却只跨 3 轮 —— 因为 S、P 挤在第 4 轮</p>
+      <svg viewBox="0 0 840 210" role="img" aria-label="任务 3 的四个阶段占三轮：第 3 轮 Q，第 4 轮同时排 S 和 P，第 5 轮 O，所以 4 个阶段只跨 3 轮">
+        <text x="150" y="40" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">第 3 轮</text>
+        <text x="410" y="40" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">第 4 轮</text>
+        <text x="670" y="40" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">第 5 轮</text>
+        <g stroke="#e5e9ef" stroke-width="1"><line x1="280" y1="52" x2="280" y2="150"/><line x1="540" y1="52" x2="540" y2="150"/></g>
+        <!-- round 3: Q -->
+        <rect x="40" y="70" width="220" height="60" rx="10" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.6"/>
+        <text x="150" y="96" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">① Q · QK打分</text>
+        <text x="150" y="116" text-anchor="middle" font-size="11" fill="#3b82f6">Cube</text>
+        <!-- round 4: S then P stacked -->
+        <rect x="300" y="62" width="220" height="34" rx="8" fill="#d1fae5" stroke="#10b981" stroke-width="1.6"/><text x="410" y="84" text-anchor="middle" font-size="12" font-weight="700" fill="#065f46">② S（前半拍 · Vector）</text>
+        <rect x="300" y="104" width="220" height="34" rx="8" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.6"/><text x="410" y="126" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">③ P（后半拍 · Cube）</text>
+        <!-- round 5: O -->
+        <rect x="560" y="70" width="220" height="60" rx="10" fill="#d1fae5" stroke="#10b981" stroke-width="1.6"/>
+        <text x="670" y="96" text-anchor="middle" font-size="13" font-weight="700" fill="#065f46">④ O · 输出整理</text>
+        <text x="670" y="116" text-anchor="middle" font-size="11" fill="#059669">Vector</text>
+        <text x="410" y="176" text-anchor="middle" font-size="12.5" fill="#b91c1c" font-weight="700">4 个阶段，却只占了 3 轮 —— 因为第 4 轮里 S、P 前后半拍接力、共用一轮。</text>
+        <text x="410" y="198" text-anchor="middle" font-size="11.5" fill="#475569">所以「同时在飞」的任务数比「阶段数」少 1：四级 → 深度 3。</text>
+      </svg>
+    </div>
+    <figcaption>四个阶段被压进三轮：Q 占第 3 轮、S 与 P 合占第 4 轮、O 占第 5 轮。一个任务只在流水里停留 3 轮，所以任何时刻只需 3 个任务就填满流水。</figcaption>
+  </figure>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>名词</th><th>数</th><th>指的是</th></tr></thead>
+    <tbody>
+      <tr><td><strong>四级</strong></td><td class="num-cell">4</td><td>阶段（工位）数：Q / S / P / O 四个工位，一轮里全都在忙。</td></tr>
+      <tr class="hl-row"><td><strong>深度 3</strong></td><td class="num-cell">3</td><td>同时在飞的任务数：任一轮里出现 3 个不同任务号（一个在做 Q、一个在做 S/P、一个在做 O）。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>两者本该相等，这里因为 <strong>S、P 并到一轮</strong>而恰好差 1 —— 所以「四级」和「深度 3」不矛盾，是两个不同的量。</p>
+
+  <!-- ===================== 6 ===================== -->
+  <h2 id="s6"><span class="num">6</span>预热 2 轮、排空 2 轮</h2>
+
+  <p>流水线要「满负荷」，前提是四个工位都填上了任务。可最开始没那么多任务在飞，末尾也会有任务陆续走完 —— 于是流水两头各有一小段没填满：</p>
+  <ul>
+    <li><strong>预热（开头）</strong>：头几轮里，后面的工位还没等到数据。第 1 轮只有 Q 有活（任务 1），S/P/O 都还没料；第 2 轮才轮到 S/P…… 要<strong>2 轮</strong>才把前几个任务陆续喂满四个工位。</li>
+    <li><strong>排空（结尾）</strong>：最后一个任务做完 Q 之后，还得再跑<strong>2 轮</strong>，把它和它前一个任务剩下的 S/P/O 做完。</li>
+  </ul>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">两头各有一小段没填满：预热 2 轮把任务喂进去，中间满负荷，排空 2 轮把尾巴做完</p>
+      <svg viewBox="0 0 840 200" role="img" aria-label="流水线时间轴：开头两轮预热逐渐填满，中间稳定满负荷四工位全忙，结尾两轮排空逐渐清空">
+        <!-- three phases -->
+        <rect x="40" y="52" width="150" height="96" rx="12" fill="#fef3c7" stroke="#f59e0b"/>
+        <text x="115" y="42" text-anchor="middle" font-size="12.5" font-weight="700" fill="#92400e">预热 · 2 轮</text>
+        <text x="115" y="90" text-anchor="middle" font-size="11.5" fill="#b45309">工位陆续填上</text>
+        <text x="115" y="112" text-anchor="middle" font-size="11.5" fill="#b45309">还没满负荷</text>
+        <rect x="210" y="52" width="420" height="96" rx="12" fill="#d1fae5" stroke="#10b981"/>
+        <text x="420" y="42" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">稳定期 · 满负荷</text>
+        <text x="420" y="90" text-anchor="middle" font-size="12" fill="#065f46">四个工位全忙、Cube 与 Vector 都不闲</text>
+        <text x="420" y="112" text-anchor="middle" font-size="11.5" fill="#059669">每轮吞掉一个新任务，这段越长、整体越划算</text>
+        <rect x="650" y="52" width="150" height="96" rx="12" fill="#fef3c7" stroke="#f59e0b"/>
+        <text x="725" y="42" text-anchor="middle" font-size="12.5" font-weight="700" fill="#92400e">排空 · 2 轮</text>
+        <text x="725" y="90" text-anchor="middle" font-size="11.5" fill="#b45309">把最后两个</text>
+        <text x="725" y="112" text-anchor="middle" font-size="11.5" fill="#b45309">任务的尾巴做完</text>
+        <path d="M40,168 L800,168" stroke="#94a3b8" stroke-width="1.4" marker-end="url(#ar)"/>
+        <text x="420" y="190" text-anchor="middle" font-size="11.5" fill="#475569">预热 + 排空各 = 深度 − 1 = 2 轮；这是重叠流水必付的固定小代价，任务越多、越可忽略。</text>
+      </svg>
+    </div>
+    <figcaption>重叠流水的固定小代价：<strong>开头预热 2 轮、结尾排空 2 轮</strong>（都等于「深度 − 1」）。中间的稳定期越长（任务越多），这点两头开销就越可忽略。</figcaption>
+  </figure>
+
+  <!-- ===================== 7 ===================== -->
+  <h2 id="s7"><span class="num">7</span>中转缓冲为什么只开 2 份、不开 3 份</h2>
+
+  <p>回到第 1 节留的尾巴：Cube 和 Vector 交接半成品，靠 GM 里几块<strong>中转区</strong>（分数、权重、加权和各一块）。因为 Vector 慢一拍，<strong>当「新任务往某块中转区写」时，「上一个任务对它的读」可能还没读完</strong> —— 直接覆盖就出错。办法是每块中转区都开<strong>两份</strong>，按<strong>任务号的奇偶</strong>轮流用（这叫双缓冲 / 乒乓）：任务 <code>t</code> 用第 <code>t%2</code> 份。</p>
+
+  <p>可流水明明有 <strong>3 个任务在飞</strong>，为什么每块中转区只开 <strong>2 份</strong>就够、不用 3 份？拿其中一块 —— 存 QK 分数的那块 —— 实际走一遍最清楚。它由 <strong>Cube 在 Q 阶段写</strong>、由 <strong>Vector 在 S 阶段读</strong>；开 2 个槽，任务 <code>t</code> 用第 <code>t%2</code> 个槽：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">分数中转区两个槽：一列＝一轮；W(t)＝写入任务 t 的分数，R(t)＝读它做 softmax，·＝该轮空着</p>
+      <svg viewBox="0 0 840 224" role="img" aria-label="分数中转区两个槽的时间表：槽 0 在第 0 轮写任务 0、第 1 轮读任务 0、第 2 轮才又写任务 2；任一轮总是一个槽在写、另一个在读，不冲突">
+        <!-- round headers -->
+        <text x="96" y="52" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">槽 ＼ 轮</text>
+        <text x="222" y="52" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">0</text>
+        <text x="326" y="52" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">1</text>
+        <text x="430" y="52" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">2</text>
+        <text x="534" y="52" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">3</text>
+        <text x="638" y="52" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">4</text>
+        <text x="742" y="52" text-anchor="middle" font-size="12.5" font-weight="700" fill="#475569">5</text>
+        <!-- slot 0 row -->
+        <text x="150" y="90" text-anchor="end" font-size="12.5" font-weight="700" fill="#334155">槽 0</text>
+        <rect x="180" y="70" width="84" height="38" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="222" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">W(0)</text>
+        <rect x="284" y="70" width="84" height="38" rx="7" fill="#dbeafe" stroke="#3b82f6"/><text x="326" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">R(0)</text>
+        <rect x="388" y="70" width="84" height="38" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="430" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">W(2)</text>
+        <rect x="492" y="70" width="84" height="38" rx="7" fill="#dbeafe" stroke="#3b82f6"/><text x="534" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">R(2)</text>
+        <rect x="596" y="70" width="84" height="38" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="638" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">W(4)</text>
+        <rect x="700" y="70" width="84" height="38" rx="7" fill="#dbeafe" stroke="#3b82f6"/><text x="742" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">R(4)</text>
+        <!-- slot 1 row -->
+        <text x="150" y="140" text-anchor="end" font-size="12.5" font-weight="700" fill="#334155">槽 1</text>
+        <rect x="180" y="120" width="84" height="38" rx="7" fill="#f4f6f8" stroke="#d7dde5" stroke-dasharray="4 3"/><text x="222" y="144" text-anchor="middle" font-size="12" fill="#9aa4b0">·</text>
+        <rect x="284" y="120" width="84" height="38" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="326" y="144" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">W(1)</text>
+        <rect x="388" y="120" width="84" height="38" rx="7" fill="#dbeafe" stroke="#3b82f6"/><text x="430" y="144" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">R(1)</text>
+        <rect x="492" y="120" width="84" height="38" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="534" y="144" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">W(3)</text>
+        <rect x="596" y="120" width="84" height="38" rx="7" fill="#dbeafe" stroke="#3b82f6"/><text x="638" y="144" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">R(3)</text>
+        <rect x="700" y="120" width="84" height="38" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="742" y="144" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">W(5)</text>
+        <!-- legend -->
+        <rect x="220" y="178" width="16" height="14" rx="3" fill="#fef3c7" stroke="#f59e0b"/><text x="244" y="190" font-size="11.5" fill="#475569">W = Cube 写入</text>
+        <rect x="360" y="178" width="16" height="14" rx="3" fill="#dbeafe" stroke="#3b82f6"/><text x="384" y="190" font-size="11.5" fill="#475569">R = Vector 读走</text>
+        <text x="420" y="214" text-anchor="middle" font-size="12" fill="#065f46" font-weight="700">每一轮总是「一个槽在写、另一个槽在读」—— 永远落在不同槽，不打架。</text>
+      </svg>
+    </div>
+    <figcaption>盯住<strong>槽 0</strong>：第 0 轮写 W(0) → 第 1 轮读 R(0) → 第 2 轮才又写 W(2)。<strong>「再写」比「上一次读」整整晚一轮</strong>，覆盖它时上一次的读早已结束 —— 这正是「2 份就够」的根本原因。</figcaption>
+  </figure>
+
+  <p>为什么 2 份够、3 份多余，三句话说清：</p>
+  <ul>
+    <li><strong>竖看任意一轮</strong>（第 1 轮起）：总是一个槽在写、另一个槽在读，两件事永远落在不同槽 → 不打架。</li>
+    <li><strong>谁和谁共用一个槽</strong>：是任务 <code>t</code> 与 <code>t+2</code>（都用 <code>t%2</code>），它俩相差 2 轮、错得开；夹在中间的 <code>t+1</code> 用的是另一个槽。所以任何时刻最多 2 个任务碰这块中转区，2 份足矣。</li>
+    <li><strong>反证只开 1 份</strong>：第 1 轮就得「一边写任务 1、一边读任务 0」到同一个槽 → 撞车。所以至少要 2 份。</li>
+  </ul>
+
+  <div class="note"><p>💡 「深度 3」和「缓冲 2 份」不矛盾：深度 3 是<strong>整条流水</strong>同时在飞的任务数；而<strong>每一块</strong>中转区只被<strong>相邻的两个任务</strong>（写者与读者）碰到 —— 第三个在飞的任务此刻在忙<strong>别的</strong>中转区。所以每块各 2 份就够。</p></div>
+
+  <!-- ===================== 8 ===================== -->
+  <h2 id="s8"><span class="num">8</span>四层重叠：从任务到内存，怎么层层嵌套</h2>
+
+  <p>本文讲的四级深度3流水，只是这个算子里<strong>最外面一层</strong>的重叠。同一个「让搬 / 算并行、别干等」的思路，其实在<strong>四个层级</strong>上各套了一遍 —— 从最外的「整批任务在两个计算单元间错开」，一路套进最里的「每一跳内存搬运都藏进矩阵乘背后」。先看它们怎么嵌在一起：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">嵌套关系：① 是最外层（跨计算单元）；放大 Cube 的一次矩阵乘，里面 ②③④ 分处三跳内存搬运</p>
+      <svg viewBox="0 0 840 352" role="img" aria-label="嵌套关系图：最外层是任务级流水让 Cube 与 Vector 并行；放大 Cube 的一次矩阵乘，内部数据从 GM 搬到 L1 到 L0 做 mma 到 L0C 再写出，KV 三槽环在 GM 到 L1 一跳、L0AB 双缓冲在 L1 到 L0 一跳、L0C 结果双缓冲在 L0C 写出一跳">
+        <text x="24" y="26" font-size="13" font-weight="700" fill="#334155">① 任务级流水（本文主角）· 最外层：横跨 Cube 与 Vector 两个计算单元</text>
+        <rect x="110" y="42" width="284" height="42" rx="9" fill="#dbeafe" stroke="#3b82f6"/>
+        <text x="252" y="60" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">Cube 算：Q / P（矩阵乘）</text>
+        <text x="252" y="77" text-anchor="middle" font-size="10.5" fill="#3b82f6">放大这一次矩阵乘 ↓</text>
+        <text x="405" y="68" text-anchor="middle" font-size="16" font-weight="700" fill="#10b981">‖</text>
+        <rect x="420" y="42" width="284" height="42" rx="9" fill="#d1fae5" stroke="#10b981"/>
+        <text x="562" y="67" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">Vector 算：S / O（逐元素）</text>
+        <text x="407" y="104" text-anchor="middle" font-size="11.5" fill="#475569">同一时刻两个计算单元都在算（各服务不同任务）—— 就是本文讲的四级深度3流水。</text>
+        <path d="M252,112 L252,150" stroke="#8b5cf6" stroke-width="2.5" marker-end="url(#arp)"/>
+        <text x="268" y="135" font-size="11.5" fill="#5b21b6" font-weight="700">放大 Cube 的一次矩阵乘，看它内部怎么搬数据</text>
+        <line x1="20" y1="162" x2="820" y2="162" stroke="#e5e9ef" stroke-width="1"/>
+        <text x="24" y="186" font-size="13" font-weight="700" fill="#334155">Cube 一次矩阵乘的内部：数据从 GM 一路搬到算完写出，每一跳都做重叠</text>
+        <text x="167" y="214" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">② KV 三槽环</text>
+        <text x="353" y="214" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">③ L0AB 双缓冲</text>
+        <text x="711" y="214" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">④ L0C 结果双缓冲</text>
+        <rect x="24" y="234" width="104" height="52" rx="10" fill="#ede9fe" stroke="#8b5cf6"/><text x="76" y="256" text-anchor="middle" font-size="12.5" font-weight="700" fill="#5b21b6">GM</text><text x="76" y="274" text-anchor="middle" font-size="10.5" fill="#7c3aed">显存</text>
+        <rect x="210" y="234" width="104" height="52" rx="10" fill="#f5f3ff" stroke="#a78bfa"/><text x="262" y="256" text-anchor="middle" font-size="12.5" font-weight="700" fill="#5b21b6">L1</text><text x="262" y="274" text-anchor="middle" font-size="10.5" fill="#7c3aed">片上</text>
+        <rect x="396" y="234" width="104" height="52" rx="10" fill="#dbeafe" stroke="#3b82f6"/><text x="448" y="256" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">L0A / L0B</text><text x="448" y="274" text-anchor="middle" font-size="10.5" fill="#3b82f6">乘法操作数</text>
+        <rect x="582" y="234" width="104" height="52" rx="10" fill="#eef2f7" stroke="#94a3b8"/><text x="634" y="256" text-anchor="middle" font-size="12.5" font-weight="700" fill="#334155">L0C</text><text x="634" y="274" text-anchor="middle" font-size="10.5" fill="#475569">放结果</text>
+        <rect x="740" y="234" width="90" height="52" rx="10" fill="#eef2f7" stroke="#94a3b8"/><text x="785" y="256" text-anchor="middle" font-size="11.5" font-weight="700" fill="#334155">中转区</text><text x="785" y="274" text-anchor="middle" font-size="10.5" fill="#475569">交给下游</text>
+        <path d="M128,260 L206,260" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M314,260 L392,260" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <text x="539" y="250" text-anchor="middle" font-size="10.5" font-weight="700" fill="#1e40af">mma</text>
+        <path d="M500,260 L578,260" stroke="#2f6fea" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M686,260 L736,260" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <text x="167" y="306" text-anchor="middle" font-size="10.5" fill="#b45309">搬 K/V ‖ 算</text>
+        <text x="353" y="306" text-anchor="middle" font-size="10.5" fill="#b45309">上料 ‖ 算</text>
+        <text x="711" y="306" text-anchor="middle" font-size="10.5" fill="#b45309">搬出 ‖ 下次算</text>
+        <text x="420" y="336" text-anchor="middle" font-size="11.5" fill="#475569">②③④ 都在「一次矩阵乘」内部：把每一跳的「搬」藏进「算」背后，让 Cube 不停下等内存。</text>
+      </svg>
+    </div>
+    <figcaption>一张图看清嵌套：<strong>① 任务级流水</strong>在最外层，让 Cube ‖ Vector 两个计算单元并行；放大它的一个 Cube 阶段（一次矩阵乘），内部数据 <code>GM→L1→L0→L0C→中转区</code> 每一跳都有一套重叠 —— <strong>② KV 三槽环</strong>管 <code>GM→L1</code>、<strong>③ L0AB 双缓冲</strong>管 <code>L1→L0</code>、<strong>④ L0C 结果双缓冲</strong>管结果搬出。</figcaption>
+  </figure>
+
+  <p>看懂嵌套，再逐层看<strong>每一层各让哪两件事并行、各消掉了谁的等待</strong>（上下两条并排 = 同时进行）：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">每一层都让两件事并行：① 是两个算力单元并行；②③④ 是把「搬」藏进「算」背后</p>
+      <svg viewBox="0 0 840 316" role="img" aria-label="四层重叠各自让哪两件事并行：任务级流水让 Vector 算与 Cube 算并行；KV 三槽环让搬 K/V 与 Cube 算 mma 并行；L0AB 双缓冲让 L1 到 L0 上料与 mma 并行；L0C 结果双缓冲让结果搬出与下一次 mma 并行">
+        <text x="20" y="22" font-size="12" font-weight="700" fill="#334155">每一层都让两件事并行（上下两条 = 同时进行）：① 两个算力单元并行；②③④ 把「搬」藏进「算」背后</text>
+        <!-- row 1 -->
+        <text x="18" y="66" font-size="12.5" font-weight="700" fill="#1e40af">① 任务级流水</text>
+        <text x="18" y="83" font-size="10.5" fill="#64748b">跨 Cube / Vector</text>
+        <rect x="200" y="46" width="398" height="24" rx="6" fill="#d1fae5" stroke="#10b981"/><text x="399" y="63" text-anchor="middle" font-size="11.5" font-weight="700" fill="#065f46">Vector 算 S / O</text>
+        <rect x="200" y="72" width="398" height="24" rx="6" fill="#dbeafe" stroke="#3b82f6"/><text x="399" y="89" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1e40af">Cube 算 Q / P</text>
+        <text x="614" y="76" font-size="11.5" fill="#065f46" font-weight="700">两个算力单元都不空等</text>
+        <!-- row 2 -->
+        <text x="18" y="134" font-size="12.5" font-weight="700" fill="#92400e">② KV 三槽环</text>
+        <text x="18" y="151" font-size="10.5" fill="#64748b">GM→L1</text>
+        <rect x="200" y="114" width="398" height="24" rx="6" fill="#fef3c7" stroke="#f59e0b"/><text x="399" y="131" text-anchor="middle" font-size="11.5" font-weight="700" fill="#92400e">搬 K/V：GM → L1</text>
+        <rect x="200" y="140" width="398" height="24" rx="6" fill="#dbeafe" stroke="#3b82f6"/><text x="399" y="157" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1e40af">Cube 算 mma</text>
+        <text x="614" y="144" font-size="11.5" fill="#b45309" font-weight="700">Cube 不等 GM 搬数据</text>
+        <!-- row 3 -->
+        <text x="18" y="202" font-size="12.5" font-weight="700" fill="#92400e">③ L0AB 双缓冲</text>
+        <text x="18" y="219" font-size="10.5" fill="#64748b">L1→L0</text>
+        <rect x="200" y="182" width="398" height="24" rx="6" fill="#fef3c7" stroke="#f59e0b"/><text x="399" y="199" text-anchor="middle" font-size="11.5" font-weight="700" fill="#92400e">上料：L1 → L0</text>
+        <rect x="200" y="208" width="398" height="24" rx="6" fill="#dbeafe" stroke="#3b82f6"/><text x="399" y="225" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1e40af">mma</text>
+        <text x="614" y="212" font-size="11.5" fill="#b45309" font-weight="700">mma 不等 L1 上料</text>
+        <!-- row 4 -->
+        <text x="18" y="270" font-size="12.5" font-weight="700" fill="#92400e">④ L0C 结果双缓冲</text>
+        <text x="18" y="287" font-size="10.5" fill="#64748b">L0C→外</text>
+        <rect x="200" y="250" width="398" height="24" rx="6" fill="#fef3c7" stroke="#f59e0b"/><text x="399" y="267" text-anchor="middle" font-size="11.5" font-weight="700" fill="#92400e">搬出：L0C → 中转区</text>
+        <rect x="200" y="276" width="398" height="24" rx="6" fill="#dbeafe" stroke="#3b82f6"/><text x="399" y="293" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1e40af">下一次 mma</text>
+        <text x="614" y="280" font-size="11.5" fill="#b45309" font-weight="700">下次算不等结果搬走</text>
+      </svg>
+    </div>
+    <figcaption>四层各让两件事并行：<strong>①</strong> 让两个<strong>计算单元</strong>都不闲（Cube 算 ‖ Vector 算）；<strong>②③④</strong> 各把一跳内存搬运<strong>藏进矩阵乘背后</strong>（搬 ‖ 算），让 Cube 不停下等内存。</figcaption>
+  </figure>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>#</th><th>机制</th><th>哪一层 / 哪一跳</th><th>让哪两件事并行</th><th>消掉的等待</th></tr></thead>
+    <tbody>
+      <tr><td class="num-cell">①</td><td><strong>四级深度3流水</strong>（本文）</td><td>任务级 · 跨 Cube / Vector</td><td>Cube 矩阵乘 ‖ Vector 逐元素</td><td>一个计算单元干活时、另一个空等</td></tr>
+      <tr><td class="num-cell">②</td><td><strong>KV 三槽环</strong></td><td><code>GM→L1</code> · Cube 内</td><td>搬 K/V（<code>GM→L1</code>）‖ Cube 矩阵乘</td><td>Cube 等 K/V 从 GM 搬进来</td></tr>
+      <tr><td class="num-cell">③</td><td><strong>L0AB 双缓冲</strong></td><td><code>L1→L0</code> · 矩阵乘内</td><td>上料（<code>L1→L0</code>）‖ mma</td><td>mma 等操作数从 L1 上到 L0</td></tr>
+      <tr><td class="num-cell">④</td><td><strong>L0C 结果双缓冲</strong></td><td><code>L0C→外</code> · 矩阵乘内</td><td>结果搬出（<code>L0C→中转区</code>）‖ 下一次 mma</td><td>下一次 mma 等上次结果搬走</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>从 ① 到 ④，粒度越来越细、位置越来越靠里：<strong>① 管两个算力单元不闲；②③④ 管 Cube 从 GM 到 L0C 每一跳都不停下等内存</strong>。四层各管一段、层层嵌套，整条链子才从头到尾不卡。</p>
+
+  <h3>8.1 这三跳是「串行依赖」，还是「能各自考虑」？</h3>
+  <p>②③④ 处在同一条数据通路的三跳上（<code>GM→L1→L0→算→L0C</code>），很自然会问：数据不是得先进 L1、才能进 L0、才能算完进 L0C 吗，这三件事还能分开看？答案要分两个角度：</p>
+  <ul>
+    <li><strong>追一份数据看 —— 是不可拆的一条链</strong>：某一块 K/V 必然 <code>GM→L1</code>（②）→ <code>L1→L0</code>（③）→ mma 算 → 结果进 L0C（④ 搬走），先后不可颠倒。</li>
+    <li><strong>看同一瞬间 —— 它们各踩<em>不同</em>的数据块、同时在跑</strong>（和第 3 章那张任务表同一个道理，只是下沉进一次矩阵乘内部）：</li>
+  </ul>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">同一瞬间的快照：四跳各在处理一块不同的数据 → 横向并行；追一块则纵向串行</p>
+      <svg viewBox="0 0 840 236" role="img" aria-label="同一瞬间快照：GM 到 L1 一跳正在搬第 N+2 块，L1 到 L0 正在搬第 N+1 块，mma 正在算第 N 块，L0C 往外搬出第 N-1 块，四跳各处理一块不同数据，横向并行；追第 N 块则必然一路走完是纵向串行">
+        <text x="420" y="24" text-anchor="middle" font-size="12.5" font-weight="700" fill="#334155">同一瞬间：四跳各在处理一块<tspan fill="#b91c1c">不同</tspan>的数据（和第 3 章任务表同理，只是下沉进一次矩阵乘）</text>
+        <text x="167" y="50" text-anchor="middle" font-size="11" font-weight="700" fill="#92400e">② KV 环搬</text>
+        <rect x="123" y="58" width="88" height="26" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="167" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#92400e">第 N+2 块</text>
+        <text x="353" y="50" text-anchor="middle" font-size="11" font-weight="700" fill="#92400e">③ L0AB 搬</text>
+        <rect x="309" y="58" width="88" height="26" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="353" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#92400e">第 N+1 块</text>
+        <text x="539" y="50" text-anchor="middle" font-size="11" font-weight="700" fill="#1e40af">mma 算</text>
+        <rect x="495" y="58" width="88" height="26" rx="7" fill="#dbeafe" stroke="#3b82f6"/><text x="539" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1e40af">第 N 块</text>
+        <text x="711" y="50" text-anchor="middle" font-size="11" font-weight="700" fill="#92400e">④ 结果搬出</text>
+        <rect x="667" y="58" width="88" height="26" rx="7" fill="#fef3c7" stroke="#f59e0b"/><text x="711" y="75" text-anchor="middle" font-size="11.5" font-weight="700" fill="#92400e">第 N−1 块</text>
+        <g stroke="#cbd5e1" stroke-width="1" stroke-dasharray="3 3">
+          <line x1="167" y1="84" x2="167" y2="124"/><line x1="353" y1="84" x2="353" y2="124"/>
+          <line x1="539" y1="84" x2="539" y2="124"/><line x1="711" y1="84" x2="711" y2="124"/>
+        </g>
+        <rect x="24" y="104" width="104" height="48" rx="10" fill="#ede9fe" stroke="#8b5cf6"/><text x="76" y="133" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">GM</text>
+        <rect x="210" y="104" width="104" height="48" rx="10" fill="#f5f3ff" stroke="#a78bfa"/><text x="262" y="133" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">L1</text>
+        <rect x="396" y="104" width="104" height="48" rx="10" fill="#dbeafe" stroke="#3b82f6"/><text x="448" y="133" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">L0A/L0B</text>
+        <rect x="582" y="104" width="104" height="48" rx="10" fill="#eef2f7" stroke="#94a3b8"/><text x="634" y="133" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">L0C</text>
+        <rect x="740" y="104" width="90" height="48" rx="10" fill="#eef2f7" stroke="#94a3b8"/><text x="785" y="133" text-anchor="middle" font-size="11.5" font-weight="700" fill="#334155">中转区</text>
+        <path d="M128,128 L206,128" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M314,128 L392,128" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M500,128 L578,128" stroke="#2f6fea" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M686,128 L736,128" stroke="#f59e0b" stroke-width="2.5" marker-end="url(#ar)"/>
+        <text x="420" y="188" text-anchor="middle" font-size="11.5" fill="#065f46" font-weight="700">横向：同一瞬间四块不同数据在四跳上并行 —— 四件事真的同时忙。</text>
+        <text x="420" y="212" text-anchor="middle" font-size="11.5" fill="#5b21b6">纵向：追第 N 块，它必然 GM→L1→L0→算→搬走 一路走完，先后不可颠倒。</text>
+      </svg>
+    </div>
+    <figcaption>横向看同一瞬间，四跳各踩一块不同数据（<code>N+2 / N+1 / N / N−1</code>）→ 真正并行；纵向追某一块，则是一条不可颠倒的依赖链。这正是三个机制「叠着跑」的底层图景。</figcaption>
+  </figure>
+
+  <p>所以「能不能分开考虑」有两层意思：</p>
+  <ul>
+    <li><strong>能局部设计</strong>：每一跳之间夹着一个<strong>缓冲</strong>（L1 的 3 槽环、L0 的 2 份、L0C 的 2 份）。缓冲的作用就是<strong>解耦相邻两级</strong> —— 上游往里写、下游从里读，只要不空不满，两级各跑各的、不必锁步。所以「某一跳缓冲开几份够不够」是个<strong>局部</strong>问题，可以单独想。</li>
+    <li><strong>不能完全独立</strong>：相邻两级<strong>共用一块缓冲、靠一对握手信号连着</strong>，是一条<strong>握手链</strong>、不是三个孤岛。比如 ② 要覆盖一个 L1 槽前，得等 ③ 发来「我已把它搬去 L0 了」。所以 ②「能不能装下一块」直接取决于 ③「有没有把上一块取走」。</li>
+  </ul>
+
+  <div class="note"><p>⏱ <strong>还有一条总规律</strong>：整条链的速度 = <strong>最慢那一跳</strong>（瓶颈），其余快的都藏进它的影子里。缓冲能吸收<strong>短时</strong>快慢抖动，却吸收不了<strong>长期</strong>的速率不匹配 —— 某跳持续更慢，它下游的缓冲迟早排空、把下游饿停，瓶颈就往下游传。</p></div>
+
+  <p><strong>一句话</strong>：纵向追一份数据是不可拆的一条链；横向看同一瞬间是不同数据在各跳上并行。各机制的缓冲深度能<strong>局部定</strong>，但接缝处被握手信号锁在一起、且同受最慢一跳节制 —— <strong>局部可分、整体成链</strong>。</p>
+
+  <!-- ===================== 9 ===================== -->
+  <h2 id="s9"><span class="num">9</span>一页速查 + 总结</h2>
+
+  <h3>三句话总结</h3>
+  <ol>
+    <li><strong>四个阶段、两种单元</strong>：一个任务走 Q（QK 打分）→ S（softmax）→ P（PV 汇总）→ O（输出整理），其中 <span class="t-blue"><strong>Q、P 在 Cube</strong></span>，<span class="t-green"><strong>S、O 在 Vector</strong></span>。真并行只发生在 Cube 与 Vector 之间、且必须是不同任务。</li>
+    <li><strong>让 Vector 慢一拍</strong>：第 <code>r</code> 轮里 Q 做任务 <code>r</code>、S 和 P 做任务 <code>r−1</code>、O 做任务 <code>r−2</code>。四个工位同一轮都忙、各服务不同任务 —— 四级流水同时运转，Cube 与 Vector 都不闲。</li>
+    <li><strong>四级 ≠ 深度 3</strong>：阶段数是 4，但一个任务的 S、P 挤在同一轮，只跨 3 轮就走完，所以任何时刻只有 3 个任务在飞（深度 3）。交接用的中转区各开 2 份乒乓即可（每块只被相邻两任务碰），代价是两头各预热 / 排空 2 轮。</li>
+  </ol>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>问题</th><th>答案</th></tr></thead>
+    <tbody>
+      <tr><td>四个阶段是什么？</td><td>Q＝QK 打分、S＝softmax、P＝PV 汇总、O＝输出整理；前一步喂给后一步。</td></tr>
+      <tr><td>谁在哪个单元？</td><td>Q、P 在 <strong>Cube</strong>（矩阵乘）；S、O 在 <strong>Vector</strong>（逐元素 / 归一化）。</td></tr>
+      <tr><td>怎么错开？</td><td>让 Vector 慢一拍：第 <code>r</code> 轮 Q 做任务 <code>r</code>、S/P 做 <code>r−1</code>、O 做 <code>r−2</code>。</td></tr>
+      <tr><td>「真同时」发生在哪？</td><td>只在 Cube 与 Vector 之间，且两件事必属不同任务。同一个单元一次只干一件。</td></tr>
+      <tr class="hl-row"><td><strong>四级 vs 深度 3？</strong></td><td><strong>四级＝阶段数（4）；深度 3＝同时在飞的任务数（3）。差 1，是因为 S、P 挤进同一轮、一个任务只跨 3 轮。</strong></td></tr>
+      <tr><td>中转区为什么 2 份？</td><td>每块只被相邻两任务（写者、读者）碰，任务 <code>t</code> 与 <code>t+2</code> 共用一槽、相差 2 轮错得开；开 2 份乒乓即可。</td></tr>
+      <tr><td>两头的代价？</td><td>预热 2 轮把任务喂满、排空 2 轮把尾巴做完（各 = 深度 − 1）；任务越多越可忽略。</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p style="text-align:center; color:var(--muted); font-size:14px; margin-top:26px;">让 Vector 慢 Cube 一拍，四个工位就同时转了起来 —— Cube 与 Vector 都不闲、吞吐拉满。这就是四级深度3流水的全部用意。</p>
+
+</div>
+
+<a href="#top" class="totop" title="回到顶部">↑</a>
+<script>
+(function(){
+  var heads = Array.prototype.slice.call(document.querySelectorAll('h2[id]'));
+  var links = Array.prototype.slice.call(document.querySelectorAll('.sidenav a'));
+  if(!heads.length || !links.length) return;
+  var ticking = false;
+  function update(){
+    ticking = false;
+    var cur = heads[0];
+    for(var i=0;i<heads.length;i++){
+      if(heads[i].getBoundingClientRect().top <= 130) cur = heads[i];
+    }
+    for(var j=0;j<links.length;j++){
+      links[j].classList.toggle('active', links[j].getAttribute('href') === '#'+cur.id);
+    }
+  }
+  function onScroll(){ if(!ticking){ ticking = true; requestAnimationFrame(update); } }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll, {passive:true});
+  update();
+})();
+</script>
+</body>
+</html>
