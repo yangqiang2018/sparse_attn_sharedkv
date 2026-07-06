@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L0AB 双缓冲 原理详解</title>
+<style>
+  :root{
+    --bg:#f7f7f4; --panel:#ffffff; --ink:#1f2328; --muted:#5b6470;
+    --line:#e3e6ea; --accent:#2f6fea; --accent-soft:#eaf1ff;
+    --blue:#3b82f6; --blue-bg:#dbeafe; --blue-ink:#1e40af;
+    --green:#10b981; --green-bg:#d1fae5; --green-ink:#065f46;
+    --amber:#f59e0b; --amber-bg:#fef3c7; --amber-ink:#92400e;
+    --purple:#8b5cf6; --purple-bg:#ede9fe; --purple-ink:#5b21b6;
+    --red:#ef4444; --red-ink:#b91c1c;
+    --gray:#9ca3af; --gray-bg:#eceef1; --gray-ink:#4b5563;
+    --code-bg:#f4f6f8; --code-ink:#1c2733;
+    --radius:12px;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",Consolas,"Cascadia Code",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:16.5px; line-height:1.85;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:0 22px 120px;}
+
+  /* ---- header ---- */
+  header.hero{ max-width:880px; margin:0 auto; padding:54px 22px 26px; }
+  .kicker{
+    display:inline-block; font-size:12.5px; letter-spacing:.16em; font-weight:700;
+    color:var(--accent); background:var(--accent-soft); padding:5px 12px; border-radius:999px;
+    text-transform:uppercase; margin-bottom:18px;
+  }
+  h1{font-size:38px; line-height:1.22; margin:.1em 0 .35em; letter-spacing:-.01em;}
+  .sub{color:var(--muted); font-size:16px; margin:0;}
+
+  /* ---- typography ---- */
+  h2{
+    font-size:25px; margin:64px 0 18px; padding-top:16px; letter-spacing:-.01em;
+    border-top:2px solid var(--line);
+  }
+  h2 .num{color:var(--accent); font-variant-numeric:tabular-nums; margin-right:.45em;}
+  h3{font-size:19px; margin:34px 0 12px; color:#2b3340;}
+  p{margin:14px 0;}
+  a{color:var(--accent); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  strong{font-weight:700; color:#16324f;}
+  ul,ol{margin:14px 0; padding-left:1.4em;}
+  li{margin:7px 0;}
+  hr{border:none; border-top:1px solid var(--line); margin:40px 0;}
+
+  /* inline code */
+  code{
+    font-family:var(--mono); font-size:.88em; background:var(--code-bg);
+    color:#b3344a; padding:2px 6px; border-radius:6px; border:1px solid #e7e2e4;
+  }
+  /* code blocks */
+  pre{
+    background:#0f1b2d; color:#dbe7f3; border-radius:var(--radius);
+    padding:18px 20px; overflow:auto; font-family:var(--mono); font-size:14px;
+    line-height:1.7; margin:18px 0; border:1px solid #0a1320;
+    box-shadow:0 1px 0 rgba(0,0,0,.04);
+  }
+  pre code{background:none; color:inherit; border:none; padding:0; font-size:inherit;}
+  pre .cmt{color:#7d93ad;} pre .hl{color:#ffd479;} pre .ok{color:#7ee0a1;}
+  pre .kw{color:#c792ea;} pre .fn{color:#82aaff;}
+
+  /* blockquote / callout */
+  blockquote{
+    margin:18px 0; padding:14px 18px; background:var(--panel);
+    border-left:4px solid var(--accent); border-radius:0 10px 10px 0;
+    color:#33414f; box-shadow:0 1px 2px rgba(20,40,80,.05);
+  }
+  blockquote p:first-child{margin-top:0}
+  blockquote p:last-child{margin-bottom:0}
+
+  .note{
+    margin:18px 0; padding:16px 18px; background:var(--accent-soft);
+    border:1px solid #d4e2ff; border-radius:var(--radius); font-size:15px; color:#2b4a73;
+  }
+  .note p{margin:6px 0}
+  .note code{background:#fff;}
+  .warn{
+    margin:18px 0; padding:14px 18px; background:var(--amber-bg);
+    border:1px solid #f3d27a; border-radius:var(--radius); font-size:15px; color:#7a4d09;
+  }
+  .warn code{background:#fff;}
+
+  /* tables */
+  .tablewrap{overflow-x:auto; margin:18px 0;}
+  table{border-collapse:collapse; width:100%; font-size:15px; background:var(--panel);
+    border-radius:10px; overflow:hidden; box-shadow:0 1px 2px rgba(20,40,80,.05);}
+  th,td{padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{background:#eef2f7; font-weight:700; color:#2b3340;}
+  tr:last-child td{border-bottom:none;}
+  td code,th code{font-size:.85em;}
+  .hl-row td{background:#fffaf0;}
+  .num-cell{font-family:var(--mono); font-variant-numeric:tabular-nums;}
+
+  /* TOC */
+  nav.toc{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 24px; margin:30px 0;
+  }
+  nav.toc h2{border:none; margin:0 0 10px; padding:0; font-size:16px; color:var(--muted);
+    letter-spacing:.04em; text-transform:uppercase;}
+  nav.toc ol{margin:0; padding-left:1.5em; columns:2; column-gap:34px;}
+  nav.toc li{margin:5px 0; break-inside:avoid;}
+  nav.toc a{color:#33414f;}
+  nav.toc .ix{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums;}
+
+  /* figures */
+  figure{margin:26px 0; padding:0;}
+  figure svg{display:block; width:100%; height:auto;}
+  .figcard{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:22px; box-shadow:0 2px 10px rgba(20,40,80,.05);
+  }
+  figcaption{font-size:13.5px; color:var(--muted); text-align:center; margin-top:12px;}
+  .fig-mono{font-family:var(--mono);}
+  .figtitle{margin:0 0 14px; font-size:14.5px; font-weight:700; color:#334155;}
+
+  /* ===== equations ===== */
+  .eqwrap{display:flex; justify-content:center; margin:22px 0;}
+  .eq{font-family:var(--mono); font-size:17px; display:inline-flex; align-items:center;
+      gap:.45em; flex-wrap:wrap; justify-content:center; background:var(--panel);
+      border:1px solid var(--line); border-radius:12px; padding:18px 24px;
+      box-shadow:0 1px 2px rgba(20,40,80,.05); color:#22303f;}
+  .eq .op{color:var(--muted); padding:0 .12em; font-size:.95em;}
+  .t-blue{color:var(--blue-ink);} .t-amber{color:var(--amber-ink);} .t-green{color:var(--green-ink);} .t-purple{color:var(--purple-ink);}
+
+  /* ===== chips / pills ===== */
+  .chip{font-family:var(--mono); font-size:13.5px; border-radius:9px; padding:6px 12px; border:1.5px solid; font-weight:600;}
+  .chip.a{background:#eff6ff; border-color:#93c5fd; color:#1e40af;}
+  .chip.b{background:#ecfdf5; border-color:#6ee7b7; color:#065f46;}
+  .chiprow{display:flex; gap:9px; flex-wrap:wrap; margin:10px 0; justify-content:center;}
+  .pill{font-family:var(--mono); font-size:12px; padding:2px 9px; border-radius:999px; font-weight:700;}
+  .pill.b1{background:var(--blue-bg); color:var(--blue-ink);}
+  .pill.b2{background:var(--green-bg); color:var(--green-ink);}
+  .pill.up{background:var(--amber-bg); color:var(--amber-ink);}
+
+  /* compare two results */
+  .vs{display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:14px; margin:8px 0;}
+  .vscard{border:1.5px solid var(--line); border-radius:12px; padding:14px 16px; text-align:center; background:var(--panel);}
+  .vscard .lab{font-size:12.5px; color:var(--muted); margin-bottom:6px;}
+  .vscard .val{font-family:var(--mono); font-size:18px; font-weight:700; color:#0b3d91;}
+  .vsmid{font-size:26px; color:var(--muted); font-weight:700;}
+  .vscard.a{border-top:4px solid var(--blue);}
+  .vscard.b{border-top:4px solid var(--purple);}
+
+  /* side nav (table of contents) */
+  .sidenav{display:none;}
+  @media (min-width:1180px){
+    .sidenav{
+      display:block; position:fixed; top:0; left:0; width:264px; height:100vh;
+      overflow-y:auto; padding:30px 16px 48px; box-sizing:border-box;
+      background:#fbfbf8; border-right:1px solid var(--line);
+    }
+    .sidenav .snav-title{
+      margin:0 0 14px; padding-left:12px; font-size:12px; font-weight:700;
+      letter-spacing:.14em; text-transform:uppercase; color:var(--muted);
+    }
+    .sidenav ol{list-style:none; margin:0; padding:0;}
+    .sidenav li{margin:1px 0;}
+    .sidenav a{
+      display:flex; gap:9px; align-items:baseline; padding:6px 11px;
+      border-radius:8px; border-left:2px solid transparent;
+      color:#475461; font-size:13.5px; line-height:1.45;
+    }
+    .sidenav a .n{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; min-width:16px; text-align:right;}
+    .sidenav a:hover{background:var(--accent-soft); text-decoration:none;}
+    .sidenav a.active{background:var(--accent-soft); color:var(--accent); font-weight:700; border-left-color:var(--accent);}
+    nav.toc{display:none;}
+    header.hero{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+    .wrap{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+  }
+
+  /* back to top */
+  .totop{
+    position:fixed; right:22px; bottom:22px; width:44px; height:44px; border-radius:50%;
+    background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center;
+    font-size:20px; box-shadow:0 4px 14px rgba(47,111,234,.4); opacity:.92; z-index:50;
+  }
+  .totop:hover{text-decoration:none; opacity:1;}
+
+  @media (max-width:640px){
+    body{font-size:16px;}
+    h1{font-size:30px;}
+    nav.toc ol{columns:1;}
+    .vs{grid-template-columns:1fr;}
+    .vsmid{transform:rotate(90deg);}
+  }
+</style>
+</head>
+<body>
+<a id="top"></a>
+<!-- shared SVG defs (arrow markers) — resolved document-wide by every inline figure below -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ar" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#2f6fea"/>
+  </marker>
+  <marker id="arg" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#10b981"/>
+  </marker>
+  <marker id="arp" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="#8b5cf6"/>
+  </marker>
+</defs></svg>
+
+<aside class="sidenav" aria-label="目录">
+  <p class="snav-title">目录</p>
+  <ol>
+    <li><a href="#s0"><span class="n">0</span><span>这两份缓冲在忙什么</span></a></li>
+    <li><a href="#s1"><span class="n">1</span><span>L0A/L0B 的位置</span></a></li>
+    <li><a href="#s2"><span class="n">2</span><span>各一份 · 上料算干等</span></a></li>
+    <li><a href="#s3"><span class="n">3</span><span>各两份 · 乒乓重叠</span></a></li>
+    <li><a href="#s4"><span class="n">4</span><span>L0A/L0B 成对轮换</span></a></li>
+    <li><a href="#s5"><span class="n">5</span><span>为什么 2 份就够</span></a></li>
+    <li><a href="#s6"><span class="n">6</span><span>握手信号 · 预置/排空</span></a></li>
+    <li><a href="#s7"><span class="n">7</span><span>速查 + 总结</span></a></li>
+  </ol>
+</aside>
+
+<header class="hero">
+  <span class="kicker">昇腾流水线 · 矩阵乘上料</span>
+  <h1>L0AB 双缓冲 原理详解</h1>
+  <p class="sub">Cube 做矩阵乘要的操作数在 L0A/L0B —— 为什么这两块各开「两份」轮流用，让 MTE1 的上料和 Cube 的算并行、互不干等</p>
+</header>
+
+<div class="wrap">
+
+  <div class="note">
+    <p><strong>本文假设读者已熟悉昇腾的基本盘：</strong>GM / L1 / L0A / L0B / L0C 各级内存，Cube 单元做矩阵乘、操作数得先在 L0 里，数据靠 MTE 在各级之间搬。</p>
+    <p>要讲清楚的是：<strong>L0A 和 L0B 为什么各开「两份」轮流用</strong>（双缓冲 / 乒乓）。这是一招很通用的「多备几份、轮流用」思路，本文聚焦它在 L0A/L0B（即 <code>L1→L0</code> 这一跳）上的用法。只需会分<strong>奇偶</strong>即可跟下来。<br>（<strong>范围说明</strong>：在这个算子里，这套 L0A/L0B 双缓冲是<strong>手写在 PV 汇总阶段</strong>的；<strong>QK 打分</strong>是另一个矩阵乘原语一步算完的，它内部怎么摆放 L0 属于原语内部、不在本文范围。所以下文一律以 PV 为例。）</p>
+  </div>
+
+  <!-- ===================== TOC ===================== -->
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol start="0">
+      <li><span class="ix">0.</span> <a href="#s0">先说结论：这两份缓冲到底在忙什么</a></li>
+      <li><span class="ix">1.</span> <a href="#s1">L0A/L0B 在哪、装什么</a></li>
+      <li><span class="ix">2.</span> <a href="#s2">各只一份：上料（MTE1）和算（Cube）互相干等</a></li>
+      <li><span class="ix">3.</span> <a href="#s3">各开两份：一边算一边上料（乒乓 / 双缓冲）</a></li>
+      <li><span class="ix">4.</span> <a href="#s4">一个关键点：L0A 和 L0B 是「成对」轮换的</a></li>
+      <li><span class="ix">5.</span> <a href="#s5">为什么 2 份就够</a></li>
+      <li><span class="ix">6.</span> <a href="#s6">握手信号，以及「开工前预置、收尾排空」</a></li>
+      <li><span class="ix">7.</span> <a href="#s7">一页速查 + 总结</a></li>
+    </ol>
+  </nav>
+
+  <!-- ===================== 0 ===================== -->
+  <h2 id="s0"><span class="num">0</span>先说结论：这两份缓冲到底在忙什么</h2>
+  <p>Cube 单元做一次矩阵乘，要两个操作数：<strong>左矩阵放在 L0A、右矩阵放在 L0B</strong>，算出的结果进 L0C。可这两个操作数原本在 <strong>L1</strong> 里，得先靠 <strong>MTE1</strong> 上料（<code>L1→L0</code>）到 L0A/L0B，Cube 才能开算。问题还是那个老问题：</p>
+  <blockquote><p>如果 L0A、L0B <strong>各只有一份</strong>，那么<strong>上料（MTE1 往里写）</strong>和<strong>算（Cube 从里读）</strong>就没法同时进行 —— 同一块缓冲，正被 Cube 读的时候不能被 MTE1 覆盖。于是两边被迫轮流，谁在忙、另一个就干等。</p></blockquote>
+  <p><strong>L0AB 双缓冲</strong>就是来消掉这个干等的：<strong>把 L0A、L0B 各开「两份」，轮流用</strong> —— Cube 就着<strong>这一份</strong>算的时候，MTE1 同时往<strong>另一份</strong>上下一批料。两件事就此并行，谁也不必停下来等谁 —— 总时间取决于两者里<strong>较慢的那件</strong>，而不是两件相加。下面一步步讲清楚。</p>
+
+  <figure>
+    <div class="figcard">
+      <svg viewBox="0 0 840 214" role="img" aria-label="Cube 做矩阵乘，左操作数在 L0A、右操作数在 L0B，结果进 L0C，操作数由 MTE1 从 L1 上料">
+        <!-- L1 -->
+        <rect x="20" y="70" width="120" height="80" rx="12" fill="#ede9fe" stroke="#8b5cf6"/>
+        <text x="80" y="58" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">L1</text>
+        <text x="80" y="106" text-anchor="middle" font-size="12.5" fill="#5b21b6">操作数在这</text>
+        <text x="80" y="128" text-anchor="middle" font-size="11" fill="#7c3aed">（更外一层）</text>
+        <!-- MTE1 arrow -->
+        <path d="M142,110 L206,110" stroke="#f59e0b" stroke-width="3" marker-end="url(#ar)"/>
+        <text x="174" y="98" text-anchor="middle" font-size="11.5" fill="#92400e" font-weight="700">MTE1 上料</text>
+        <!-- L0A / L0B -->
+        <rect x="210" y="52" width="150" height="52" rx="10" fill="#dbeafe" stroke="#3b82f6"/>
+        <text x="285" y="74" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">L0A（左矩阵）</text>
+        <text x="285" y="92" text-anchor="middle" font-size="11" fill="#3b82f6">放 P（softmax 权重）</text>
+        <rect x="210" y="116" width="150" height="52" rx="10" fill="#d1fae5" stroke="#10b981"/>
+        <text x="285" y="138" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065f46">L0B（右矩阵）</text>
+        <text x="285" y="156" text-anchor="middle" font-size="11" fill="#059669">放 V 的一个小片</text>
+        <!-- Cube reads both -->
+        <path d="M362,80 C 420,80 420,104 470,108" fill="none" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <path d="M362,140 C 420,140 420,116 470,112" fill="none" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <text x="416" y="72" text-anchor="middle" font-size="11" fill="#2f6fea" font-weight="700">两个都读</text>
+        <!-- Cube -->
+        <rect x="474" y="82" width="150" height="56" rx="12" fill="#dbeafe" stroke="#3b82f6"/>
+        <text x="549" y="106" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">Cube</text>
+        <text x="549" y="126" text-anchor="middle" font-size="11.5" fill="#3b82f6">矩阵乘 mma</text>
+        <!-- to L0C -->
+        <path d="M626,110 L690,110" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <rect x="694" y="82" width="126" height="56" rx="12" fill="#eef2f7" stroke="#94a3b8"/>
+        <text x="757" y="106" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">L0C</text>
+        <text x="757" y="126" text-anchor="middle" font-size="11.5" fill="#475569">放结果</text>
+        <!-- bottom -->
+        <text x="420" y="198" text-anchor="middle" font-size="12.5" fill="#b91c1c" font-weight="700">⚠ L0A/L0B 各只一份的话，MTE1 上料时 Cube 只能干等 —— 双缓冲就是来消掉这个等。</text>
+      </svg>
+    </div>
+    <figcaption>一次矩阵乘：<strong>L0A（左）+ L0B（右）→ Cube → L0C（结果）</strong>。操作数由 MTE1 从 L1 上料。本文讲的就是给 L0A/L0B 各开两份，让上料和算重叠。</figcaption>
+  </figure>
+
+  <!-- ===================== 1 ===================== -->
+  <h2 id="s1"><span class="num">1</span>L0A/L0B 在哪、装什么</h2>
+
+  <p>先把这一段通路和各部件的角色理清楚：</p>
+
+  <div class="eqwrap">
+    <div class="eq" style="font-size:15px;">
+      <span class="t-purple">L1</span><span class="op">──MTE1 上料──▶</span>
+      <span class="t-blue">L0A</span><span>/</span><span class="t-green">L0B</span>
+      <span class="op">──Cube 算──▶</span>
+      <span>L0C</span>
+    </div>
+  </div>
+
+  <ul>
+    <li><strong>L0A</strong> 放矩阵乘的<strong>左操作数</strong>，<strong>L0B</strong> 放<strong>右操作数</strong>。Cube 一次 mma 同时读这两块，把结果累加进 L0C。</li>
+    <li>本文这套 L0A/L0B 双缓冲用在 <strong>PV 汇总</strong>阶段：L0A 放 <code>P</code>（softmax 权重），L0B 放 <code>V</code> 的一个小片。（<strong>QK 打分</strong>由一个矩阵乘原语一步算完，它内部怎么用 L0 不在本文范围。）</li>
+    <li>双缓冲落在 <strong>L1→L0（MTE1）这一跳</strong> —— 数据从 GM 一路往里搬（<code>GM→L1→L0</code>），这是最靠里的一段。</li>
+  </ul>
+
+  <div class="note">
+    <p>📌 数据一路往里搬：<code>GM →(MTE2)→ L1 →(MTE1)→ L0 →(Cube)→ L0C</code>。每一跳的「搬」和「用」之间都能做双缓冲；<strong>本文只讲最后那跳 <code>L1→L0</code>（MTE1）上的这一处</strong> —— L0A/L0B 各开 2 份。<br>（<strong>提醒</strong>：<code>L1→L0</code> 是<strong>片上</strong>搬运、比 <code>GM→L1</code>（片外显存）快得多，所以<strong>这层双缓冲省下的时间有限、是个小优化</strong>——PV 每个任务也就 4 次这样的 mma；真正的搬运大头在更外面那跳 <code>GM→L1</code>。）</p>
+  </div>
+
+  <!-- ===================== 2 ===================== -->
+  <h2 id="s2"><span class="num">2</span>各只一份：上料（MTE1）和算（Cube）互相干等</h2>
+
+  <p>先看最朴素的做法：L0A、L0B <strong>各只开一份</strong>。那流程只能是：</p>
+  <ol>
+    <li>MTE1 把这一批操作数从 L1 上料到 L0A / L0B；</li>
+    <li>上完料，Cube 才能读它、算这一次 mma；</li>
+    <li>算完，MTE1 才敢上下一批（只有一份，<strong>没算完就上料会把还在用的操作数覆盖掉</strong>）；</li>
+    <li>……如此循环。</li>
+  </ol>
+
+  <p>画成时间线：<strong>MTE1 和 Cube 从来没有同时在干活</strong>。上料时 Cube 空等，算时 MTE1 空等。</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">各只一份：上料 → 算 → 上料 → 算，全串成一条线，谁在忙另一个就空等</p>
+      <svg viewBox="0 0 840 226" role="img" aria-label="L0A/L0B 各只一份时，MTE1 上料和 Cube 计算严格轮流，谁在忙另一个就空等">
+        <text x="20" y="30" font-size="12.5" font-weight="700" fill="#334155">时间 →</text>
+        <text x="96" y="78" text-anchor="end" font-size="13" font-weight="700" fill="#92400e">MTE1（上料）</text>
+        <text x="96" y="140" text-anchor="end" font-size="13" font-weight="700" fill="#1e40af">Cube（算）</text>
+        <g stroke="#eef1f5" stroke-width="1">
+          <line x1="120" y1="50" x2="120" y2="170"/><line x1="220" y1="50" x2="220" y2="170"/>
+          <line x1="320" y1="50" x2="320" y2="170"/><line x1="420" y1="50" x2="420" y2="170"/>
+          <line x1="520" y1="50" x2="520" y2="170"/><line x1="620" y1="50" x2="620" y2="170"/>
+          <line x1="720" y1="50" x2="720" y2="170"/>
+        </g>
+        <rect x="120" y="56" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="170" y="81" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">上料 1</text>
+        <rect x="320" y="56" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="370" y="81" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">上料 2</text>
+        <rect x="520" y="56" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="570" y="81" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">上料 3</text>
+        <rect x="220" y="56" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="270" y="81" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="420" y="56" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="470" y="81" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="620" y="56" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="670" y="81" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="120" y="118" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="170" y="143" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="220" y="118" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="270" y="143" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 1</text>
+        <rect x="320" y="118" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="370" y="143" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="420" y="118" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="470" y="143" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 2</text>
+        <rect x="520" y="118" width="100" height="40" rx="7" fill="#fef2f2" stroke="#fecaca" stroke-dasharray="4 3"/><text x="570" y="143" text-anchor="middle" font-size="11" fill="#dc2626">空等</text>
+        <rect x="620" y="118" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="670" y="143" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 3</text>
+        <path d="M120,186 L120,196 L720,196 L720,186" fill="none" stroke="#94a3b8" stroke-width="1.4"/>
+        <text x="420" y="214" text-anchor="middle" font-size="12.5" fill="#475569">总耗时 = 上料 + 算 + 上料 + 算 + …（全部串起来）</text>
+      </svg>
+    </div>
+    <figcaption>各只一份时，上料和算只能<strong>严格轮流</strong>、大量时间在空等。根子在于：<strong>同一份缓冲，写（上料）和读（算）没法同时发生</strong>。</figcaption>
+  </figure>
+
+  <!-- ===================== 3 ===================== -->
+  <h2 id="s3"><span class="num">3</span>各开两份：一边算一边上料（乒乓 / 双缓冲）</h2>
+
+  <p>改进只要一句话：<strong>L0A、L0B 各多开一份</strong>。有了两份（记作第 <code>0</code> 份、第 <code>1</code> 份），就能这样安排：</p>
+  <blockquote>
+    <p><strong>Cube 就着第 0 份算</strong>的时候，<strong>MTE1 同时往第 1 份上下一批料</strong>。等第 0 份算完，第 1 份也刚好上好料 —— Cube 扭头就着第 1 份接着算，MTE1 则回头往第 0 份上再下一批。两份<strong>交替上阵、轮流坐庄</strong>，这就是 <strong>双缓冲</strong>（乒乓）。</p>
+  </blockquote>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">各两份：MTE1 往「空着的那份」上料，正好和 Cube「读另一份」错开 → 两件事并行</p>
+      <svg viewBox="0 0 840 250" role="img" aria-label="各两份时，上下一批料和算这一批可以同时进行，总时间约等于两条里较长的那条">
+        <text x="20" y="30" font-size="12.5" font-weight="700" fill="#334155">时间 →</text>
+        <text x="96" y="76" text-anchor="end" font-size="13" font-weight="700" fill="#92400e">MTE1（上料）</text>
+        <text x="96" y="138" text-anchor="end" font-size="13" font-weight="700" fill="#1e40af">Cube（算）</text>
+        <g stroke="#eef1f5" stroke-width="1">
+          <line x1="120" y1="48" x2="120" y2="168"/><line x1="220" y1="48" x2="220" y2="168"/>
+          <line x1="320" y1="48" x2="320" y2="168"/><line x1="420" y1="48" x2="420" y2="168"/>
+          <line x1="520" y1="48" x2="520" y2="168"/><line x1="620" y1="48" x2="620" y2="168"/>
+        </g>
+        <rect x="120" y="54" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="170" y="72" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">上料 1</text><text x="170" y="88" text-anchor="middle" font-size="10" fill="#7a4d09">→第 0 份</text>
+        <rect x="220" y="54" width="100" height="40" rx="7" fill="#fde68a" stroke="#f59e0b"/><text x="270" y="72" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">上料 2</text><text x="270" y="88" text-anchor="middle" font-size="10" fill="#7a4d09">→第 1 份</text>
+        <rect x="320" y="54" width="100" height="40" rx="7" fill="#fcd34d" stroke="#f59e0b"/><text x="370" y="72" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">上料 3</text><text x="370" y="88" text-anchor="middle" font-size="10" fill="#7a4d09">→第 0 份</text>
+        <rect x="420" y="54" width="100" height="40" rx="7" fill="#fde68a" stroke="#f59e0b"/><text x="470" y="72" text-anchor="middle" font-size="12" fill="#7a4d09" font-weight="700">上料 4</text><text x="470" y="88" text-anchor="middle" font-size="10" fill="#7a4d09">→第 1 份</text>
+        <rect x="220" y="116" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="270" y="134" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 1</text><text x="270" y="150" text-anchor="middle" font-size="10" fill="#1e40af">读第 0 份</text>
+        <rect x="320" y="116" width="100" height="40" rx="7" fill="#c7ddfe" stroke="#3b82f6"/><text x="370" y="134" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 2</text><text x="370" y="150" text-anchor="middle" font-size="10" fill="#1e40af">读第 1 份</text>
+        <rect x="420" y="116" width="100" height="40" rx="7" fill="#bfdbfe" stroke="#3b82f6"/><text x="470" y="134" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 3</text><text x="470" y="150" text-anchor="middle" font-size="10" fill="#1e40af">读第 0 份</text>
+        <rect x="520" y="116" width="100" height="40" rx="7" fill="#c7ddfe" stroke="#3b82f6"/><text x="570" y="134" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">算 4</text><text x="570" y="150" text-anchor="middle" font-size="10" fill="#1e40af">读第 1 份</text>
+        <rect x="220" y="48" width="100" height="114" rx="8" fill="none" stroke="#10b981" stroke-width="2" stroke-dasharray="6 4"/>
+        <text x="270" y="182" text-anchor="middle" font-size="11" fill="#065f46" font-weight="700">同时进行 ✓</text>
+        <text x="270" y="197" text-anchor="middle" font-size="10.5" fill="#065f46">上料 2 进第 1 份 / 算 1 读第 0 份</text>
+        <path d="M120,214 L120,224 L620,224 L620,214" fill="none" stroke="#94a3b8" stroke-width="1.4"/>
+        <text x="370" y="242" text-anchor="middle" font-size="12" fill="#475569">两条并行，总耗时 ≈ <tspan font-weight="700" fill="#065f46">较长的那条</tspan>（不是上料与算相加）</text>
+      </svg>
+    </div>
+    <figcaption>各开两份后，上料和算<strong>并排同时进行</strong>，不再一前一后干等。总时间不再是「上料+算+上料+算…」相加，而是<strong>约等于两条里较长的那条</strong> —— 这就是双缓冲的威力。</figcaption>
+  </figure>
+
+  <!-- ===================== 4 ===================== -->
+  <h2 id="s4"><span class="num">4</span>一个关键点：L0A 和 L0B 是「成对」轮换的</h2>
+
+  <p>这里有个容易忽略的细节：<strong>一次矩阵乘要<em>同时</em>用到左操作数（L0A）和右操作数（L0B）</strong>。所以这两块缓冲的「第 <code>0</code> 份」得<strong>配对使用</strong>、「第 <code>1</code> 份」也配对使用；它俩<strong>一起</strong>在 0 / 1 之间翻，不各翻各的。</p>
+
+  <p>可以把「一份 L0A + 同号的一份 L0B」看成<strong>一套配好的料</strong>（下面叫「第 0 套 / 第 1 套」）：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">L0A 的第 pp 份 + L0B 的第 pp 份 = 配好的一套料；Cube 一次 mma 吃一整套</p>
+      <svg viewBox="0 0 840 232" role="img" aria-label="L0A 和 L0B 各两份，同号配成一套，Cube 一次矩阵乘同时读一套里的 L0A 和 L0B">
+        <!-- set 0 -->
+        <text x="235" y="34" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">第 0 套（pp = 0）</text>
+        <rect x="120" y="48" width="230" height="70" rx="10" fill="#fbfbff" stroke="#c7d2fe"/>
+        <rect x="134" y="62" width="100" height="42" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="184" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1e40af">L0A 第 0 份</text><text x="184" y="96" text-anchor="middle" font-size="10.5" fill="#3b82f6">左：P</text>
+        <rect x="240" y="62" width="100" height="42" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="290" y="80" text-anchor="middle" font-size="11.5" font-weight="700" fill="#065f46">L0B 第 0 份</text><text x="290" y="96" text-anchor="middle" font-size="10.5" fill="#059669">右：V</text>
+        <!-- set 1 -->
+        <text x="235" y="150" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">第 1 套（pp = 1）</text>
+        <rect x="120" y="164" width="230" height="52" rx="10" fill="#fbfbff" stroke="#c7d2fe"/>
+        <rect x="134" y="176" width="100" height="30" rx="8" fill="#dbeafe" stroke="#3b82f6"/><text x="184" y="196" text-anchor="middle" font-size="11.5" font-weight="700" fill="#1e40af">L0A 第 1 份</text>
+        <rect x="240" y="176" width="100" height="30" rx="8" fill="#d1fae5" stroke="#10b981"/><text x="290" y="196" text-anchor="middle" font-size="11.5" font-weight="700" fill="#065f46">L0B 第 1 份</text>
+        <!-- arrows to Cube (set 0 being computed) -->
+        <path d="M352,83 C 430,83 440,120 500,124" fill="none" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <text x="430" y="74" text-anchor="middle" font-size="11" fill="#2f6fea" font-weight="700">这一套一起喂进 Cube</text>
+        <!-- Cube -->
+        <rect x="504" y="100" width="150" height="56" rx="12" fill="#dbeafe" stroke="#3b82f6"/>
+        <text x="579" y="124" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">Cube</text>
+        <text x="579" y="144" text-anchor="middle" font-size="11.5" fill="#3b82f6">一次 mma 吃一整套</text>
+        <!-- ping-pong note -->
+        <path d="M700,110 C 740,110 740,150 700,150" fill="none" stroke="#8b5cf6" stroke-width="1.8" marker-end="url(#arp)"/>
+        <text x="756" y="134" text-anchor="middle" font-size="11" fill="#7c3aed" transform="rotate(90 756 134)">0/1 一起翻</text>
+        <text x="420" y="228" text-anchor="middle" font-size="12" fill="#475569">Cube 算第 0 套时，MTE1 就去把<tspan font-weight="700">第 1 套</tspan>（L0A 第 1 份 + L0B 第 1 份）一起备好。</text>
+      </svg>
+    </div>
+    <figcaption>「两份」其实是<strong>两套配对的料</strong>：L0A、L0B 的同号份绑在一起、一起 0/1 轮换。Cube 一次 mma 吃一整套，MTE1 同时备好另一套。</figcaption>
+  </figure>
+
+  <div class="note"><p>📐 <strong>「两份」的具体形状</strong>：L0A 每份 <code>[64,128]</code>（放 softmax 权重 P：64 查询头 × 128 key），L0B 每份 <code>[128,128]</code>（放 V 的一个小片：128 key × 128 维）；各开 2 份，合起来就是 <code>[2,64,128]</code> 和 <code>[2,128,128]</code>。</p></div>
+
+  <!-- ===================== 5 ===================== -->
+  <h2 id="s5"><span class="num">5</span>为什么 2 份就够</h2>
+
+  <p>这里自然有个问题：双缓冲为什么是 <strong>2 份</strong>，而不是 3 份、4 份？</p>
+
+  <blockquote><p>因为 L0 这一层是<strong>最标准的「产一个、消费一个」双缓冲</strong>：Cube 一次 mma 只吃<strong>一套</strong>料，算这一套的同时把下一套备好 —— <strong>手上至多两套（一套在算、一套在备），2 份正好一一对应</strong>，再多一份也没活干。</p></blockquote>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">任意时刻手上至多两套料在忙 —— 所以各 2 份正好够</p>
+      <svg viewBox="0 0 840 178" role="img" aria-label="任意时刻至多两套料：一套正被 Cube 算、一套正被 MTE1 备，所以各 2 份就够">
+        <text x="420" y="32" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">任意时刻，手上至多两套料在忙</text>
+        <rect x="70" y="52" width="300" height="72" rx="12" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+        <text x="220" y="82" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">这一套 · Cube 正在算</text>
+        <text x="220" y="104" text-anchor="middle" font-size="11.5" fill="#3b82f6">读 L0A/L0B 的第 pp 份</text>
+        <text x="420" y="96" text-anchor="middle" font-size="22" fill="#94a3b8">+</text>
+        <rect x="470" y="52" width="300" height="72" rx="12" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+        <text x="620" y="82" text-anchor="middle" font-size="13" font-weight="700" fill="#92400e">下一套 · MTE1 正在备</text>
+        <text x="620" y="104" text-anchor="middle" font-size="11.5" fill="#b45309">往第 1-pp 份上料</text>
+        <text x="420" y="156" text-anchor="middle" font-size="12.5" fill="#475569">一套在算 + 一套在备 = 至多 <tspan font-weight="700">2</tspan> 套 → 各 2 份正好一一对应，再多一份也没活干</text>
+      </svg>
+    </div>
+    <figcaption>把「为什么 2」说白：一次 mma 只消费一套料，同时至多再备一套，所以任何时刻手上至多两套 —— 各 2 份正好够，多一份也闲着。</figcaption>
+  </figure>
+
+  <p><strong>那什么时候才需要更多份？</strong>只有当某一层需要把<strong>好几批料同时摆着一起用</strong>（而不是「一次只消费一套」）时，份数才要相应加多。L0 这层没有这种情况 —— 每次 mma 就吃一套，所以标准的 2 份乒乓就够。</p>
+
+  <!-- ===================== 6 ===================== -->
+  <h2 id="s6"><span class="num">6</span>握手信号，以及「开工前预置、收尾排空」</h2>
+
+  <p>两份轮流用要跑得又快又不出错，靠两块缓冲各自的一对<strong>握手信号</strong>（flag）。盯住<strong>某一份</strong>，它的一轮生命是这样的：</p>
+
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">一份 L0 的一轮：上料 →（发「上料完」）→ 算 →（发「算完」）→ 可被下一批覆盖</p>
+      <svg viewBox="0 0 840 200" role="img" aria-label="一份 L0 缓冲的握手循环：MTE1 上料后发上料完，Cube 算后发算完，之后 MTE1 才能覆盖">
+        <!-- MTE1 load -->
+        <rect x="30" y="70" width="150" height="60" rx="12" fill="#fef3c7" stroke="#f59e0b"/>
+        <text x="105" y="95" text-anchor="middle" font-size="12.5" font-weight="700" fill="#92400e">MTE1 上料</text>
+        <text x="105" y="115" text-anchor="middle" font-size="11" fill="#b45309">L1 → 这一份 L0</text>
+        <!-- flag: loaded -->
+        <path d="M182,100 L262,100" stroke="#10b981" stroke-width="2.5" marker-end="url(#arg)"/>
+        <text x="222" y="88" text-anchor="middle" font-size="11" fill="#065f46" font-weight="700">发「上料完」</text>
+        <text x="222" y="120" text-anchor="middle" font-size="10.5" fill="#059669">Cube 可以读了</text>
+        <!-- Cube compute -->
+        <rect x="266" y="70" width="150" height="60" rx="12" fill="#dbeafe" stroke="#3b82f6"/>
+        <text x="341" y="95" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">Cube 算 mma</text>
+        <text x="341" y="115" text-anchor="middle" font-size="11" fill="#3b82f6">读这一份 L0</text>
+        <!-- flag: computed -->
+        <path d="M418,100 L498,100" stroke="#8b5cf6" stroke-width="2.5" marker-end="url(#arp)"/>
+        <text x="458" y="88" text-anchor="middle" font-size="11" fill="#5b21b6" font-weight="700">发「算完」</text>
+        <text x="458" y="120" text-anchor="middle" font-size="10.5" fill="#7c3aed">这份可以覆盖了</text>
+        <!-- next MTE1 -->
+        <rect x="502" y="70" width="176" height="60" rx="12" fill="#fef3c7" stroke="#f59e0b" stroke-dasharray="5 4"/>
+        <text x="590" y="95" text-anchor="middle" font-size="12.5" font-weight="700" fill="#92400e">MTE1 上下一批</text>
+        <text x="590" y="115" text-anchor="middle" font-size="11" fill="#b45309">覆盖进这一份</text>
+        <!-- loop back -->
+        <path d="M590,132 C 590,168 105,168 105,134" fill="none" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+        <text x="347" y="184" text-anchor="middle" font-size="11" fill="#64748b">循环：这一份就这样被反复「上料 → 算 → 再上料」</text>
+        <!-- guard note -->
+        <text x="748" y="100" text-anchor="middle" font-size="11" fill="#b91c1c" font-weight="700" transform="rotate(90 748 100)">「算完」没到就不许覆盖</text>
+      </svg>
+    </div>
+    <figcaption>两个方向的握手：<strong>「上料完」</strong>（MTE1→Cube，可以读了）和 <strong>「算完」</strong>（Cube→MTE1，可以覆盖了）。有了「算完」这道关，即使拼命重叠，也<strong>绝不会把还没算的操作数覆盖掉</strong>。</figcaption>
+  </figure>
+
+  <p>两份缓冲各跑这么一个循环，但<strong>错开半拍</strong>：Cube 在算第 0 份时，第 1 份早已收到过「算完」、正被 MTE1 上料 —— 这就是重叠。</p>
+
+  <h3>6.1 开工前「预置」一次、收尾「排空」一次</h3>
+  <p>这里有个先有鸡还是先有蛋的小问题：<strong>MTE1 第一次上料前，需要先收到「算完」信号才敢写</strong> —— 可循环刚开始，根本还没人算过、没人发过「算完」。怎么破？</p>
+  <blockquote><p>办法是：<strong>在进主循环之前，先「预置」一次</strong> —— 假装两份都已经「算完」、是空的、可以随便写。这样第一次上料就能顺利开始。对应地，<strong>整个循环跑完后，再「排空」一次</strong>，把当初预置发出、但没人消费的那两个信号收回来配平。</p></blockquote>
+  <p>关键在于：这对「算完」信号是<strong>开工前预置一次、收尾排空一次，中间一直复用</strong> —— <strong>每一次 mma 用完随手重新置上</strong>，不必在每次 mma 的边界处都重新预置、清理一遍，省事又高效。</p>
+
+  <div class="note"><p>🔁 <strong>凡是这种「循环里反复用、靠反向信号保护」的缓冲，都要在循环两头各配平一次</strong>：进循环前把信号置成「空闲可写」（预置），出循环后把没消费掉的信号等回来（排空）。</p></div>
+
+  <!-- ===================== 7 ===================== -->
+  <h2 id="s7"><span class="num">7</span>一页速查 + 总结</h2>
+
+  <h3>整张图</h3>
+  <figure>
+    <div class="figcard">
+      <p class="figtitle">L1 →(MTE1 上料) → L0A/L0B 各两份轮流 → Cube 算，上料与算全程重叠</p>
+      <svg viewBox="0 0 840 240" role="img" aria-label="总览：MTE1 把操作数从 L1 轮流上料进 L0A/L0B 的两份，Cube 连续读一套算，上料与算重叠">
+        <rect x="24" y="86" width="120" height="80" rx="12" fill="#ede9fe" stroke="#8b5cf6"/>
+        <text x="84" y="74" text-anchor="middle" font-size="12.5" font-weight="700" fill="#5b21b6">L1</text>
+        <text x="84" y="122" text-anchor="middle" font-size="12" fill="#5b21b6">操作数</text>
+        <text x="84" y="144" text-anchor="middle" font-size="11" fill="#7c3aed">（更外层）</text>
+        <text x="420" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">L0A / L0B 各 2 份（同号配一套，轮流用）</text>
+        <!-- L0A two copies -->
+        <rect x="300" y="56" width="240" height="40" rx="9" fill="#eff6ff" stroke="#93c5fd"/><text x="420" y="81" text-anchor="middle" font-size="12" fill="#1e40af" font-weight="700">L0A 第 0 份 ┃ 第 1 份（左矩阵）</text>
+        <rect x="300" y="104" width="240" height="40" rx="9" fill="#ecfdf5" stroke="#6ee7b7"/><text x="420" y="129" text-anchor="middle" font-size="12" fill="#065f46" font-weight="700">L0B 第 0 份 ┃ 第 1 份（右矩阵）</text>
+        <!-- ping-pong -->
+        <path d="M548,150 C 580,150 580,80 548,80" fill="none" stroke="#8b5cf6" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+        <text x="586" y="118" text-anchor="middle" font-size="10.5" fill="#7c3aed" transform="rotate(90 586 118)">0/1 轮</text>
+        <!-- MTE1 arrows -->
+        <path d="M146,110 C 220,110 220,76 296,76" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#ar)"/>
+        <path d="M146,124 C 220,124 220,124 296,124" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#ar)"/>
+        <text x="220" y="200" text-anchor="middle" font-size="11.5" fill="#92400e" font-weight="700">① MTE1 上料（与算并行）</text>
+        <!-- Cube -->
+        <path d="M544,90 C 600,90 600,116 660,118" fill="none" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <path d="M544,120 L660,122" stroke="#2f6fea" stroke-width="2" marker-end="url(#ar)"/>
+        <rect x="664" y="90" width="150" height="70" rx="12" fill="#dbeafe" stroke="#3b82f6"/>
+        <text x="739" y="116" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">Cube</text>
+        <text x="739" y="138" text-anchor="middle" font-size="11.5" fill="#3b82f6">读一整套算</text>
+        <text x="620" y="200" text-anchor="middle" font-size="11.5" fill="#1e40af" font-weight="700">② 每套料一到就算</text>
+        <text x="420" y="228" text-anchor="middle" font-size="12" fill="#475569">各 2 份 = 产一套（MTE1 备）+ 消费一套（Cube 算）；两件事就此错开、重叠。</text>
+      </svg>
+    </div>
+    <figcaption>把前面的图并成一张：MTE1 把操作数从 L1 <strong>轮流</strong>上料进 L0A/L0B 的两份，Cube 每套料一到就算 —— 上料和算全程<strong>并行、互不干等</strong>。</figcaption>
+  </figure>
+
+  <h3>三句话总结</h3>
+  <ol>
+    <li><strong>L0A/L0B 是喂给 Cube 的操作数缓冲</strong>：L0A 放左矩阵、L0B 放右矩阵，Cube 一次 mma 同时读两块、结果进 L0C；操作数由 MTE1 从 L1 上料。</li>
+    <li><strong>各开两份是为了重叠</strong>：Cube 就着这一份算时，MTE1 往另一份上下一批料，两件事<strong>并行、互不干等</strong>（双缓冲 / 乒乓），总时间约等于两者里较长的那条、而不是相加。L0A、L0B 的同号份<strong>配成一套、一起 0/1 轮换</strong>（一次 mma 要左右两个操作数）。</li>
+    <li><strong>2 份就够</strong>：L0 这层是标准的「产一套、消费一套」双缓冲，一次 mma 只吃一套、手上至多两套，2 份正好错开（多一份也没活干）。靠两个方向的握手信号（上料完 / 算完）保证不出错；那对「算完」信号<strong>开工前预置一次、收尾排空一次</strong>，中间一直复用。</li>
+  </ol>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>问题</th><th>答案</th></tr></thead>
+    <tbody>
+      <tr><td>L0A / L0B 装什么？</td><td>矩阵乘的左 / 右操作数（PV 阶段：L0A 放 P、L0B 放 V 小片）。Cube 读两块算，结果进 L0C。</td></tr>
+      <tr><td>为什么各开两份？</td><td>让 MTE1 的上料和 Cube 的算重叠，别让 Cube 干等上料。</td></tr>
+      <tr><td>两份怎么轮流？</td><td>按奇偶（<code>0,1,0,1…</code>）乒乓。L0A、L0B 同号配一套、一起翻。</td></tr>
+      <tr class="hl-row"><td><strong>为什么 2 份就够？</strong></td><td><strong>L0 这层「一次 mma 吃一套」= 标准的产一套、消一套，手上至多两套，2 份正好错开、多一份也没活干。</strong></td></tr>
+      <tr><td>为什么要预置 / 排空？</td><td>第一次上料前没人发过「算完」，所以进循环前先预置（假装空、可写）；出循环后把没消费的信号排空配平。整段循环共用这对信号。</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p style="text-align:center; color:var(--muted); font-size:14px; margin-top:26px;">L0A/L0B 各多备一份，就让 MTE1 的上料和 Cube 的算稳稳并行 —— 又快的算藏进了较慢的上料背后。这就是 L0AB 双缓冲的全部用意。</p>
+
+</div>
+
+<a href="#top" class="totop" title="回到顶部">↑</a>
+<script>
+(function(){
+  var heads = Array.prototype.slice.call(document.querySelectorAll('h2[id]'));
+  var links = Array.prototype.slice.call(document.querySelectorAll('.sidenav a'));
+  if(!heads.length || !links.length) return;
+  var ticking = false;
+  function update(){
+    ticking = false;
+    var cur = heads[0];
+    for(var i=0;i<heads.length;i++){
+      if(heads[i].getBoundingClientRect().top <= 130) cur = heads[i];
+    }
+    for(var j=0;j<links.length;j++){
+      links[j].classList.toggle('active', links[j].getAttribute('href') === '#'+cur.id);
+    }
+  }
+  function onScroll(){ if(!ticking){ ticking = true; requestAnimationFrame(update); } }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll, {passive:true});
+  update();
+})();
+</script>
+</body>
+</html>
