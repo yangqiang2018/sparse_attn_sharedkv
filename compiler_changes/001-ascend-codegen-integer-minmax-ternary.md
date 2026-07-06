@@ -18,15 +18,18 @@
 `DataCopyPA` 的窗口加载是一一对应的:
 
 ```python
-ori_left  = T.max(s_global - ori_win_left, 0)       # 窗口左界钳到 >= 0
-ori_right = s_global + 1
-pos       = T.min(ori_left + row, ori_right - 1)    # 越界行钳到窗口末位
-page      = ori_block_table[b, pos // ori_block_size]
+# ① 窗口左界钳位 —— 内核里显式写的 T.max(kernel.py 每阶段各一处):
+ori_left = T.max(s_global - ori_win_left, 0)         # 窗口左界钳到 >= 0
+
+# ② 分页 gather 取页位置钳位 —— 在 copy_pa 原语(= DataCopyPA,见修改 003)内部:
+#    pos  = min(ori_left + row, s_global)            # 越界行钳到窗口末位(= ori_right-1)
+#    page = ori_block_table[b, pos // ori_block_size]
+#    这段不在内核代码里、由 copy_pa 生成,但它同样产生运行期整数 min。
 ```
 
 这些都是**标量整数下标计算**,是滑动窗口分页 KV gather 所必需的,也是 Ascend C
 `Max(...)` / `Min(...)`(`sparse_attn_sharedkv_swa_kernel.h:689-693`、`common.h`）
-的直接 TileLang 写法,不是可选项、也不是风格问题。
+的对应写法(其中 max 显式写在内核、min 在 copy_pa 内部),不是可选项、也不是风格问题。**两处最终都出现在生成的 C++ 里(见 §2)、都会撞上裸 `max`/`min` 的歧义重载,所以 001 同时被「窗口钳位」和「分页取页」两条路依赖。**
 
 ## 2. 现象
 
@@ -136,7 +139,7 @@ void CodeGenTileLangAscend::VisitExpr_(const MaxNode *op, std::ostream &os) {
 ## 8. 必要性与通用性
 
 **必要性(为什么非改不可)。** SWA 的窗口边界与分页 gather 位置是**运行期标量整数**
-`max`/`min`(`max(s_global-127,0)`、`min(ori_left+row, ori_right-1)`),与 Ascend C 的
+`max`/`min`(`max(s_global-127,0)`、`min(ori_left+row, ori_right-1)` —— 后者由 copy_pa 生成、不在内核代码里),与 Ascend C 的
 `Max()`/`Min()` 一一对应,不是可选写法。codegen 对整数 `Max`/`Min` 输出**裸 `max(a,b)`**,
 在 int64(grid 变量)对 int 字面量时是有歧义重载,bisheng **直接编译失败**。内核侧又躲不
 掉(§4:simplifier 把收窄 cast 折掉)。所以**不改这一处,SWA 内核根本编不过**——这是
