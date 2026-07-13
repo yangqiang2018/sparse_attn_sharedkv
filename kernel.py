@@ -1285,11 +1285,10 @@ def _build_scfa(
     # V0 merge batch (Phase D step1): gather MERGE_ROWS topk cmp tokens into the UB
     # merge buffer, then ONE batched scatter to kvMergeGm -- amortises the per-token
     # barrier (= ref 16-row flush; capped at 8 by UB budget, V0 段 only ~13.5KB free).
-    # Gather uses 015 T.copy_gather (no Duplicate-pad, unlike a partial-row T.copy
-    # into a multi-row buffer). kv_dsz = KV elem bytes (DataCopyPad blockLen is bytes).
+    # Gather is a plain per-token T.copy: dstM folds to 1 (min(MERGE_ROWS, row-extent
+    # 1)) so a partial-row load does not Duplicate-wipe the multi-row merge buffer.
     MERGE_ROWS = 6  # step4: merge_ub double-buffered [2,MERGE_ROWS,D] -> 2x UB; 6 keeps
     # 2*6*512*2=12KB <= ~14.5KB V0-free budget (ref uses 16 via UB reuse, deferred).
-    kv_dsz = 2 if dtype in ("float16", "bfloat16") else 4
 
     accum_dtype = "float"
     idx_dtype = "int32"
@@ -2057,20 +2056,22 @@ def _build_scfa(
                                                                 v0b,
                                                                 r2 // cmp_block_size,
                                                             ]
-                                                            # 015 gather 1 token GM->UB merge_ub[pp,jj]
-                                                            # (no Duplicate; POINT idx not bounded slice).
-                                                            T.copy_gather(
-                                                                merge_ub[pp, jj, :],
+                                                            # V0 gather 1 token GM->UB merge_ub[pp,jj]
+                                                            # via plain T.copy: dstM folds to 1 =
+                                                            # min(MERGE_ROWS, row-extent 1), so this
+                                                            # partial-row load does NOT Duplicate-wipe
+                                                            # the multi-row buffer (codegen emits
+                                                            # copy_gm_to_ub<T, D, 1>). MTE2 like the
+                                                            # gather it replaces, so the surrounding
+                                                            # hand-placed pipe flags still apply.
+                                                            T.copy(
                                                                 cmp_kv[
                                                                     blkid,
                                                                     r2 % cmp_block_size,
                                                                     0,
                                                                     :,
                                                                 ],
-                                                                1,
-                                                                D * kv_dsz,
-                                                                0,
-                                                                0,
+                                                                merge_ub[pp, jj, :],
                                                             )
                                                     # gather(MTE2)->scatter(MTE3) RAW on buf pp (= ref
                                                     # CopyOutMrgeResult's MTE2_MTE3 fence).
