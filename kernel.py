@@ -1473,9 +1473,9 @@ def _build_scfa(
                 softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
                 # SCFA V0 merge buffer (MERGE_ROWS tokens x D, = ref INPUT2_BUFFER batched
                 # at 8 by UB budget). V0 gathers a batch of topk-selected cmp tokens here
-                # (GM cmp_kv -> UB, one 015 T.copy_gather per token: NO Duplicate-pad, so a
-                # multi-row buffer is safe -- a plain partial-row T.copy would Duplicate-wipe
-                # the whole buffer each token), then ONE batched scatter to kvMergeGm.
+                # (GM cmp_kv -> UB, one per-token T.copy: the partial-row load folds dstM to
+                # 1 so it does NOT Duplicate-wipe the multi-row buffer), then ONE batched
+                # scatter to kvMergeGm.
                 merge_ub = T.alloc_ub([2, MERGE_ROWS, D], dtype)
                 # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
                 # [tile g%2, m-chunk, row, 1]. The m-chunk is a SEPARATE dim (not a
