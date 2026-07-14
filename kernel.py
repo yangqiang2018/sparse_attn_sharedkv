@@ -1081,12 +1081,24 @@ def _build_cfa(
                                                 T.wait_flag("mte2", "v", ACC_EV)
                                                 # rescale prev (RowMuls) -> Add (= ref
                                                 # :691-694, PipeBarrier<V> between).
-                                                T.tile.row_expand_mul_nd(
-                                                    acc_pre,
-                                                    acc_pre,
-                                                    expmax[bufo, mc, :, :],
+                                                # rescale prev = Ascend C RowMuls; 复用现成 experiment,
+                                                # 按 xattention 写法展开: brcb 外置 + 逐 8*BLK(=64) 列段
+                                                # mul_experiment(不传 tmp、src1 已 brcb), 覆盖整个 D。
+                                                T.tile.brcb_experiment(
                                                     brcb_d,
+                                                    expmax[bufo, mc, :, :],
+                                                    M_CHUNK // 8,
+                                                    1,
+                                                    8,
                                                 )
+                                                T.pipe_barrier("v")
+                                                for dcol in T.serial(D // (8 * BLK)):
+                                                    cb = dcol * (8 * BLK)
+                                                    T.tile.row_expand_mul_experiment(
+                                                        acc_pre[:, cb : cb + 8 * BLK],
+                                                        acc_pre[:, cb : cb + 8 * BLK],
+                                                        brcb_d,
+                                                    )
                                                 T.pipe_barrier("v")
                                                 T.tile.add(
                                                     in_ub[po, :, :],
@@ -1101,12 +1113,23 @@ def _build_cfa(
                                                 # normalize -> cast -> copy out + LSE
                                                 # (= ref DealBmm2 700-708 + Bmm2Cast
                                                 # AndCopyOut + LSE block; flags as SWA).
-                                                T.tile.row_expand_div(
-                                                    in_ub[po, :, :],
-                                                    in_ub[po, :, :],
-                                                    denom[bufo, mc, :, :],
+                                                # normalize = Ascend C RowDivs; 同上 xattention 写法:
+                                                # brcb 外置 + 逐 8*BLK(=64) 列段 div_experiment(不传 tmp)。
+                                                T.tile.brcb_experiment(
                                                     brcb_d,
+                                                    denom[bufo, mc, :, :],
+                                                    M_CHUNK // 8,
+                                                    1,
+                                                    8,
                                                 )
+                                                T.pipe_barrier("v")
+                                                for dcol in T.serial(D // (8 * BLK)):
+                                                    cb = dcol * (8 * BLK)
+                                                    T.tile.row_expand_div_experiment(
+                                                        in_ub[po, :, cb : cb + 8 * BLK],
+                                                        in_ub[po, :, cb : cb + 8 * BLK],
+                                                        brcb_d,
+                                                    )
                                                 T.pipe_barrier("v")
                                                 # cast -> copy-out (MTE3). WAR: out_ub
                                                 # free = ref WaitFlag<MTE3_V>(:617).
@@ -2343,12 +2366,24 @@ def _build_scfa(
                                                 T.wait_flag("mte2", "v", ACC_EV)
                                                 # rescale prev (RowMuls) -> Add (= ref
                                                 # :691-694, PipeBarrier<V> between).
-                                                T.tile.row_expand_mul_nd(
-                                                    acc_pre,
-                                                    acc_pre,
-                                                    expmax[bufo, mc, :, :],
+                                                # rescale prev = Ascend C RowMuls; 复用现成 experiment,
+                                                # 按 xattention 写法展开: brcb 外置 + 逐 8*BLK(=64) 列段
+                                                # mul_experiment(不传 tmp、src1 已 brcb), 覆盖整个 D。
+                                                T.tile.brcb_experiment(
                                                     brcb_d,
+                                                    expmax[bufo, mc, :, :],
+                                                    M_CHUNK // 8,
+                                                    1,
+                                                    8,
                                                 )
+                                                T.pipe_barrier("v")
+                                                for dcol in T.serial(D // (8 * BLK)):
+                                                    cb = dcol * (8 * BLK)
+                                                    T.tile.row_expand_mul_experiment(
+                                                        acc_pre[:, cb : cb + 8 * BLK],
+                                                        acc_pre[:, cb : cb + 8 * BLK],
+                                                        brcb_d,
+                                                    )
                                                 T.pipe_barrier("v")
                                                 T.tile.add(
                                                     in_ub[po, :, :],
@@ -2363,12 +2398,23 @@ def _build_scfa(
                                                 # normalize -> cast -> copy out + LSE
                                                 # (= ref DealBmm2 700-708 + Bmm2Cast
                                                 # AndCopyOut + LSE block; flags as SWA).
-                                                T.tile.row_expand_div(
-                                                    in_ub[po, :, :],
-                                                    in_ub[po, :, :],
-                                                    denom[bufo, mc, :, :],
+                                                # normalize = Ascend C RowDivs; 同上 xattention 写法:
+                                                # brcb 外置 + 逐 8*BLK(=64) 列段 div_experiment(不传 tmp)。
+                                                T.tile.brcb_experiment(
                                                     brcb_d,
+                                                    denom[bufo, mc, :, :],
+                                                    M_CHUNK // 8,
+                                                    1,
+                                                    8,
                                                 )
+                                                T.pipe_barrier("v")
+                                                for dcol in T.serial(D // (8 * BLK)):
+                                                    cb = dcol * (8 * BLK)
+                                                    T.tile.row_expand_div_experiment(
+                                                        in_ub[po, :, cb : cb + 8 * BLK],
+                                                        in_ub[po, :, cb : cb + 8 * BLK],
+                                                        brcb_d,
+                                                    )
                                                 T.pipe_barrier("v")
                                                 # cast -> copy-out (MTE3). WAR: out_ub
                                                 # free = ref WaitFlag<MTE3_V>(:617).
@@ -3142,9 +3188,19 @@ def _build_swa(
                                     # src1RepStride=1) over the full D -- no
                                     # [G2,D] denom buffer, faithful to Ascend C
                                     # RowDivs; processes headDim in one pass.
-                                    T.tile.row_expand_div(
-                                        o_ub, o_ub, denom[bufm, :, :], brcb_d
+                                    # o /= denom = Ascend C RowDivs; 复用现成 experiment 的 xattention
+                                    # 写法: brcb 外置 + 逐 8*BLK(=64) 列段 div_experiment(不传 tmp)。
+                                    T.tile.brcb_experiment(
+                                        brcb_d, denom[bufm, :, :], G2 // 8, 1, 8
                                     )
+                                    T.pipe_barrier("v")
+                                    for dcol in T.serial(D // (8 * BLK)):
+                                        cb = dcol * (8 * BLK)
+                                        T.tile.row_expand_div_experiment(
+                                            o_ub[:, cb : cb + 8 * BLK],
+                                            o_ub[:, cb : cb + 8 * BLK],
+                                            brcb_d,
+                                        )
                                     # V-pipe order RowDivs -> cast (= ref PipeBarrier
                                     # <PIPE_V>, :707).
                                     T.pipe_barrier("v")
