@@ -1041,14 +1041,18 @@ def _build_cfa(
                                                 )
                                                 T.set_flag("v", "mte2", IN_EV + ps)
                                                 T.wait_flag("v", "mte2", IN_EV + ps)
+                                                # DEBUG slop fix: load exactly [0:tw] (not
+                                                # tw_a-aligned) so the [tw:tw_a] out-of-window
+                                                # QK slop stays fill(-inf) and the full-512
+                                                # reduce ignores it (lse was 97.77% from slop).
                                                 T.copy(
                                                     workspace_s[
                                                         cid,
                                                         buf,
                                                         r0 : r0 + M_CHUNK,
-                                                        0:tw_a,
+                                                        0:tw,
                                                     ],
-                                                    in_ub[ps, :, 0:tw_a],
+                                                    in_ub[ps, :, 0:tw],
                                                 )
                                                 T.copy(
                                                     sinks[r0 : r0 + M_CHUNK],
