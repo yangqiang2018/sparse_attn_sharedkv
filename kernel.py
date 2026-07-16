@@ -874,92 +874,6 @@ def _build_cfa(
                     T.set_flag("mte3", "v", OUT_EV)  # out_ub free
                     T.set_flag("mte3", "v", LSE_EV)  # lse_ub free
 
-                    # path B softmax body shared by the narrow(ORI_W) and wide(S2_BASE)
-                    # buckets. Every call issues the SAME IN_EV+ps / OUT_EV flag ops so the
-                    # per-mc balance holds regardless of the width branch a tile takes;
-                    # only the buffers and compiled width W differ. sc_buf(ping-pong score)
-                    # / out_buf(cast P) / cmp_buf(broadcast) are the width-W tiles.
-                    @T.macro
-                    def emit_sm(
-                        sc_buf,
-                        out_buf,
-                        cmp_buf,
-                        W,
-                        ps,
-                        mc,
-                        buf,
-                        prev,
-                        is_first,
-                        tw_a,
-                        r0,
-                    ):
-                        T.wait_flag("v", "mte2", IN_EV + ps)
-                        T.tile.fill(sc_buf[ps, :, :], -T.infinity(accum_dtype))
-                        T.set_flag("v", "mte2", IN_EV + ps)
-                        T.wait_flag("v", "mte2", IN_EV + ps)
-                        T.copy(
-                            workspace_s[cid, buf, r0 : r0 + M_CHUNK, 0:tw_a],
-                            sc_buf[ps, :, 0:tw_a],
-                        )
-                        T.copy(sinks[r0 : r0 + M_CHUNK], sink_ub[ps, :, :])
-                        T.set_flag("mte2", "v", IN_EV + ps)
-                        T.wait_flag("mte2", "v", IN_EV + ps)
-                        T.tile.mul(sc_buf[ps, :, :], sc_buf[ps, :, :], softmax_scale)
-                        T.pipe_barrier("v")
-                        T.reduce_max(sc_buf[ps, :, :], m_i[buf, mc, :, :], dim=-1)
-                        if is_first:
-                            T.tile.max(
-                                m_i[buf, mc, :, :],
-                                sink_ub[ps, :, :],
-                                m_i[buf, mc, :, :],
-                            )
-                            T.tile.sub(
-                                expmax[buf, mc, :, :],
-                                sink_ub[ps, :, :],
-                                m_i[buf, mc, :, :],
-                            )
-                        else:
-                            T.tile.max(
-                                m_i[buf, mc, :, :],
-                                m_i[prev, mc, :, :],
-                                m_i[buf, mc, :, :],
-                            )
-                            T.tile.sub(
-                                expmax[buf, mc, :, :],
-                                m_i[prev, mc, :, :],
-                                m_i[buf, mc, :, :],
-                            )
-                        T.tile.exp(expmax[buf, mc, :, :], expmax[buf, mc, :, :])
-                        T.tile.broadcast(cmp_buf, m_i[buf, mc, :, :])
-                        T.tile.sub(sc_buf[ps, :, :], sc_buf[ps, :, :], cmp_buf)
-                        T.tile.exp(sc_buf[ps, :, :], sc_buf[ps, :, :])
-                        if is_first:
-                            T.tile.mul(
-                                denom[buf, mc, :, :], ones_ub, expmax[buf, mc, :, :]
-                            )
-                        else:
-                            T.tile.mul(
-                                denom[buf, mc, :, :],
-                                denom[prev, mc, :, :],
-                                expmax[buf, mc, :, :],
-                            )
-                        T.pipe_barrier("v")
-                        T.wait_flag("mte3", "v", OUT_EV)
-                        T.tile.cast(
-                            out_buf, sc_buf[ps, :, :], "CAST_ROUND", M_CHUNK * W
-                        )
-                        T.pipe_barrier("v")
-                        T.reduce_sum(sc_buf[ps, :, :], sumP, dim=-1)
-                        T.tile.add(denom[buf, mc, :, :], denom[buf, mc, :, :], sumP)
-                        T.set_flag("v", "mte2", IN_EV + ps)
-                        T.set_flag("v", "mte3", OUT_EV)
-                        T.wait_flag("v", "mte3", OUT_EV)
-                        T.copy(
-                            out_buf[:, 0:tw_a],
-                            workspace_p[cid, buf, r0 : r0 + M_CHUNK, 0:tw_a],
-                        )
-                        T.set_flag("mte3", "v", OUT_EV)
-
                     for g in T.serial(1, GLOOP + 2):
                         # ---- softmax for tile g-1 ----
                         if g < GLOOP + 1:
@@ -1003,33 +917,231 @@ def _build_cfa(
                                             # S2_BASE path. Both branches issue identical IN_EV+ps / OUT_EV flags,
                                             # so the per-mc wait/set balance holds whichever tile width is taken.
                                             if tw <= ORI_W:
-                                                emit_sm(
-                                                    sc_n,
-                                                    out_n,
+                                                T.wait_flag("v", "mte2", IN_EV + ps)
+                                                T.tile.fill(
+                                                    sc_n[ps, :, :],
+                                                    -T.infinity(accum_dtype),
+                                                )
+                                                T.set_flag("v", "mte2", IN_EV + ps)
+                                                T.wait_flag("v", "mte2", IN_EV + ps)
+                                                T.copy(
+                                                    workspace_s[
+                                                        cid,
+                                                        buf,
+                                                        r0 : r0 + M_CHUNK,
+                                                        0:tw_a,
+                                                    ],
+                                                    sc_n[ps, :, 0:tw_a],
+                                                )
+                                                T.copy(
+                                                    sinks[r0 : r0 + M_CHUNK],
+                                                    sink_ub[ps, :, :],
+                                                )
+                                                T.set_flag("mte2", "v", IN_EV + ps)
+                                                T.wait_flag("mte2", "v", IN_EV + ps)
+                                                T.tile.mul(
+                                                    sc_n[ps, :, :],
+                                                    sc_n[ps, :, :],
+                                                    softmax_scale,
+                                                )
+                                                T.pipe_barrier("v")
+                                                T.reduce_max(
+                                                    sc_n[ps, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                    dim=-1,
+                                                )
+                                                if is_first:
+                                                    T.tile.max(
+                                                        m_i[buf, mc, :, :],
+                                                        sink_ub[ps, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                    )
+                                                    T.tile.sub(
+                                                        expmax[buf, mc, :, :],
+                                                        sink_ub[ps, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                    )
+                                                else:
+                                                    T.tile.max(
+                                                        m_i[buf, mc, :, :],
+                                                        m_i[prev, mc, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                    )
+                                                    T.tile.sub(
+                                                        expmax[buf, mc, :, :],
+                                                        m_i[prev, mc, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                    )
+                                                T.tile.exp(
+                                                    expmax[buf, mc, :, :],
+                                                    expmax[buf, mc, :, :],
+                                                )
+                                                T.tile.broadcast(
+                                                    cmp_n, m_i[buf, mc, :, :]
+                                                )
+                                                T.tile.sub(
+                                                    sc_n[ps, :, :],
+                                                    sc_n[ps, :, :],
                                                     cmp_n,
-                                                    ORI_W,
-                                                    ps,
-                                                    mc,
-                                                    buf,
-                                                    prev,
-                                                    is_first,
-                                                    tw_a,
-                                                    r0,
                                                 )
+                                                T.tile.exp(
+                                                    sc_n[ps, :, :], sc_n[ps, :, :]
+                                                )
+                                                if is_first:
+                                                    T.tile.mul(
+                                                        denom[buf, mc, :, :],
+                                                        ones_ub,
+                                                        expmax[buf, mc, :, :],
+                                                    )
+                                                else:
+                                                    T.tile.mul(
+                                                        denom[buf, mc, :, :],
+                                                        denom[prev, mc, :, :],
+                                                        expmax[buf, mc, :, :],
+                                                    )
+                                                T.pipe_barrier("v")
+                                                T.wait_flag("mte3", "v", OUT_EV)
+                                                T.tile.cast(
+                                                    out_n,
+                                                    sc_n[ps, :, :],
+                                                    "CAST_ROUND",
+                                                    M_CHUNK * ORI_W,
+                                                )
+                                                T.pipe_barrier("v")
+                                                T.reduce_sum(
+                                                    sc_n[ps, :, :], sumP, dim=-1
+                                                )
+                                                T.tile.add(
+                                                    denom[buf, mc, :, :],
+                                                    denom[buf, mc, :, :],
+                                                    sumP,
+                                                )
+                                                T.set_flag("v", "mte2", IN_EV + ps)
+                                                T.set_flag("v", "mte3", OUT_EV)
+                                                T.wait_flag("v", "mte3", OUT_EV)
+                                                T.copy(
+                                                    out_n[:, 0:tw_a],
+                                                    workspace_p[
+                                                        cid,
+                                                        buf,
+                                                        r0 : r0 + M_CHUNK,
+                                                        0:tw_a,
+                                                    ],
+                                                )
+                                                T.set_flag("mte3", "v", OUT_EV)
                                             else:
-                                                emit_sm(
-                                                    in_ub,
-                                                    out_ub,
-                                                    softmax_cmp,
-                                                    S2_BASE,
-                                                    ps,
-                                                    mc,
-                                                    buf,
-                                                    prev,
-                                                    is_first,
-                                                    tw_a,
-                                                    r0,
+                                                T.wait_flag("v", "mte2", IN_EV + ps)
+                                                T.tile.fill(
+                                                    in_ub[ps, :, :],
+                                                    -T.infinity(accum_dtype),
                                                 )
+                                                T.set_flag("v", "mte2", IN_EV + ps)
+                                                T.wait_flag("v", "mte2", IN_EV + ps)
+                                                T.copy(
+                                                    workspace_s[
+                                                        cid,
+                                                        buf,
+                                                        r0 : r0 + M_CHUNK,
+                                                        0:tw_a,
+                                                    ],
+                                                    in_ub[ps, :, 0:tw_a],
+                                                )
+                                                T.copy(
+                                                    sinks[r0 : r0 + M_CHUNK],
+                                                    sink_ub[ps, :, :],
+                                                )
+                                                T.set_flag("mte2", "v", IN_EV + ps)
+                                                T.wait_flag("mte2", "v", IN_EV + ps)
+                                                T.tile.mul(
+                                                    in_ub[ps, :, :],
+                                                    in_ub[ps, :, :],
+                                                    softmax_scale,
+                                                )
+                                                T.pipe_barrier("v")
+                                                T.reduce_max(
+                                                    in_ub[ps, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                    dim=-1,
+                                                )
+                                                if is_first:
+                                                    T.tile.max(
+                                                        m_i[buf, mc, :, :],
+                                                        sink_ub[ps, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                    )
+                                                    T.tile.sub(
+                                                        expmax[buf, mc, :, :],
+                                                        sink_ub[ps, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                    )
+                                                else:
+                                                    T.tile.max(
+                                                        m_i[buf, mc, :, :],
+                                                        m_i[prev, mc, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                    )
+                                                    T.tile.sub(
+                                                        expmax[buf, mc, :, :],
+                                                        m_i[prev, mc, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                    )
+                                                T.tile.exp(
+                                                    expmax[buf, mc, :, :],
+                                                    expmax[buf, mc, :, :],
+                                                )
+                                                T.tile.broadcast(
+                                                    softmax_cmp, m_i[buf, mc, :, :]
+                                                )
+                                                T.tile.sub(
+                                                    in_ub[ps, :, :],
+                                                    in_ub[ps, :, :],
+                                                    softmax_cmp,
+                                                )
+                                                T.tile.exp(
+                                                    in_ub[ps, :, :], in_ub[ps, :, :]
+                                                )
+                                                if is_first:
+                                                    T.tile.mul(
+                                                        denom[buf, mc, :, :],
+                                                        ones_ub,
+                                                        expmax[buf, mc, :, :],
+                                                    )
+                                                else:
+                                                    T.tile.mul(
+                                                        denom[buf, mc, :, :],
+                                                        denom[prev, mc, :, :],
+                                                        expmax[buf, mc, :, :],
+                                                    )
+                                                T.pipe_barrier("v")
+                                                T.wait_flag("mte3", "v", OUT_EV)
+                                                T.tile.cast(
+                                                    out_ub,
+                                                    in_ub[ps, :, :],
+                                                    "CAST_ROUND",
+                                                    M_CHUNK * S2_BASE,
+                                                )
+                                                T.pipe_barrier("v")
+                                                T.reduce_sum(
+                                                    in_ub[ps, :, :], sumP, dim=-1
+                                                )
+                                                T.tile.add(
+                                                    denom[buf, mc, :, :],
+                                                    denom[buf, mc, :, :],
+                                                    sumP,
+                                                )
+                                                T.set_flag("v", "mte2", IN_EV + ps)
+                                                T.set_flag("v", "mte3", OUT_EV)
+                                                T.wait_flag("v", "mte3", OUT_EV)
+                                                T.copy(
+                                                    out_ub[:, 0:tw_a],
+                                                    workspace_p[
+                                                        cid,
+                                                        buf,
+                                                        r0 : r0 + M_CHUNK,
+                                                        0:tw_a,
+                                                    ],
+                                                )
+                                                T.set_flag("mte3", "v", OUT_EV)
                             T.set_cross_flag("MTE3", EV_P)
                         # ---- output for tile g-2 ----
                         if g >= 2:
