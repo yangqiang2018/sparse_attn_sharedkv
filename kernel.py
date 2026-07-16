@@ -390,7 +390,6 @@ def _build_cfa(
                 in_ub = T.alloc_ub(
                     [2, M_CHUNK, S2_BASE], accum_dtype
                 )  # = ref inputBuff1: s_ub(vec1 score) + o_ub(vec2 PV); ping-pong [mc&1]
-                softmax_cmp = T.alloc_ub([M_CHUNK, S2_BASE], accum_dtype)  # compaction
                 out_ub = T.alloc_ub(
                     [M_CHUNK, S2_BASE], dtype
                 )  # = ref outputBuff1: p_half(vec1 cast P) + o_half(vec2 cast out)
@@ -405,9 +404,14 @@ def _build_cfa(
                 brcb_d = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
-                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp);
-                # softmax_cmp 复用为 broadcast(max) 的 [M_CHUNK,512] 目标(免新 alloc)。
+                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp)。
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
+                # strided-in-place softmax (替代满宽手拼): 64 列块归约暂存 + rowmax brcb 目标。
+                # 单独 alloc(不复用 brcb_d/softmax_cmp)避与 PV rescale/其它 mc 并发 race;都很小。
+                part = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # 单块 wholereduce 暂存
+                brcb_s = T.alloc_ub(
+                    [M_CHUNK, BLK], accum_dtype
+                )  # rowmax brcb 广播 [M,8]
                 # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
                 # [tile g%2, m-chunk, row, 1]. The m-chunk is a SEPARATE dim (not a
                 # bounded row-slice of [2,G2,1]) so a per-chunk view ring[slot, mc, :, :]
@@ -891,6 +895,10 @@ def _build_cfa(
                                             T.min(S2_BASE, act_cmp - rel * S2_BASE),
                                         )
                                         tw_a = (tw + 15) // 16 * 16
+                                        # 64-align for strided masked ops (每 chunk = 64 fp32/
+                                        # repeat 上限)。[tw:tw_64] 留 fill(-inf) -> reduce 忽略、
+                                        # exp->0;tw_a<=tw_64 故 copy-out [0:tw_a] 全在算过的范围内。
+                                        tw_64 = (tw + 63) // 64 * 64
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
                                             ps = (
@@ -946,13 +954,36 @@ def _build_cfa(
                                             #   is_first: in_max=sink, in_sum=ones(1.0)
                                             #   else:     in_max=m_i[prev], in_sum=denom[prev]
                                             # m_new=max(in_max,rowmax); expmax=exp(in_max-m_new);
-                                            # P=exp(score-m_new)。[tw_a:512]=-inf 使满宽等价只算
-                                            # 有效列。softmax_cmp 复用为 broadcast 目标。
-                                            T.reduce_max(
-                                                in_ub[ps, :, :],
+                                            # P=exp(score-m_new)。reduce/sub/exp 走 strided-in-place
+                                            # 原地只算 [0:tw_64](64 列块),不碰 [tw_64:512] padding。
+                                            # strided rowmax over [0:tw_64]: 64 列块
+                                            # wholereducemax + 无条件 combine(fill -inf;语句-if
+                                            # guard runtime tw_64,padding 块 -inf 被 max 忽略)
+                                            T.tile.fill(
                                                 m_i[buf, mc, :, :],
-                                                dim=-1,
+                                                -T.infinity(accum_dtype),
                                             )
+                                            for kc in range(S2_BASE // 64):
+                                                if kc * 64 < tw_64:
+                                                    T.tile.wholereducemax(
+                                                        part,
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        64,
+                                                        M_CHUNK,
+                                                        1,
+                                                        1,
+                                                        64,
+                                                        ReduceOrder="ORDER_ONLY_VALUE",
+                                                    )
+                                                    T.tile.max(
+                                                        m_i[buf, mc, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                        part,
+                                                    )
                                             if is_first:
                                                 # m_new = max(sink, rowmax); dst(m_i)放第一位
                                                 # (T.tile.max(A,B,C) 编成 Max(dst=A,B,C))
@@ -982,15 +1013,46 @@ def _build_cfa(
                                                 expmax[buf, mc, :, :],
                                                 expmax[buf, mc, :, :],
                                             )
-                                            T.tile.broadcast(
-                                                softmax_cmp, m_i[buf, mc, :, :]
+                                            # strided score-rowmax: brcb rowmax->[M,8], 再逐 64
+                                            # 列块 row_expand_sub_experiment(全 M 行/块,跨行按物理
+                                            # 512 stride;xattention 写法,免物化 [M,512] softmax_cmp)
+                                            T.tile.brcb_experiment(
+                                                brcb_s,
+                                                m_i[buf, mc, :, :],
+                                                M_CHUNK // 8,
+                                                1,
+                                                8,
                                             )
-                                            T.tile.sub(
-                                                in_ub[ps, :, :],
-                                                in_ub[ps, :, :],
-                                                softmax_cmp,
-                                            )
-                                            T.tile.exp(in_ub[ps, :, :], in_ub[ps, :, :])
+                                            for kc in range(S2_BASE // 64):
+                                                if kc * 64 < tw_64:
+                                                    T.tile.row_expand_sub_experiment(
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        brcb_s,
+                                                    )
+                                            # strided masked exp over [0:tw_64], 64 列块
+                                            for kc in range(S2_BASE // 64):
+                                                if kc * 64 < tw_64:
+                                                    T.tile.exp_experiment(
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                    )
                                             if is_first:
                                                 T.tile.mul(
                                                     denom[buf, mc, :, :],
@@ -1019,7 +1081,25 @@ def _build_cfa(
                                             # denom += sum(P): reduce_sum 破坏 src, 放 cast 之后
                                             # (同 V pipe, pipe_barrier 隔开 cast 先读完 P)。
                                             T.pipe_barrier("v")
-                                            T.reduce_sum(in_ub[ps, :, :], sumP, dim=-1)
+                                            # strided rowsum(P) over [0:tw_64]: 64 列块
+                                            # wholereducesum + 无条件 combine(fill 0)
+                                            T.tile.fill(sumP, T.float32(0.0))
+                                            for kc in range(S2_BASE // 64):
+                                                if kc * 64 < tw_64:
+                                                    T.tile.wholereducesum(
+                                                        part,
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        64,
+                                                        M_CHUNK,
+                                                        1,
+                                                        1,
+                                                        64,
+                                                    )
+                                                    T.tile.add(sumP, sumP, part)
                                             T.tile.add(
                                                 denom[buf, mc, :, :],
                                                 denom[buf, mc, :, :],
@@ -1525,7 +1605,6 @@ def _build_scfa(
                 in_ub = T.alloc_ub(
                     [2, M_CHUNK, S2_BASE], accum_dtype
                 )  # = ref inputBuff1: s_ub(vec1 score) + o_ub(vec2 PV); ping-pong [mc&1]
-                softmax_cmp = T.alloc_ub([M_CHUNK, S2_BASE], accum_dtype)  # compaction
                 out_ub = T.alloc_ub(
                     [M_CHUNK, S2_BASE], dtype
                 )  # = ref outputBuff1: p_half(vec1 cast P) + o_half(vec2 cast out)
@@ -1540,9 +1619,14 @@ def _build_scfa(
                 brcb_d = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
-                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp);
-                # softmax_cmp 复用为 broadcast(max) 的 [M_CHUNK,512] 目标(免新 alloc)。
+                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp)。
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
+                # strided-in-place softmax (替代满宽手拼): 64 列块归约暂存 + rowmax brcb 目标。
+                # 单独 alloc(不复用 brcb_d/softmax_cmp)避与 PV rescale/其它 mc 并发 race;都很小。
+                part = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # 单块 wholereduce 暂存
+                brcb_s = T.alloc_ub(
+                    [M_CHUNK, BLK], accum_dtype
+                )  # rowmax brcb 广播 [M,8]
                 # SCFA V0 merge buffer (MERGE_ROWS tokens x D, = ref INPUT2_BUFFER batched
                 # at 8 by UB budget). V0 gathers a batch of topk-selected cmp tokens here
                 # (GM cmp_kv -> UB, one per-token T.copy: the partial-row load folds dstM to
@@ -2219,6 +2303,10 @@ def _build_scfa(
                                             ),
                                         )
                                         tw_a = (tw + 15) // 16 * 16
+                                        # 64-align for strided masked ops (每 chunk = 64 fp32/
+                                        # repeat 上限)。[tw:tw_64] 留 fill(-inf) -> reduce 忽略、
+                                        # exp->0;tw_a<=tw_64 故 copy-out [0:tw_a] 全在算过的范围内。
+                                        tw_64 = (tw + 63) // 64 * 64
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
                                             ps = (
@@ -2274,13 +2362,36 @@ def _build_scfa(
                                             #   is_first: in_max=sink, in_sum=ones(1.0)
                                             #   else:     in_max=m_i[prev], in_sum=denom[prev]
                                             # m_new=max(in_max,rowmax); expmax=exp(in_max-m_new);
-                                            # P=exp(score-m_new)。[tw_a:512]=-inf 使满宽等价只算
-                                            # 有效列。softmax_cmp 复用为 broadcast 目标。
-                                            T.reduce_max(
-                                                in_ub[ps, :, :],
+                                            # P=exp(score-m_new)。reduce/sub/exp 走 strided-in-place
+                                            # 原地只算 [0:tw_64](64 列块),不碰 [tw_64:512] padding。
+                                            # strided rowmax over [0:tw_64]: 64 列块
+                                            # wholereducemax + 无条件 combine(fill -inf;语句-if
+                                            # guard runtime tw_64,padding 块 -inf 被 max 忽略)
+                                            T.tile.fill(
                                                 m_i[buf, mc, :, :],
-                                                dim=-1,
+                                                -T.infinity(accum_dtype),
                                             )
+                                            for kc in range(S2_BASE // 64):
+                                                if kc * 64 < tw_64:
+                                                    T.tile.wholereducemax(
+                                                        part,
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        64,
+                                                        M_CHUNK,
+                                                        1,
+                                                        1,
+                                                        64,
+                                                        ReduceOrder="ORDER_ONLY_VALUE",
+                                                    )
+                                                    T.tile.max(
+                                                        m_i[buf, mc, :, :],
+                                                        m_i[buf, mc, :, :],
+                                                        part,
+                                                    )
                                             if is_first:
                                                 # m_new = max(sink, rowmax); dst(m_i)放第一位
                                                 # (T.tile.max(A,B,C) 编成 Max(dst=A,B,C))
@@ -2310,15 +2421,46 @@ def _build_scfa(
                                                 expmax[buf, mc, :, :],
                                                 expmax[buf, mc, :, :],
                                             )
-                                            T.tile.broadcast(
-                                                softmax_cmp, m_i[buf, mc, :, :]
+                                            # strided score-rowmax: brcb rowmax->[M,8], 再逐 64
+                                            # 列块 row_expand_sub_experiment(全 M 行/块,跨行按物理
+                                            # 512 stride;xattention 写法,免物化 [M,512] softmax_cmp)
+                                            T.tile.brcb_experiment(
+                                                brcb_s,
+                                                m_i[buf, mc, :, :],
+                                                M_CHUNK // 8,
+                                                1,
+                                                8,
                                             )
-                                            T.tile.sub(
-                                                in_ub[ps, :, :],
-                                                in_ub[ps, :, :],
-                                                softmax_cmp,
-                                            )
-                                            T.tile.exp(in_ub[ps, :, :], in_ub[ps, :, :])
+                                            for kc in range(S2_BASE // 64):
+                                                if kc * 64 < tw_64:
+                                                    T.tile.row_expand_sub_experiment(
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        brcb_s,
+                                                    )
+                                            # strided masked exp over [0:tw_64], 64 列块
+                                            for kc in range(S2_BASE // 64):
+                                                if kc * 64 < tw_64:
+                                                    T.tile.exp_experiment(
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                    )
                                             if is_first:
                                                 T.tile.mul(
                                                     denom[buf, mc, :, :],
@@ -2347,7 +2489,25 @@ def _build_scfa(
                                             # denom += sum(P): reduce_sum 破坏 src, 放 cast 之后
                                             # (同 V pipe, pipe_barrier 隔开 cast 先读完 P)。
                                             T.pipe_barrier("v")
-                                            T.reduce_sum(in_ub[ps, :, :], sumP, dim=-1)
+                                            # strided rowsum(P) over [0:tw_64]: 64 列块
+                                            # wholereducesum + 无条件 combine(fill 0)
+                                            T.tile.fill(sumP, T.float32(0.0))
+                                            for kc in range(S2_BASE // 64):
+                                                if kc * 64 < tw_64:
+                                                    T.tile.wholereducesum(
+                                                        part,
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        64,
+                                                        M_CHUNK,
+                                                        1,
+                                                        1,
+                                                        64,
+                                                    )
+                                                    T.tile.add(sumP, sumP, part)
                                             T.tile.add(
                                                 denom[buf, mc, :, :],
                                                 denom[buf, mc, :, :],
