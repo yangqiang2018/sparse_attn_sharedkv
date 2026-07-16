@@ -902,6 +902,11 @@ def _build_cfa(
                                         # repeat 上限)。[tw:tw_64] 留 fill(-inf) -> reduce 忽略、
                                         # exp->0;tw_a<=tw_64 故 copy-out [0:tw_a] 全在算过的范围内。
                                         tw_64 = (tw + 63) // 64 * 64
+                                        # softmax reduce/sub/exp 按**实际宽度**分路(不是 ori/cmp):
+                                        # 窄窗(tw<=BI:ori 窗 + cfa 的窄 cmp)走 strided-in-place 省
+                                        # padding;宽窗(tw>BI,只 scfa 的宽 cmp,最多 512)走满宽——
+                                        # 无 padding 可省时一条宽 op 胜过 tw_64/64 个 strided chunk。
+                                        is_narrow = tw <= BI
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
                                             ps = (
@@ -963,7 +968,7 @@ def _build_cfa(
                                             # 64 列块 wholereducemax + 无条件 combine(fill -inf,
                                             # 语句-if guard runtime tw_64);cmp(宽 512 全有效)走
                                             # wide reduce_max(8-chunk 的标量开销太贵)。
-                                            if is_first:
+                                            if is_narrow:
                                                 T.tile.fill(
                                                     m_i[buf, mc, :, :],
                                                     -T.infinity(accum_dtype),
@@ -1027,7 +1032,7 @@ def _build_cfa(
                                             # ori: strided score-rowmax(brcb rowmax->[M,8] + 逐 64
                                             # 列块 row_expand_sub_experiment,免物化 softmax_cmp)+
                                             # strided masked exp;cmp: wide broadcast+sub+exp(满 512)
-                                            if is_first:
+                                            if is_narrow:
                                                 T.tile.brcb_experiment(
                                                     brcb_s,
                                                     m_i[buf, mc, :, :],
@@ -1107,7 +1112,7 @@ def _build_cfa(
                                             # ori: strided rowsum(P) over [0:tw_64] 64 列块
                                             # wholereducesum + 无条件 combine(fill 0);
                                             # cmp: wide reduce_sum(满 512)
-                                            if is_first:
+                                            if is_narrow:
                                                 T.tile.fill(sumP, T.float32(0.0))
                                                 for kc in range(BI // 64):
                                                     if kc * 64 < tw_64:
@@ -2339,6 +2344,11 @@ def _build_scfa(
                                         # repeat 上限)。[tw:tw_64] 留 fill(-inf) -> reduce 忽略、
                                         # exp->0;tw_a<=tw_64 故 copy-out [0:tw_a] 全在算过的范围内。
                                         tw_64 = (tw + 63) // 64 * 64
+                                        # softmax reduce/sub/exp 按**实际宽度**分路(不是 ori/cmp):
+                                        # 窄窗(tw<=BI:ori 窗 + cfa 的窄 cmp)走 strided-in-place 省
+                                        # padding;宽窗(tw>BI,只 scfa 的宽 cmp,最多 512)走满宽——
+                                        # 无 padding 可省时一条宽 op 胜过 tw_64/64 个 strided chunk。
+                                        is_narrow = tw <= BI
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
                                             ps = (
@@ -2400,7 +2410,7 @@ def _build_scfa(
                                             # 64 列块 wholereducemax + 无条件 combine(fill -inf,
                                             # 语句-if guard runtime tw_64);cmp(宽 512 全有效)走
                                             # wide reduce_max(8-chunk 的标量开销太贵)。
-                                            if is_first:
+                                            if is_narrow:
                                                 T.tile.fill(
                                                     m_i[buf, mc, :, :],
                                                     -T.infinity(accum_dtype),
@@ -2464,7 +2474,7 @@ def _build_scfa(
                                             # ori: strided score-rowmax(brcb rowmax->[M,8] + 逐 64
                                             # 列块 row_expand_sub_experiment,免物化 softmax_cmp)+
                                             # strided masked exp;cmp: wide broadcast+sub+exp(满 512)
-                                            if is_first:
+                                            if is_narrow:
                                                 T.tile.brcb_experiment(
                                                     brcb_s,
                                                     m_i[buf, mc, :, :],
@@ -2544,7 +2554,7 @@ def _build_scfa(
                                             # ori: strided rowsum(P) over [0:tw_64] 64 列块
                                             # wholereducesum + 无条件 combine(fill 0);
                                             # cmp: wide reduce_sum(满 512)
-                                            if is_first:
+                                            if is_narrow:
                                                 T.tile.fill(sumP, T.float32(0.0))
                                                 for kc in range(BI // 64):
                                                     if kc * 64 < tw_64:
