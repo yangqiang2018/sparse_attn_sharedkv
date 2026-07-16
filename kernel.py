@@ -270,8 +270,6 @@ def _build_cfa(
     accum_dtype = "float"
     idx_dtype = "int32"
     out_cast_mode = "CAST_RINT" if dtype == "bfloat16" else "CAST_ROUND"
-    # SoftmaxFlashV2 shared scratch (= Ascend C softmaxTmpUb / tmpBuff1).
-    SOFTMAX_TMP_BYTES = 32768
 
     # Max cmp tiles per task (compile-time upper bound). cmp length per task =
     # (s_global+1)//cmp_ratio <= max_seq//cmp_ratio; tiled at S2_BASE.
@@ -407,7 +405,9 @@ def _build_cfa(
                 brcb_d = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
-                softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
+                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp);
+                # softmax_cmp 复用为 broadcast(max) 的 [M_CHUNK,512] 目标(免新 alloc)。
+                sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
                 # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
                 # [tile g%2, m-chunk, row, 1]. The m-chunk is a SEPARATE dim (not a
                 # bounded row-slice of [2,G2,1]) so a per-chunk view ring[slot, mc, :, :]
@@ -901,13 +901,17 @@ def _build_cfa(
                                             # output done reading it) = ref WaitFlag
                                             # <V_MTE2>(BUF1+pong):415.
                                             T.wait_flag("v", "mte2", IN_EV + ps)
-                                            # load only the tw_a valid window columns
-                                            # (the cube wrote exactly those) -- = ref
-                                            # columnCount = actualSingleProcessSInner
-                                            # SizeAlign, not a fixed 512 (DealBmm1).
-                                            # Runtime inner-extent on T.copy needs the
-                                            # 014 codegen fix (template col-dim from
-                                            # buffer shape, width via maskShapeN).
+                                            # 手拼替代 007: 满宽 fill -inf mask, 再用 014 只搬
+                                            # 有效 tw_a 列 -> [tw_a:512] 留 -inf, 定长满宽(512)
+                                            # reduce/exp 等价只算有效窗口(绕开变长 reduce)。
+                                            # fill(V)->copy(MTE2) 复用 IN_EV+ps 握手。
+                                            T.tile.fill(
+                                                in_ub[ps, :, :],
+                                                -T.infinity(accum_dtype),
+                                            )
+                                            T.set_flag("v", "mte2", IN_EV + ps)
+                                            T.wait_flag("v", "mte2", IN_EV + ps)
+                                            # load only the tw_a valid window columns via 014.
                                             T.copy(
                                                 workspace_s[
                                                     cid,
@@ -934,33 +938,66 @@ def _build_cfa(
                                             # V-pipe order mul -> softmax (= ref
                                             # PipeBarrier<PIPE_V>:423).
                                             T.pipe_barrier("v")
+                                            # 手拼 online softmax(替代 007): 产出 m_i/expmax/P;
+                                            # denom 的 in_sum*expmax 部分在此, sum(P) 部分在 cast
+                                            # 之后(reduce_sum 破坏 src)。in_max/in_sum 分支:
+                                            #   is_first: in_max=sink, in_sum=ones(1.0)
+                                            #   else:     in_max=m_i[prev], in_sum=denom[prev]
+                                            # m_new=max(in_max,rowmax); expmax=exp(in_max-m_new);
+                                            # P=exp(score-m_new)。[tw_a:512]=-inf 使满宽等价只算
+                                            # 有效列。softmax_cmp 复用为 broadcast 目标。
+                                            T.reduce_max(
+                                                in_ub[ps, :, :],
+                                                m_i[buf, mc, :, :],
+                                                dim=-1,
+                                            )
                                             if is_first:
-                                                T.tile.softmax_flash_v2(
-                                                    in_ub[ps, :, :],
-                                                    denom[buf, mc, :, :],
-                                                    m_i[buf, mc, :, :],
-                                                    expmax[buf, mc, :, :],
-                                                    in_ub[ps, :, :],
-                                                    ones_ub,
+                                                # m_new=max(sink,rowmax); dst 放最后
+                                                T.tile.max(
                                                     sink_ub[ps, :, :],
-                                                    softmax_tmp,
-                                                    softmax_cmp,
-                                                    tw_a,
-                                                    tw,
+                                                    m_i[buf, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                )
+                                                T.tile.sub(
+                                                    expmax[buf, mc, :, :],
+                                                    sink_ub[ps, :, :],
+                                                    m_i[buf, mc, :, :],
                                                 )
                                             else:
-                                                T.tile.softmax_flash_v2(
-                                                    in_ub[ps, :, :],
-                                                    denom[buf, mc, :, :],
-                                                    m_i[buf, mc, :, :],
-                                                    expmax[buf, mc, :, :],
-                                                    in_ub[ps, :, :],
-                                                    denom[prev, mc, :, :],
+                                                T.tile.max(
                                                     m_i[prev, mc, :, :],
-                                                    softmax_tmp,
-                                                    softmax_cmp,
-                                                    tw_a,
-                                                    tw,
+                                                    m_i[buf, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                )
+                                                T.tile.sub(
+                                                    expmax[buf, mc, :, :],
+                                                    m_i[prev, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                )
+                                            T.tile.exp(
+                                                expmax[buf, mc, :, :],
+                                                expmax[buf, mc, :, :],
+                                            )
+                                            T.tile.broadcast(
+                                                softmax_cmp, m_i[buf, mc, :, :]
+                                            )
+                                            T.tile.sub(
+                                                in_ub[ps, :, :],
+                                                in_ub[ps, :, :],
+                                                softmax_cmp,
+                                            )
+                                            T.tile.exp(in_ub[ps, :, :], in_ub[ps, :, :])
+                                            if is_first:
+                                                T.tile.mul(
+                                                    denom[buf, mc, :, :],
+                                                    ones_ub,
+                                                    expmax[buf, mc, :, :],
+                                                )
+                                            else:
+                                                T.tile.mul(
+                                                    denom[buf, mc, :, :],
+                                                    denom[prev, mc, :, :],
+                                                    expmax[buf, mc, :, :],
                                                 )
                                             # V-pipe order softmax -> cast (= ref
                                             # PipeBarrier<PIPE_V>:429).
@@ -975,9 +1012,17 @@ def _build_cfa(
                                                 "CAST_ROUND",
                                                 M_CHUNK * S2_BASE,
                                             )
-                                            # in_ub slot free (compute done) = ref SetFlag
-                                            # <V_MTE2>(BUF1+pong):434; cast -> copy-out =
-                                            # ref SetFlag/WaitFlag<V_MTE3>(:436-437).
+                                            # denom += sum(P): reduce_sum 破坏 src, 放 cast 之后
+                                            # (同 V pipe, pipe_barrier 隔开 cast 先读完 P)。
+                                            T.pipe_barrier("v")
+                                            T.reduce_sum(in_ub[ps, :, :], sumP, dim=-1)
+                                            T.tile.add(
+                                                denom[buf, mc, :, :],
+                                                denom[buf, mc, :, :],
+                                                sumP,
+                                            )
+                                            # in_ub slot free 在 reduce_sum 之后; cast -> copy-out
+                                            # = ref SetFlag/WaitFlag<V_MTE3>(:436-437).
                                             T.set_flag("v", "mte2", IN_EV + ps)
                                             T.set_flag("v", "mte3", OUT_EV)
                                             T.wait_flag("v", "mte3", OUT_EV)
@@ -1316,8 +1361,6 @@ def _build_scfa(
     accum_dtype = "float"
     idx_dtype = "int32"
     out_cast_mode = "CAST_RINT" if dtype == "bfloat16" else "CAST_ROUND"
-    # SoftmaxFlashV2 shared scratch (= Ascend C softmaxTmpUb / tmpBuff1).
-    SOFTMAX_TMP_BYTES = 32768
 
     # Max cmp tiles per task (compile-time upper bound). cmp length per task =
     # (s_global+1)//cmp_ratio <= max_seq//cmp_ratio; tiled at S2_BASE.
@@ -1493,7 +1536,9 @@ def _build_scfa(
                 brcb_d = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
-                softmax_tmp = T.alloc_ub([SOFTMAX_TMP_BYTES], "uint8")
+                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp);
+                # softmax_cmp 复用为 broadcast(max) 的 [M_CHUNK,512] 目标(免新 alloc)。
+                sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
                 # SCFA V0 merge buffer (MERGE_ROWS tokens x D, = ref INPUT2_BUFFER batched
                 # at 8 by UB budget). V0 gathers a batch of topk-selected cmp tokens here
                 # (GM cmp_kv -> UB, one per-token T.copy: the partial-row load folds dstM to
@@ -2180,13 +2225,17 @@ def _build_scfa(
                                             # output done reading it) = ref WaitFlag
                                             # <V_MTE2>(BUF1+pong):415.
                                             T.wait_flag("v", "mte2", IN_EV + ps)
-                                            # load only the tw_a valid window columns
-                                            # (the cube wrote exactly those) -- = ref
-                                            # columnCount = actualSingleProcessSInner
-                                            # SizeAlign, not a fixed 512 (DealBmm1).
-                                            # Runtime inner-extent on T.copy needs the
-                                            # 014 codegen fix (template col-dim from
-                                            # buffer shape, width via maskShapeN).
+                                            # 手拼替代 007: 满宽 fill -inf mask, 再用 014 只搬
+                                            # 有效 tw_a 列 -> [tw_a:512] 留 -inf, 定长满宽(512)
+                                            # reduce/exp 等价只算有效窗口(绕开变长 reduce)。
+                                            # fill(V)->copy(MTE2) 复用 IN_EV+ps 握手。
+                                            T.tile.fill(
+                                                in_ub[ps, :, :],
+                                                -T.infinity(accum_dtype),
+                                            )
+                                            T.set_flag("v", "mte2", IN_EV + ps)
+                                            T.wait_flag("v", "mte2", IN_EV + ps)
+                                            # load only the tw_a valid window columns via 014.
                                             T.copy(
                                                 workspace_s[
                                                     cid,
@@ -2213,33 +2262,66 @@ def _build_scfa(
                                             # V-pipe order mul -> softmax (= ref
                                             # PipeBarrier<PIPE_V>:423).
                                             T.pipe_barrier("v")
+                                            # 手拼 online softmax(替代 007): 产出 m_i/expmax/P;
+                                            # denom 的 in_sum*expmax 部分在此, sum(P) 部分在 cast
+                                            # 之后(reduce_sum 破坏 src)。in_max/in_sum 分支:
+                                            #   is_first: in_max=sink, in_sum=ones(1.0)
+                                            #   else:     in_max=m_i[prev], in_sum=denom[prev]
+                                            # m_new=max(in_max,rowmax); expmax=exp(in_max-m_new);
+                                            # P=exp(score-m_new)。[tw_a:512]=-inf 使满宽等价只算
+                                            # 有效列。softmax_cmp 复用为 broadcast 目标。
+                                            T.reduce_max(
+                                                in_ub[ps, :, :],
+                                                m_i[buf, mc, :, :],
+                                                dim=-1,
+                                            )
                                             if is_first:
-                                                T.tile.softmax_flash_v2(
-                                                    in_ub[ps, :, :],
-                                                    denom[buf, mc, :, :],
-                                                    m_i[buf, mc, :, :],
-                                                    expmax[buf, mc, :, :],
-                                                    in_ub[ps, :, :],
-                                                    ones_ub,
+                                                # m_new=max(sink,rowmax); dst 放最后
+                                                T.tile.max(
                                                     sink_ub[ps, :, :],
-                                                    softmax_tmp,
-                                                    softmax_cmp,
-                                                    tw_a,
-                                                    tw,
+                                                    m_i[buf, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                )
+                                                T.tile.sub(
+                                                    expmax[buf, mc, :, :],
+                                                    sink_ub[ps, :, :],
+                                                    m_i[buf, mc, :, :],
                                                 )
                                             else:
-                                                T.tile.softmax_flash_v2(
-                                                    in_ub[ps, :, :],
-                                                    denom[buf, mc, :, :],
-                                                    m_i[buf, mc, :, :],
-                                                    expmax[buf, mc, :, :],
-                                                    in_ub[ps, :, :],
-                                                    denom[prev, mc, :, :],
+                                                T.tile.max(
                                                     m_i[prev, mc, :, :],
-                                                    softmax_tmp,
-                                                    softmax_cmp,
-                                                    tw_a,
-                                                    tw,
+                                                    m_i[buf, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                )
+                                                T.tile.sub(
+                                                    expmax[buf, mc, :, :],
+                                                    m_i[prev, mc, :, :],
+                                                    m_i[buf, mc, :, :],
+                                                )
+                                            T.tile.exp(
+                                                expmax[buf, mc, :, :],
+                                                expmax[buf, mc, :, :],
+                                            )
+                                            T.tile.broadcast(
+                                                softmax_cmp, m_i[buf, mc, :, :]
+                                            )
+                                            T.tile.sub(
+                                                in_ub[ps, :, :],
+                                                in_ub[ps, :, :],
+                                                softmax_cmp,
+                                            )
+                                            T.tile.exp(in_ub[ps, :, :], in_ub[ps, :, :])
+                                            if is_first:
+                                                T.tile.mul(
+                                                    denom[buf, mc, :, :],
+                                                    ones_ub,
+                                                    expmax[buf, mc, :, :],
+                                                )
+                                            else:
+                                                T.tile.mul(
+                                                    denom[buf, mc, :, :],
+                                                    denom[prev, mc, :, :],
+                                                    expmax[buf, mc, :, :],
                                                 )
                                             # V-pipe order softmax -> cast (= ref
                                             # PipeBarrier<PIPE_V>:429).
@@ -2254,9 +2336,17 @@ def _build_scfa(
                                                 "CAST_ROUND",
                                                 M_CHUNK * S2_BASE,
                                             )
-                                            # in_ub slot free (compute done) = ref SetFlag
-                                            # <V_MTE2>(BUF1+pong):434; cast -> copy-out =
-                                            # ref SetFlag/WaitFlag<V_MTE3>(:436-437).
+                                            # denom += sum(P): reduce_sum 破坏 src, 放 cast 之后
+                                            # (同 V pipe, pipe_barrier 隔开 cast 先读完 P)。
+                                            T.pipe_barrier("v")
+                                            T.reduce_sum(in_ub[ps, :, :], sumP, dim=-1)
+                                            T.tile.add(
+                                                denom[buf, mc, :, :],
+                                                denom[buf, mc, :, :],
+                                                sumP,
+                                            )
+                                            # in_ub slot free 在 reduce_sum 之后; cast -> copy-out
+                                            # = ref SetFlag/WaitFlag<V_MTE3>(:436-437).
                                             T.set_flag("v", "mte2", IN_EV + ps)
                                             T.set_flag("v", "mte3", OUT_EV)
                                             T.wait_flag("v", "mte3", OUT_EV)
