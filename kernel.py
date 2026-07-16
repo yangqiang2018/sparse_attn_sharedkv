@@ -1097,13 +1097,13 @@ def _build_cfa(
                                                     expmax[buf, mc, :, :],
                                                     expmax[buf, mc, :, :],
                                                 )
-                                                T.tile.broadcast(
-                                                    softmax_cmp, m_i[buf, mc, :, :]
-                                                )
-                                                T.tile.sub(
+                                                # fused broadcast(m_i)+sub: frees softmax_cmp
+                                                # (32KB) so the narrow-tile temps fit UB.
+                                                T.tile.row_expand_sub_experiment(
                                                     in_ub[ps, :, :],
                                                     in_ub[ps, :, :],
-                                                    softmax_cmp,
+                                                    m_i[buf, mc, :, :],
+                                                    brcb_d,
                                                 )
                                                 T.tile.exp(
                                                     in_ub[ps, :, :], in_ub[ps, :, :]
