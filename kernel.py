@@ -952,10 +952,11 @@ def _build_cfa(
                                                 dim=-1,
                                             )
                                             if is_first:
-                                                # m_new=max(sink,rowmax); dst 放最后
+                                                # m_new = max(sink, rowmax); dst(m_i)放第一位
+                                                # (T.tile.max(A,B,C) 编成 Max(dst=A,B,C))
                                                 T.tile.max(
-                                                    sink_ub[ps, :, :],
                                                     m_i[buf, mc, :, :],
+                                                    sink_ub[ps, :, :],
                                                     m_i[buf, mc, :, :],
                                                 )
                                                 T.tile.sub(
@@ -964,9 +965,10 @@ def _build_cfa(
                                                     m_i[buf, mc, :, :],
                                                 )
                                             else:
+                                                # m_new = max(m_i[prev], rowmax); dst(m_i)放第一位
                                                 T.tile.max(
-                                                    m_i[prev, mc, :, :],
                                                     m_i[buf, mc, :, :],
+                                                    m_i[prev, mc, :, :],
                                                     m_i[buf, mc, :, :],
                                                 )
                                                 T.tile.sub(
@@ -2276,10 +2278,11 @@ def _build_scfa(
                                                 dim=-1,
                                             )
                                             if is_first:
-                                                # m_new=max(sink,rowmax); dst 放最后
+                                                # m_new = max(sink, rowmax); dst(m_i)放第一位
+                                                # (T.tile.max(A,B,C) 编成 Max(dst=A,B,C))
                                                 T.tile.max(
-                                                    sink_ub[ps, :, :],
                                                     m_i[buf, mc, :, :],
+                                                    sink_ub[ps, :, :],
                                                     m_i[buf, mc, :, :],
                                                 )
                                                 T.tile.sub(
@@ -2288,9 +2291,10 @@ def _build_scfa(
                                                     m_i[buf, mc, :, :],
                                                 )
                                             else:
+                                                # m_new = max(m_i[prev], rowmax); dst(m_i)放第一位
                                                 T.tile.max(
-                                                    m_i[prev, mc, :, :],
                                                     m_i[buf, mc, :, :],
+                                                    m_i[prev, mc, :, :],
                                                     m_i[buf, mc, :, :],
                                                 )
                                                 T.tile.sub(
