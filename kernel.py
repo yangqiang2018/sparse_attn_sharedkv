@@ -251,7 +251,7 @@ def _build_cfa(
     D2 = D // 2  # 256: QK D-chunk (kL1) width -- function-scope int (see _build_swa)
     G = N1 // N2  # GQA group = rows per task (= 64)
     BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
-    ORI_W = BI  # 128: path B narrow-tile softmax bucket (ori window <= BI). Defined
+    ORI_W = 16  # DEBUG shrink (was BI=128) to test UB overflow vs codegen. narrow bucket. Defined
     # here (outer scope), NOT inside the prim_func: a `name = const` statement in the
     # body is parsed as a symbolic Let-var, and using it as a buffer dim makes the
     # tile-op size checks compare PrimExprs instead of ints (size-must-be-same fails).
@@ -394,6 +394,7 @@ def _build_cfa(
                 in_ub = T.alloc_ub(
                     [2, M_CHUNK, S2_BASE], accum_dtype
                 )  # = ref inputBuff1: s_ub(vec1 score) + o_ub(vec2 PV); ping-pong [mc&1]
+                softmax_cmp = T.alloc_ub([M_CHUNK, S2_BASE], accum_dtype)  # compaction
                 out_ub = T.alloc_ub(
                     [M_CHUNK, S2_BASE], dtype
                 )  # = ref outputBuff1: p_half(vec1 cast P) + o_half(vec2 cast out)
@@ -408,9 +409,8 @@ def _build_cfa(
                 brcb_d = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
-                # sumP=reduce_sum(P) temp. broadcast(m_i)+sub is fused via
-                # row_expand_sub (mmax scratch) in both width branches, so no
-                # [M,512] softmax_cmp target is needed (frees 32KB for narrow temps).
+                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp);
+                # softmax_cmp 复用为 broadcast(max) 的 [M_CHUNK,512] 目标(免新 alloc)。
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
                 # Online-softmax running state rings (= softmaxMax/Sum/ExpUb), indexed
                 # [tile g%2, m-chunk, row, 1]. The m-chunk is a SEPARATE dim (not a
@@ -430,9 +430,9 @@ def _build_cfa(
                 sc_n = T.alloc_ub(
                     [2, M_CHUNK, ORI_W], accum_dtype
                 )  # narrow score, ping-pong [mc&1] (rides in_ub's IN_EV+ps flag)
-                mmax = T.alloc_ub(
-                    [M_CHUNK, 1], accum_dtype
-                )  # narrow row_expand_sub src1 scratch (m_i copy, avoids cmp_n's 8KB)
+                cmp_n = T.alloc_ub(
+                    [M_CHUNK, ORI_W], accum_dtype
+                )  # narrow broadcast target
                 out_n = T.alloc_ub([M_CHUNK, ORI_W], dtype)  # narrow cast P
 
                 # ============================ CUBE ============================
@@ -920,7 +920,7 @@ def _build_cfa(
                                             # touch ORI_W cols (beats full-512 white compute); wide tiles keep the
                                             # S2_BASE path. Both branches issue identical IN_EV+ps / OUT_EV flags,
                                             # so the per-mc wait/set balance holds whichever tile width is taken.
-                                            if tw <= ORI_W:
+                                            if tw < 0:  # DEBUG force-wide: narrow emitted but never taken
                                                 T.wait_flag("v", "mte2", IN_EV + ps)
                                                 T.tile.fill(
                                                     sc_n[ps, :, :],
@@ -980,17 +980,13 @@ def _build_cfa(
                                                     expmax[buf, mc, :, :],
                                                     expmax[buf, mc, :, :],
                                                 )
-                                                # fused broadcast(m_i)+sub via row_expand:
-                                                # drops the [M,ORI_W] broadcast target (cmp_n)
-                                                # so the narrow temps fit UB. mmax = [M,1] copy
-                                                # of m_i (row_expand's src1 needs the row count
-                                                # in a plain buffer, not m_i's [.,.,M,1] region).
-                                                T.copy(m_i[buf, mc, :, :], mmax)
-                                                T.tile.row_expand_sub_experiment(
+                                                T.tile.broadcast(
+                                                    cmp_n, m_i[buf, mc, :, :]
+                                                )
+                                                T.tile.sub(
                                                     sc_n[ps, :, :],
                                                     sc_n[ps, :, :],
-                                                    mmax,
-                                                    brcb_d,
+                                                    cmp_n,
                                                 )
                                                 T.tile.exp(
                                                     sc_n[ps, :, :], sc_n[ps, :, :]
@@ -1101,15 +1097,13 @@ def _build_cfa(
                                                     expmax[buf, mc, :, :],
                                                     expmax[buf, mc, :, :],
                                                 )
-                                                # fused broadcast(m_i)+sub via row_expand
-                                                # (same as narrow): frees softmax_cmp's 32KB
-                                                # so the narrow temps fit UB.
-                                                T.copy(m_i[buf, mc, :, :], mmax)
-                                                T.tile.row_expand_sub_experiment(
+                                                T.tile.broadcast(
+                                                    softmax_cmp, m_i[buf, mc, :, :]
+                                                )
+                                                T.tile.sub(
                                                     in_ub[ps, :, :],
                                                     in_ub[ps, :, :],
-                                                    mmax,
-                                                    brcb_d,
+                                                    softmax_cmp,
                                                 )
                                                 T.tile.exp(
                                                     in_ub[ps, :, :], in_ub[ps, :, :]
