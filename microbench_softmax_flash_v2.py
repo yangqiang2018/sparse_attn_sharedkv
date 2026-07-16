@@ -190,17 +190,17 @@ def build_inplace():
             s_ub = T.alloc_ub((M, N), DTYPE)  # 512-wide,原地(无 compact temp)
             nmax = T.alloc_ub((M, 1), DTYPE)
             rsum = T.alloc_ub((M, 1), DTYPE)
-            part = T.alloc_ub(
-                (M, 1), DTYPE
-            )  # 单块归约暂存(k>0 时 combine 进 nmax/rsum)
+            part = T.alloc_ub((M, 1), DTYPE)  # 单块归约暂存,每块 combine 进 nmax/rsum
             brcb_buf = T.alloc_ub((M, 8), DTYPE)  # rowmax 广播目标 [M,8]
             T.copy(Score, s_ub)
-            # rowmax over [0:COL]:64 列块 strided wholereducemax + combine
+            # rowmax over [0:COL]:64 列块 strided wholereducemax + 无条件 combine
+            # (k 是 TIR 循环 Var 不是 Python int → 不能对 k 做 Python 分支;照 bo 的
+            #  fill(-inf) + 每块无条件 max 进 nmax 写法,首块 max(-inf, part)=part)
+            T.tile.fill(nmax, NEG_INF)
             for k in range(nchunk):
                 sc = k * 64
-                dst = nmax if k == 0 else part
                 T.tile.wholereducemax(
-                    dst,
+                    part,
                     s_ub[:, sc : sc + 64],
                     64,
                     M,
@@ -209,8 +209,7 @@ def build_inplace():
                     64,
                     ReduceOrder="ORDER_ONLY_VALUE",
                 )
-                if k > 0:
-                    T.tile.max(nmax, nmax, part)  # dst 第一位
+                T.tile.max(nmax, nmax, part)  # dst 第一位
             # sub:广播 rowmax 后 experiment 64 列循环(全 M 行/次,跨行按物理 512 stride)
             T.tile.brcb_experiment(brcb_buf, nmax, brcb_rep, 1, 8)
             for k in range(nchunk):
@@ -223,13 +222,12 @@ def build_inplace():
                 sc = k * 64
                 T.tile.exp_experiment(s_ub[:, sc : sc + 64], s_ub[:, sc : sc + 64])
             T.copy(s_ub, Pout)  # 存 P(整块=同 007;wholereduce 不破坏 src)
-            # rowsum over [0:COL]:64 列块 strided wholereducesum + combine
+            # rowsum over [0:COL]:64 列块 strided wholereducesum + 无条件 combine(同上)
+            T.tile.fill(rsum, 0.0)
             for k in range(nchunk):
                 sc = k * 64
-                dst = rsum if k == 0 else part
-                T.tile.wholereducesum(dst, s_ub[:, sc : sc + 64], 64, M, 1, 1, 64)
-                if k > 0:
-                    T.tile.add(rsum, rsum, part)
+                T.tile.wholereducesum(part, s_ub[:, sc : sc + 64], 64, M, 1, 1, 64)
+                T.tile.add(rsum, rsum, part)
 
     inplace.__name__ = "inplace"
     return inplace
