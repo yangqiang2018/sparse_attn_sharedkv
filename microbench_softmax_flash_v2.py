@@ -159,6 +159,50 @@ def build_block():
     return block
 
 
+# ---- kernel 5: path B 宽-tw —— WIN 列分 BLK 块,2-pass 跨块 softmax(全连续 temp)---
+def build_block_online(win, blk, name):
+    """宽窗口的 path B:WIN 列分成 nblk 个 BLK 宽块,2-pass 跨块 softmax——
+    pass1 逐块 reduce_max→跨块 row max;pass2 逐块 exp(block-rowmax)+reduce_sum+写 P。
+    所有算子都在连续 [M,BLK] temp 上(现成原语)。测:多块 + 跨块合并的开销会不会让
+    宽-tw path B 反超当前 wide(满宽一发)。strided-load 已证便宜,故 2-pass 重载可接受。"""
+    nblk = win // blk
+
+    @T.prim_func
+    def bo(
+        Score: T.Tensor((M, N), DTYPE),  # type: ignore
+        Sink: T.Tensor((M, 1), DTYPE),  # type: ignore
+        Pout: T.Tensor((M, N), DTYPE),  # type: ignore
+    ):
+        T.func_attr({"enable_auto_sync": True})
+        with T.Kernel(1, is_npu=True) as (cid, vid):
+            temp = T.alloc_ub((M, blk), DTYPE)  # 连续 BLK temp
+            rowmax = T.alloc_ub((M, 1), DTYPE)
+            blkred = T.alloc_ub((M, 1), DTYPE)
+            rowsum = T.alloc_ub((M, 1), DTYPE)
+            max2d = T.alloc_ub((M, blk), DTYPE)
+            # pass 1: 跨块 row max
+            T.tile.fill(rowmax, NEG_INF)
+            for b in range(nblk):
+                T.copy(Score[:, b * blk : (b + 1) * blk], temp)
+                T.reduce_max(temp, blkred, dim=-1)
+                T.tile.max(rowmax, rowmax, blkred)  # dst 第一位(Max(dst,a,b))
+            T.tile.broadcast(max2d, rowmax)
+            # pass 2: exp(block-rowmax) + 累加 sum + 写 P
+            T.tile.fill(rowsum, 0.0)
+            for b in range(nblk):
+                T.copy(Score[:, b * blk : (b + 1) * blk], temp)
+                T.tile.sub(temp, temp, max2d)
+                T.tile.exp(temp, temp)
+                T.copy(
+                    temp, Pout[:, b * blk : (b + 1) * blk]
+                )  # 先写(reduce_sum 破坏 src)
+                T.reduce_sum(temp, blkred, dim=-1)
+                T.tile.add(rowsum, rowsum, blkred)
+
+    bo.__name__ = name
+    return bo
+
+
 def build_dbg_reduce(width, name):
     """只测 reduce_max+sub: copy -> reduce_max -> broadcast -> sub,输出 s_ub = score - nmax。
     reduce_max 归约整行则每元素 <= 0;若 nmax 偏小(只归约了部分列)则会出现 > 0。"""
@@ -223,6 +267,9 @@ KERNELS = {
         N,
         COL,
     ),  # path B: 宽输入 + strided-load 连续 COL + narrow softmax
+    # path B 宽-tw:多块 2-pass。bo256=部分宽(2 块,应超 wide);bo512=满宽(4 块,测 rescale 开销)
+    "bo256": (lambda: build_block_online(256, 128, "bo256"), N, 256),
+    "bo512": (lambda: build_block_online(512, 128, "bo512"), N, 512),
 }
 
 
@@ -364,7 +411,7 @@ def bench(iters, drop, col_substr):
         f"\nshape M={M} N={N} COL={COL} dtype={DTYPE}; iters={iters} drop-cold={drop}"
     )
     res = {}
-    for name in ("flash_v2", "narrow", "wide", "block"):
+    for name in ("flash_v2", "narrow", "wide", "block", "bo256", "bo512"):
         csv_path = _collect(name, iters, f"/tmp/msbench_{name}")
         if not csv_path:
             print(f"  [{name:8s}] no CSV")
@@ -392,6 +439,21 @@ def bench(iters, drop, col_substr):
         print(f"\n[path B] block(strided-load+连续 narrow) = {res['block']:.3f} us")
         print(f"  block - flash_v2 = {C:.3f} us  (<=0 → path B 追平/超 007,值得建)")
         print(f"  block - narrow   = {D:.3f} us  (strided-load 相比连续输入的额外开销)")
+    if res.get("bo256") and res.get("bo512") and res.get("wide"):
+        print("\n[path B 宽-tw] 多块 2-pass block-online:")
+        print(
+            f"  bo256(2 块, tw=256) = {res['bo256']:.3f} us  vs wide(满512) {res['wide']:.3f}"
+        )
+        print(
+            f"    bo256 - wide = {res['bo256'] - res['wide']:.3f} us  (<0 → 部分宽 tile 也省)"
+        )
+        print(
+            f"  bo512(4 块, tw=512) = {res['bo512']:.3f} us  vs wide(满512) {res['wide']:.3f}"
+        )
+        print(
+            f"    bo512 - wide = {res['bo512'] - res['wide']:.3f} us  "
+            "(<=0 → 满宽 tile 也不亏,path B 全程可用; >0 → 满宽 tile 走 hybrid)"
+        )
 
 
 def main():
