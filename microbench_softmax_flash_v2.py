@@ -159,61 +159,6 @@ def build_block():
     return block
 
 
-# ---- kernel 6: strided-in-place —— 宽 [M,N] 输入,softmax 只碰前 COL 列、**原地**算,
-#      不 compact、不加分数 buffer(= 编译器 strided-narrow 原语要让 kernel.py 走的形态)。
-#      零编译器积木拼:reduce/exp per-row(唯一能对 512-strided 子区正确的现成写法),
-#      sub 走 xattention 的 experiment(brcb + 64 列 row_expand_sub_experiment 循环,全 M 行/次)。
-def build_inplace():
-    """真实 CFA 场景的 strided-in-place 代理:score 在 [M,N=512] buffer(同 007),softmax
-    **原地**只算前 COL 列——不像 007/block 那样 compact 到连续 temp(那块 temp 正是 CFA UB
-    装不下的 path B 死因)。零新编译器原语:
-      - reduce_max/reduce_sum:per-row(reduce 吃 BufferRegion,单行 [1,COL] 物理连续=正确;
-        strided 满宽 reduce 现有原语发不出,per-row 是唯一现成正确写法 → M 次调用)。
-      - sub:xattention 的 experiment 写法(brcb rowmax→[M,8],再按 64 列循环
-        row_expand_sub_experiment,rep_stride 从物理列 512 推=跨行 strided,全 M 行/次)。
-        ★ 同时验证 experiment-sub 在 512-strided buffer 上正确(之前 NaN 是错在 tw>64 一次性调)。
-      - exp:per-row(满宽 strided exp 现有原语发不出;单行 [0:COL] 物理连续=正确 → M 次)。
-    measure:零编译器 strided-in-place vs 007。唯一低效点是 reduce/exp 的 per-row(M 次);
-    若仍追平/超 007 → ① 稳赢;若输且差在 per-row → 正是 strided reduce/exp 原语要消的开销。"""
-    brcb_rep = M // 8  # brcb_experiment repeat:M 行 / 8-行块
-
-    @T.prim_func
-    def inplace(
-        Score: T.Tensor((M, N), DTYPE),  # type: ignore  宽 buffer(同 007)
-        Sink: T.Tensor((M, 1), DTYPE),  # type: ignore
-        Pout: T.Tensor((M, N), DTYPE),  # type: ignore
-    ):
-        T.func_attr({"enable_auto_sync": True})
-        with T.Kernel(1, is_npu=True) as (cid, vid):
-            s_ub = T.alloc_ub((M, N), DTYPE)  # 512-wide,原地(无 compact temp)
-            nmax = T.alloc_ub((M, 1), DTYPE)
-            rsum = T.alloc_ub((M, 1), DTYPE)
-            brcb_buf = T.alloc_ub((M, 8), DTYPE)  # rowmax 广播目标 [M,8]
-            T.copy(Score, s_ub)
-            # reduce_max over [0:COL],per-row(单行 [1,COL] 连续)
-            for i in range(M):
-                T.reduce_max(s_ub[i : i + 1, 0:COL], nmax[i : i + 1, 0:1], dim=-1)
-            # sub:广播 rowmax 后 experiment 64 列循环(全 M 行/次,跨行按物理 512 stride)
-            T.tile.brcb_experiment(brcb_buf, nmax, brcb_rep, 1, 8)
-            for k in range(COL // 64):
-                sc = k * 64
-                T.tile.row_expand_sub_experiment(
-                    s_ub[:, sc : sc + 64], s_ub[:, sc : sc + 64], brcb_buf
-                )
-            # exp over [0:COL],per-row(单行连续)
-            for i in range(M):
-                T.tile.exp(s_ub[i, 0:COL], s_ub[i, 0:COL])
-            T.copy(
-                s_ub, Pout
-            )  # 先存 P(整块拷=同 007,apples-to-apples;reduce_sum 破坏 src)
-            # reduce_sum over [0:COL],per-row
-            for i in range(M):
-                T.reduce_sum(s_ub[i : i + 1, 0:COL], rsum[i : i + 1, 0:1], dim=-1)
-
-    inplace.__name__ = "inplace"
-    return inplace
-
-
 # ---- kernel 5: path B 宽-tw —— WIN 列分 BLK 块,2-pass 跨块 softmax(全连续 temp)---
 def build_block_online(win, blk, name):
     """宽窗口的 path B:WIN 列分成 nblk 个 BLK 宽块,2-pass 跨块 softmax——
@@ -322,8 +267,6 @@ KERNELS = {
         N,
         COL,
     ),  # path B: 宽输入 + strided-load 连续 COL + narrow softmax
-    # strided-in-place:宽输入,原地只算 COL 列(无 compact),reduce/exp per-row + experiment sub
-    "inplace": (build_inplace, N, COL),
     # path B 宽-tw:多块 2-pass。bo256=部分宽(2 块,应超 wide);bo512=满宽(4 块,测 rescale 开销)
     "bo256": (lambda: build_block_online(256, 128, "bo256"), N, 256),
     "bo512": (lambda: build_block_online(512, 128, "bo512"), N, 512),
@@ -468,7 +411,7 @@ def bench(iters, drop, col_substr):
         f"\nshape M={M} N={N} COL={COL} dtype={DTYPE}; iters={iters} drop-cold={drop}"
     )
     res = {}
-    for name in ("flash_v2", "narrow", "wide", "block", "inplace", "bo256", "bo512"):
+    for name in ("flash_v2", "narrow", "wide", "block", "bo256", "bo512"):
         csv_path = _collect(name, iters, f"/tmp/msbench_{name}")
         if not csv_path:
             print(f"  [{name:8s}] no CSV")
@@ -496,24 +439,6 @@ def bench(iters, drop, col_substr):
         print(f"\n[path B] block(strided-load+连续 narrow) = {res['block']:.3f} us")
         print(f"  block - flash_v2 = {C:.3f} us  (<=0 → path B 追平/超 007,值得建)")
         print(f"  block - narrow   = {D:.3f} us  (strided-load 相比连续输入的额外开销)")
-    if res.get("inplace") and res.get("flash_v2"):
-        E = res["inplace"] - res["flash_v2"]
-        print(
-            "\n[strided-in-place] inplace(原地,无 compact;reduce/exp per-row+experiment sub)"
-        )
-        print(
-            f"  inplace = {res['inplace']:.3f} us  vs flash_v2(007) {res['flash_v2']:.3f}"
-        )
-        print(
-            f"  inplace - flash_v2 = {E:.3f} us  "
-            "(<=0 → 零编译器 strided-in-place 已追平/超 007,① 稳赢;"
-            ">0 → per-row reduce/exp 是差距 → strided reduce/exp 原语要消的就是它)"
-        )
-        if res.get("block"):
-            print(
-                f"  inplace - block   = {res['inplace'] - res['block']:.3f} us  "
-                "(strided-in-place per-row 相比 compact+连续 的代价)"
-            )
     if res.get("bo256") and res.get("bo512") and res.get("wide"):
         print("\n[path B 宽-tw] 多块 2-pass block-online:")
         print(
