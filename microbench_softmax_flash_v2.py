@@ -127,6 +127,38 @@ def build_manual(width, name):
     return manual
 
 
+# ---- kernel 4: path B —— 宽 [M,N] 输入,strided-load 前 COL 列进连续 [M,COL] temp,
+#      再在连续 temp 上做 narrow softmax(全现成连续原语,零新编译器原语)。--------
+def build_block():
+    """真实 CFA 场景的 path B 代理:score 在 [M,N=512] buffer 里(和 007 一样),但把有效
+    前 COL 列 **strided-load 进连续 [M,COL] temp**,之后 softmax 全在连续 temp 上用现有
+    原语算(reduce_max/sub/exp/reduce_sum,任意宽度对连续 buffer 都对)。相比 narrow(连续
+    输入)只多一步 strided load。measure:strided load 是否便宜到让 path B ≈ narrow < 007。"""
+
+    @T.prim_func
+    def block(
+        Score: T.Tensor((M, N), DTYPE),  # type: ignore  宽 buffer(同 007)
+        Sink: T.Tensor((M, 1), DTYPE),  # type: ignore
+        Pout: T.Tensor((M, N), DTYPE),  # type: ignore
+    ):
+        T.func_attr({"enable_auto_sync": True})
+        with T.Kernel(1, is_npu=True) as (cid, vid):
+            s_ub = T.alloc_ub((M, COL), DTYPE)  # 连续 COL temp
+            nmax = T.alloc_ub((M, 1), DTYPE)
+            rsum = T.alloc_ub((M, 1), DTYPE)
+            nmax_2d = T.alloc_ub((M, COL), DTYPE)
+            T.copy(Score[:, 0:COL], s_ub)  # strided load [M,COL]@N -> 连续 temp
+            T.reduce_max(s_ub, nmax, dim=-1)
+            T.tile.broadcast(nmax_2d, nmax)
+            T.tile.sub(s_ub, s_ub, nmax_2d)
+            T.tile.exp(s_ub, s_ub)
+            T.copy(s_ub, Pout[:, 0:COL])  # strided store 回宽 buffer
+            T.reduce_sum(s_ub, rsum, dim=-1)
+
+    block.__name__ = "block"
+    return block
+
+
 def build_dbg_reduce(width, name):
     """只测 reduce_max+sub: copy -> reduce_max -> broadcast -> sub,输出 s_ub = score - nmax。
     reduce_max 归约整行则每元素 <= 0;若 nmax 偏小(只归约了部分列)则会出现 > 0。"""
@@ -186,6 +218,11 @@ KERNELS = {
     "flash_v2": (build_flash_v2, N, COL),
     "narrow": (lambda: build_manual(COL, "narrow"), COL, COL),
     "wide": (lambda: build_manual(N, "wide"), N, N),
+    "block": (
+        build_block,
+        N,
+        COL,
+    ),  # path B: 宽输入 + strided-load 连续 COL + narrow softmax
 }
 
 
@@ -327,7 +364,7 @@ def bench(iters, drop, col_substr):
         f"\nshape M={M} N={N} COL={COL} dtype={DTYPE}; iters={iters} drop-cold={drop}"
     )
     res = {}
-    for name in ("flash_v2", "narrow", "wide"):
+    for name in ("flash_v2", "narrow", "wide", "block"):
         csv_path = _collect(name, iters, f"/tmp/msbench_{name}")
         if not csv_path:
             print(f"  [{name:8s}] no CSV")
@@ -349,6 +386,12 @@ def bench(iters, drop, col_substr):
         print(
             "判读: B 小→变长手拼能追平 007(撤划算); B 大→007 融合真价值(保留); A 大→变长 reduce 价值高"
         )
+    if res.get("block") and res.get("flash_v2") and res.get("narrow"):
+        C = res["block"] - res["flash_v2"]
+        D = res["block"] - res["narrow"]
+        print(f"\n[path B] block(strided-load+连续 narrow) = {res['block']:.3f} us")
+        print(f"  block - flash_v2 = {C:.3f} us  (<=0 → path B 追平/超 007,值得建)")
+        print(f"  block - narrow   = {D:.3f} us  (strided-load 相比连续输入的额外开销)")
 
 
 def main():
