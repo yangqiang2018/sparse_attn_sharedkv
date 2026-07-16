@@ -251,6 +251,10 @@ def _build_cfa(
     D2 = D // 2  # 256: QK D-chunk (kL1) width -- function-scope int (see _build_swa)
     G = N1 // N2  # GQA group = rows per task (= 64)
     BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
+    ORI_W = BI  # 128: path B narrow-tile softmax bucket (ori window <= BI). Defined
+    # here (outer scope), NOT inside the prim_func: a `name = const` statement in the
+    # body is parsed as a symbolic Let-var, and using it as a buffer dim makes the
+    # tile-op size checks compare PrimExprs instead of ints (size-must-be-same fails).
     PV_NT = D // BI  # 4 output-D tiles (= ComputeMm2 nL1Loops)
     PV_NW = BI  # 128: each output-D tile width
     VEC_NUM = 2  # 2 vector cores per cube core
@@ -422,7 +426,7 @@ def _build_cfa(
                 # reduce/exp/cast only touch ORI_W columns and beat the full-512 white
                 # compute (a strided sub-window of the 512 buffer would fold in padding;
                 # a contiguous narrow temp does not). Wide tiles keep the S2_BASE path.
-                ORI_W = BI  # 128
+                # (ORI_W is defined at the outer scope, above, to stay a Python int.)
                 sc_n = T.alloc_ub(
                     [2, M_CHUNK, ORI_W], accum_dtype
                 )  # narrow score, ping-pong [mc&1] (rides in_ub's IN_EV+ps flag)
@@ -1435,6 +1439,10 @@ def _build_scfa(
     D2 = D // 2  # 256: QK D-chunk (kL1) width -- function-scope int (see _build_swa)
     G = N1 // N2  # GQA group = rows per task (= 64)
     BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
+    ORI_W = BI  # 128: path B narrow-tile softmax bucket (ori window <= BI). Defined
+    # here (outer scope), NOT inside the prim_func: a `name = const` statement in the
+    # body is parsed as a symbolic Let-var, and using it as a buffer dim makes the
+    # tile-op size checks compare PrimExprs instead of ints (size-must-be-same fails).
     PV_NT = D // BI  # 4 output-D tiles (= ComputeMm2 nL1Loops)
     PV_NW = BI  # 128: each output-D tile width
     VEC_NUM = 2  # 2 vector cores per cube core
