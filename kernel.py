@@ -933,9 +933,9 @@ def _build_cfa(
                                                         cid,
                                                         buf,
                                                         r0 : r0 + M_CHUNK,
-                                                        0:tw_a,
+                                                        0:tw,
                                                     ],
-                                                    sc_n[ps, :, 0:tw_a],
+                                                    sc_n[ps, :, 0:tw],
                                                 )
                                                 T.copy(
                                                     sinks[r0 : r0 + M_CHUNK],
@@ -2344,15 +2344,17 @@ def _build_scfa(
                                             )
                                             T.set_flag("v", "mte2", IN_EV + ps)
                                             T.wait_flag("v", "mte2", IN_EV + ps)
-                                            # load only the tw_a valid window columns via 014.
+                                            # load exactly [0:tw] (not tw_a-aligned): the
+                                            # [tw:tw_a] out-of-window QK slop stays fill(-inf)
+                                            # so the full-width reduce ignores it (lse slop fix).
                                             T.copy(
                                                 workspace_s[
                                                     cid,
                                                     buf,
                                                     r0 : r0 + M_CHUNK,
-                                                    0:tw_a,
+                                                    0:tw,
                                                 ],
-                                                in_ub[ps, :, 0:tw_a],
+                                                in_ub[ps, :, 0:tw],
                                             )
                                             T.copy(
                                                 sinks[r0 : r0 + M_CHUNK],
