@@ -251,7 +251,7 @@ def _build_cfa(
     D2 = D // 2  # 256: QK D-chunk (kL1) width -- function-scope int (see _build_swa)
     G = N1 // N2  # GQA group = rows per task (= 64)
     BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
-    ORI_W = 64  # DEBUG margin probe (real=BI=128). narrow bucket. Defined
+    ORI_W = BI  # 128: path B narrow-tile softmax bucket (ori window <= BI). Defined
     # here (outer scope), NOT inside the prim_func: a `name = const` statement in the
     # body is parsed as a symbolic Let-var, and using it as a buffer dim makes the
     # tile-op size checks compare PrimExprs instead of ints (size-must-be-same fails).
@@ -430,9 +430,9 @@ def _build_cfa(
                 sc_n = T.alloc_ub(
                     [2, M_CHUNK, ORI_W], accum_dtype
                 )  # narrow score, ping-pong [mc&1] (rides in_ub's IN_EV+ps flag)
-                cmp_n = T.alloc_ub(
-                    [M_CHUNK, ORI_W], accum_dtype
-                )  # narrow broadcast target
+                mmax = T.alloc_ub(
+                    [M_CHUNK, 1], accum_dtype
+                )  # narrow row_expand_sub src1 scratch (m_i copy, avoids cmp_n's 8KB)
                 out_n = T.alloc_ub([M_CHUNK, ORI_W], dtype)  # narrow cast P
 
                 # ============================ CUBE ============================
@@ -920,7 +920,7 @@ def _build_cfa(
                                             # touch ORI_W cols (beats full-512 white compute); wide tiles keep the
                                             # S2_BASE path. Both branches issue identical IN_EV+ps / OUT_EV flags,
                                             # so the per-mc wait/set balance holds whichever tile width is taken.
-                                            if tw < 0:  # DEBUG force-wide: narrow emitted but never taken
+                                            if tw <= ORI_W:
                                                 T.wait_flag("v", "mte2", IN_EV + ps)
                                                 T.tile.fill(
                                                     sc_n[ps, :, :],
@@ -980,13 +980,17 @@ def _build_cfa(
                                                     expmax[buf, mc, :, :],
                                                     expmax[buf, mc, :, :],
                                                 )
-                                                T.tile.broadcast(
-                                                    cmp_n, m_i[buf, mc, :, :]
-                                                )
-                                                T.tile.sub(
+                                                # fused broadcast(m_i)+sub via row_expand:
+                                                # drops the [M,ORI_W] broadcast target (cmp_n)
+                                                # so the narrow temps fit UB. mmax = [M,1] copy
+                                                # of m_i (row_expand's src1 needs the row count
+                                                # in a plain buffer, not m_i's [.,.,M,1] region).
+                                                T.copy(m_i[buf, mc, :, :], mmax)
+                                                T.tile.row_expand_sub_experiment(
                                                     sc_n[ps, :, :],
                                                     sc_n[ps, :, :],
-                                                    cmp_n,
+                                                    mmax,
+                                                    brcb_d,
                                                 )
                                                 T.tile.exp(
                                                     sc_n[ps, :, :], sc_n[ps, :, :]
