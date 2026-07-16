@@ -920,7 +920,7 @@ def _build_cfa(
                                             # touch ORI_W cols (beats full-512 white compute); wide tiles keep the
                                             # S2_BASE path. Both branches issue identical IN_EV+ps / OUT_EV flags,
                                             # so the per-mc wait/set balance holds whichever tile width is taken.
-                                            if tw <= ORI_W:
+                                            if tw < 0:  # DEBUG force-wide (20KB UB test)
                                                 T.wait_flag("v", "mte2", IN_EV + ps)
                                                 T.tile.fill(
                                                     sc_n[ps, :, :],
