@@ -879,6 +879,7 @@ def _build_cfa(
                     # per-mc balance holds regardless of the width branch a tile takes;
                     # only the buffers and compiled width W differ. sc_buf(ping-pong score)
                     # / out_buf(cast P) / cmp_buf(broadcast) are the width-W tiles.
+                    @T.macro
                     def emit_sm(
                         sc_buf,
                         out_buf,
