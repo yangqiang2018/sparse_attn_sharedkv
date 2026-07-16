@@ -251,7 +251,7 @@ def _build_cfa(
     D2 = D // 2  # 256: QK D-chunk (kL1) width -- function-scope int (see _build_swa)
     G = N1 // N2  # GQA group = rows per task (= 64)
     BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
-    ORI_W = BI  # 128: path B narrow-tile softmax bucket (ori window <= BI). Defined
+    ORI_W = 16  # DEBUG shrink (was BI=128) to test UB overflow vs codegen. narrow bucket. Defined
     # here (outer scope), NOT inside the prim_func: a `name = const` statement in the
     # body is parsed as a symbolic Let-var, and using it as a buffer dim makes the
     # tile-op size checks compare PrimExprs instead of ints (size-must-be-same fails).
