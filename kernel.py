@@ -1030,14 +1030,30 @@ def _build_cfa(
                                                 T.tile.exp(compact, compact)
                                                 T.copy(compact, in_ub[ps, :, 0:BI])
                                             else:
-                                                # 宽路 sub: row_expand_sub(Brcb+Sub,免物化
-                                                # softmax_cmp,腾 32KB UB 给 compact)
-                                                T.tile.row_expand_sub(
-                                                    in_ub[ps, :, :],
-                                                    in_ub[ps, :, :],
-                                                    m_i[buf, mc, :, :],
+                                                # 宽路 sub: brcb rowmax + 官方 experiment 逐 64 列
+                                                # 段(免物化 softmax_cmp 腾 UB;512=8 段)。用官方
+                                                # #1255 experiment,不引撤回的私有 row_expand_sub。
+                                                T.tile.brcb_experiment(
                                                     brcb_s,
+                                                    m_i[buf, mc, :, :],
+                                                    M_CHUNK // 8,
+                                                    1,
+                                                    8,
                                                 )
+                                                for kc in range(S2_BASE // 64):
+                                                    T.tile.row_expand_sub_experiment(
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        brcb_s,
+                                                    )
                                                 T.tile.exp(
                                                     in_ub[ps, :, :], in_ub[ps, :, :]
                                                 )
@@ -2415,14 +2431,30 @@ def _build_scfa(
                                                 T.tile.exp(compact, compact)
                                                 T.copy(compact, in_ub[ps, :, 0:BI])
                                             else:
-                                                # 宽路 sub: row_expand_sub(Brcb+Sub,免物化
-                                                # softmax_cmp,腾 32KB UB 给 compact)
-                                                T.tile.row_expand_sub(
-                                                    in_ub[ps, :, :],
-                                                    in_ub[ps, :, :],
-                                                    m_i[buf, mc, :, :],
+                                                # 宽路 sub: brcb rowmax + 官方 experiment 逐 64 列
+                                                # 段(免物化 softmax_cmp 腾 UB;512=8 段)。用官方
+                                                # #1255 experiment,不引撤回的私有 row_expand_sub。
+                                                T.tile.brcb_experiment(
                                                     brcb_s,
+                                                    m_i[buf, mc, :, :],
+                                                    M_CHUNK // 8,
+                                                    1,
+                                                    8,
                                                 )
+                                                for kc in range(S2_BASE // 64):
+                                                    T.tile.row_expand_sub_experiment(
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        in_ub[
+                                                            ps,
+                                                            :,
+                                                            kc * 64 : kc * 64 + 64,
+                                                        ],
+                                                        brcb_s,
+                                                    )
                                                 T.tile.exp(
                                                     in_ub[ps, :, :], in_ub[ps, :, :]
                                                 )
