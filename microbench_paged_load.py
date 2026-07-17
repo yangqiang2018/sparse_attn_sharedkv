@@ -45,7 +45,12 @@ MAX_PAGES = 4  # compile-time upper bound on pages the window can touch
 dtype = "float16"
 
 pass_configs = {
-    tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_COMBINE: True,
+    # CombineCV splits a loop across the cube/vector cores by pipe; with a UB
+    # (vector) copy the scalar page counter lands on cube and the copy on
+    # vector, breaking the loop-carried done/cur dependency. Off here so the
+    # whole vector-only kernel stays on one core (kernel.py's copy_pa is cube
+    # L1-direct, so its reconstruction keeps counter+copy both cube).
+    tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_COMBINE: False,
     tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_SYNC: True,
     tilelang.PassConfigKey.TL_ASCEND_AUTO_SYNC: True,
     tilelang.PassConfigKey.TL_ASCEND_MEMORY_PLANNING: True,
