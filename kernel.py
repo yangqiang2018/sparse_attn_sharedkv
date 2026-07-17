@@ -518,23 +518,61 @@ def _build_cfa(
                                                     )
                                                     T.wait_flag("mte1", "mte2", ev)
                                                     if is_ori:
-                                                        T.copy_pa(
-                                                            kv_ring[slot, :, :],
-                                                            ori_kv,
-                                                            ori_block_table,
-                                                            ori_block_size,
-                                                            N2,
-                                                            D,
-                                                            ori_block_size * N2 * D,
-                                                            ori_table_len,
-                                                            D2,
-                                                            ncols,
-                                                            BI,
-                                                            b,
-                                                            0,
-                                                            s2base + cb * BI,
-                                                            h * D2,
+                                                        # Front-end paged sliding-window KV
+                                                        # load (replaces copy_pa): walk the
+                                                        # window one page at a time (compile-
+                                                        # time bound), T.copy each page's
+                                                        # runtime row-run into the L1 ring
+                                                        # slot. Counter and copy are both on
+                                                        # the cube, so CombineCV keeps them
+                                                        # together (no cube/vector split).
+                                                        pa_done = T.alloc_var(
+                                                            "int32", init=0
                                                         )
+                                                        pa_cur = T.alloc_var(
+                                                            "int32",
+                                                            init=s2base + cb * BI,
+                                                        )
+                                                        for _pg in range(
+                                                            (BI + ori_block_size - 1)
+                                                            // ori_block_size
+                                                            + 1
+                                                        ):
+                                                            if pa_done < ncols:
+                                                                pa_lg = (
+                                                                    pa_cur
+                                                                    // ori_block_size
+                                                                )
+                                                                pa_ph = ori_block_table[
+                                                                    b, pa_lg
+                                                                ]
+                                                                pa_rem = (
+                                                                    pa_cur
+                                                                    % ori_block_size
+                                                                )
+                                                                pa_run = T.min(
+                                                                    ori_block_size
+                                                                    - pa_rem,
+                                                                    ncols - pa_done,
+                                                                )
+                                                                T.copy(
+                                                                    ori_kv[
+                                                                        pa_ph,
+                                                                        pa_rem : pa_rem
+                                                                        + pa_run,
+                                                                        0,
+                                                                        h * D2 : h * D2
+                                                                        + D2,
+                                                                    ],
+                                                                    kv_ring[
+                                                                        slot,
+                                                                        pa_done : pa_done
+                                                                        + pa_run,
+                                                                        :,
+                                                                    ],
+                                                                )
+                                                                pa_done += pa_run
+                                                                pa_cur += pa_run
                                                     else:
                                                         T.copy_pa(
                                                             kv_ring[slot, :, :],
@@ -1792,23 +1830,61 @@ def _build_scfa(
                                                     )
                                                     T.wait_flag("mte1", "mte2", ev)
                                                     if is_ori:
-                                                        T.copy_pa(
-                                                            kv_ring[slot, :, :],
-                                                            ori_kv,
-                                                            ori_block_table,
-                                                            ori_block_size,
-                                                            N2,
-                                                            D,
-                                                            ori_block_size * N2 * D,
-                                                            ori_table_len,
-                                                            D2,
-                                                            ncols,
-                                                            BI,
-                                                            b,
-                                                            0,
-                                                            s2base + cb * BI,
-                                                            h * D2,
+                                                        # Front-end paged sliding-window KV
+                                                        # load (replaces copy_pa): walk the
+                                                        # window one page at a time (compile-
+                                                        # time bound), T.copy each page's
+                                                        # runtime row-run into the L1 ring
+                                                        # slot. Counter and copy are both on
+                                                        # the cube, so CombineCV keeps them
+                                                        # together (no cube/vector split).
+                                                        pa_done = T.alloc_var(
+                                                            "int32", init=0
                                                         )
+                                                        pa_cur = T.alloc_var(
+                                                            "int32",
+                                                            init=s2base + cb * BI,
+                                                        )
+                                                        for _pg in range(
+                                                            (BI + ori_block_size - 1)
+                                                            // ori_block_size
+                                                            + 1
+                                                        ):
+                                                            if pa_done < ncols:
+                                                                pa_lg = (
+                                                                    pa_cur
+                                                                    // ori_block_size
+                                                                )
+                                                                pa_ph = ori_block_table[
+                                                                    b, pa_lg
+                                                                ]
+                                                                pa_rem = (
+                                                                    pa_cur
+                                                                    % ori_block_size
+                                                                )
+                                                                pa_run = T.min(
+                                                                    ori_block_size
+                                                                    - pa_rem,
+                                                                    ncols - pa_done,
+                                                                )
+                                                                T.copy(
+                                                                    ori_kv[
+                                                                        pa_ph,
+                                                                        pa_rem : pa_rem
+                                                                        + pa_run,
+                                                                        0,
+                                                                        h * D2 : h * D2
+                                                                        + D2,
+                                                                    ],
+                                                                    kv_ring[
+                                                                        slot,
+                                                                        pa_done : pa_done
+                                                                        + pa_run,
+                                                                        :,
+                                                                    ],
+                                                                )
+                                                                pa_done += pa_run
+                                                                pa_cur += pa_run
                                                     else:
                                                         # SCFA: this cmp tile's merged KV is in
                                                         # kvMergeGm (V0 produced it; QK waited
