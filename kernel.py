@@ -390,6 +390,9 @@ def _build_cfa(
                 in_ub = T.alloc_ub(
                     [2, M_CHUNK, S2_BASE], accum_dtype
                 )  # = ref inputBuff1: s_ub(vec1 score) + o_ub(vec2 PV); ping-pong [mc&1]
+                softmax_cmp = T.alloc_ub(
+                    [M_CHUNK, S2_BASE], accum_dtype
+                )  # cmp-tile wide broadcast(rowmax) 目标(ori 走 brcb_s;仅 cmp 用满宽)
                 out_ub = T.alloc_ub(
                     [M_CHUNK, S2_BASE], dtype
                 )  # = ref outputBuff1: p_half(vec1 cast P) + o_half(vec2 cast out)
@@ -406,10 +409,9 @@ def _build_cfa(
                 )  # Brcb scratch (row_expand)
                 # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp)。
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
-                # compact narrow softmax(窄路 tw<=BI):strided-load 进连续 compact[M,BI],满宽
-                # reduce/exp/sum(microbench 最快、省 chunk 标量);sub 复用 experiment(brcb_s
-                # 广播);算完 scatter 回 in_ub[0:BI] 走共享 cast。仅窄路;宽路仍在 in_ub 满 512 算。
-                compact = T.alloc_ub([M_CHUNK, BI], accum_dtype)  # 连续窄 score temp
+                # strided-in-place softmax (替代满宽手拼): 64 列块归约暂存 + rowmax brcb 目标。
+                # 单独 alloc(不复用 brcb_d/softmax_cmp)避与 PV rescale/其它 mc 并发 race;都很小。
+                part = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # 单块 wholereduce 暂存
                 brcb_s = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # rowmax brcb 广播 [M,8]
@@ -896,10 +898,14 @@ def _build_cfa(
                                             T.min(S2_BASE, act_cmp - rel * S2_BASE),
                                         )
                                         tw_a = (tw + 15) // 16 * 16
-                                        # softmax 按**实际宽度**分路:窄窗(tw<=BI:ori 窗 + cfa 的
-                                        # 窄 cmp)走 compact(strided-load 进连续 compact[M,BI]、满
-                                        # 宽算、scatter 回 in_ub);宽窗(tw>BI,只 scfa 的宽 cmp、最
-                                        # 多 512)走 in_ub 满 512——宽窗无 padding 可省,满宽 op 最快。
+                                        # 64-align for strided masked ops (每 chunk = 64 fp32/
+                                        # repeat 上限)。[tw:tw_64] 留 fill(-inf) -> reduce 忽略、
+                                        # exp->0;tw_a<=tw_64 故 copy-out [0:tw_a] 全在算过的范围内。
+                                        tw_64 = (tw + 63) // 64 * 64
+                                        # softmax reduce/sub/exp 按**实际宽度**分路(不是 ori/cmp):
+                                        # 窄窗(tw<=BI:ori 窗 + cfa 的窄 cmp)走 strided-in-place 省
+                                        # padding;宽窗(tw>BI,只 scfa 的宽 cmp,最多 512)走满宽——
+                                        # 无 padding 可省时一条宽 op 胜过 tw_64/64 个 strided chunk。
                                         is_narrow = tw <= BI
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
@@ -956,18 +962,38 @@ def _build_cfa(
                                             #   is_first: in_max=sink, in_sum=ones(1.0)
                                             #   else:     in_max=m_i[prev], in_sum=denom[prev]
                                             # m_new=max(in_max,rowmax); expmax=exp(in_max-m_new);
-                                            # P=exp(score-m_new)。narrow(is_narrow): strided-load
-                                            # [0:BI] 进连续 compact,满宽 reduce/exp/sum(免 chunk
-                                            # 标量),算完 scatter 回 in_ub;cmp(宽 512): wide 满 512。
+                                            # P=exp(score-m_new)。reduce/sub/exp 走 strided-in-place
+                                            # 原地只算 [0:tw_64](64 列块),不碰 [tw_64:512] padding。
+                                            # ori(窄窗 tw<=BI)走 strided rowmax over [0:tw_64]:
+                                            # 64 列块 wholereducemax + 无条件 combine(fill -inf,
+                                            # 语句-if guard runtime tw_64);cmp(宽 512 全有效)走
+                                            # wide reduce_max(8-chunk 的标量开销太贵)。
                                             if is_narrow:
-                                                # strided-load [0:BI]([tw:BI]=-inf tail from fill)
-                                                # -> 连续 compact,再满宽 reduce_max(免 chunk 标量)
-                                                T.copy(in_ub[ps, :, 0:BI], compact)
-                                                T.reduce_max(
-                                                    compact,
+                                                T.tile.fill(
                                                     m_i[buf, mc, :, :],
-                                                    dim=-1,
+                                                    -T.infinity(accum_dtype),
                                                 )
+                                                for kc in range(BI // 64):
+                                                    if kc * 64 < tw_64:
+                                                        T.tile.wholereducemax(
+                                                            part,
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            64,
+                                                            M_CHUNK,
+                                                            1,
+                                                            1,
+                                                            64,
+                                                            ReduceOrder="ORDER_ONLY_VALUE",
+                                                        )
+                                                        T.tile.max(
+                                                            m_i[buf, mc, :, :],
+                                                            m_i[buf, mc, :, :],
+                                                            part,
+                                                        )
                                             else:
                                                 T.reduce_max(
                                                     in_ub[ps, :, :],
@@ -1007,9 +1033,6 @@ def _build_cfa(
                                             # 列块 row_expand_sub_experiment,免物化 softmax_cmp)+
                                             # strided masked exp;cmp: wide broadcast+sub+exp(满 512)
                                             if is_narrow:
-                                                # sub: brcb rowmax + experiment 逐 64 列(compact
-                                                # 连续、含 [tw:BI]=-inf,无需 guard);exp 满宽;算完
-                                                # scatter P 回 in_ub[0:BI] 让共享 cast 读到。
                                                 T.tile.brcb_experiment(
                                                     brcb_s,
                                                     m_i[buf, mc, :, :],
@@ -1018,42 +1041,43 @@ def _build_cfa(
                                                     8,
                                                 )
                                                 for kc in range(BI // 64):
-                                                    T.tile.row_expand_sub_experiment(
-                                                        compact[
-                                                            :, kc * 64 : kc * 64 + 64
-                                                        ],
-                                                        compact[
-                                                            :, kc * 64 : kc * 64 + 64
-                                                        ],
-                                                        brcb_s,
-                                                    )
-                                                T.tile.exp(compact, compact)
-                                                T.copy(compact, in_ub[ps, :, 0:BI])
+                                                    if kc * 64 < tw_64:
+                                                        T.tile.row_expand_sub_experiment(
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            brcb_s,
+                                                        )
+                                                for kc in range(BI // 64):
+                                                    if kc * 64 < tw_64:
+                                                        T.tile.exp_experiment(
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                        )
                                             else:
-                                                # 宽路 sub: brcb rowmax + 官方 experiment 逐 64 列
-                                                # 段(免物化 softmax_cmp 腾 UB;512=8 段)。用官方
-                                                # #1255 experiment,不引撤回的私有 row_expand_sub。
-                                                T.tile.brcb_experiment(
-                                                    brcb_s,
-                                                    m_i[buf, mc, :, :],
-                                                    M_CHUNK // 8,
-                                                    1,
-                                                    8,
+                                                T.tile.broadcast(
+                                                    softmax_cmp, m_i[buf, mc, :, :]
                                                 )
-                                                for kc in range(S2_BASE // 64):
-                                                    T.tile.row_expand_sub_experiment(
-                                                        in_ub[
-                                                            ps,
-                                                            :,
-                                                            kc * 64 : kc * 64 + 64,
-                                                        ],
-                                                        in_ub[
-                                                            ps,
-                                                            :,
-                                                            kc * 64 : kc * 64 + 64,
-                                                        ],
-                                                        brcb_s,
-                                                    )
+                                                T.tile.sub(
+                                                    in_ub[ps, :, :],
+                                                    in_ub[ps, :, :],
+                                                    softmax_cmp,
+                                                )
                                                 T.tile.exp(
                                                     in_ub[ps, :, :], in_ub[ps, :, :]
                                                 )
@@ -1085,10 +1109,27 @@ def _build_cfa(
                                             # denom += sum(P): reduce_sum 破坏 src, 放 cast 之后
                                             # (同 V pipe, pipe_barrier 隔开 cast 先读完 P)。
                                             T.pipe_barrier("v")
-                                            # narrow: 满宽 reduce_sum(P) 在连续 compact 上(P 还在
-                                            # compact,[tw:BI]=0 不影响和);cmp: wide reduce_sum(满 512)
+                                            # ori: strided rowsum(P) over [0:tw_64] 64 列块
+                                            # wholereducesum + 无条件 combine(fill 0);
+                                            # cmp: wide reduce_sum(满 512)
                                             if is_narrow:
-                                                T.reduce_sum(compact, sumP, dim=-1)
+                                                T.tile.fill(sumP, T.float32(0.0))
+                                                for kc in range(BI // 64):
+                                                    if kc * 64 < tw_64:
+                                                        T.tile.wholereducesum(
+                                                            part,
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            64,
+                                                            M_CHUNK,
+                                                            1,
+                                                            1,
+                                                            64,
+                                                        )
+                                                        T.tile.add(sumP, sumP, part)
                                             else:
                                                 T.reduce_sum(
                                                     in_ub[ps, :, :], sumP, dim=-1
@@ -1598,6 +1639,9 @@ def _build_scfa(
                 in_ub = T.alloc_ub(
                     [2, M_CHUNK, S2_BASE], accum_dtype
                 )  # = ref inputBuff1: s_ub(vec1 score) + o_ub(vec2 PV); ping-pong [mc&1]
+                softmax_cmp = T.alloc_ub(
+                    [M_CHUNK, S2_BASE], accum_dtype
+                )  # cmp-tile wide broadcast(rowmax) 目标(ori 走 brcb_s;仅 cmp 用满宽)
                 out_ub = T.alloc_ub(
                     [M_CHUNK, S2_BASE], dtype
                 )  # = ref outputBuff1: p_half(vec1 cast P) + o_half(vec2 cast out)
@@ -1614,10 +1658,9 @@ def _build_scfa(
                 )  # Brcb scratch (row_expand)
                 # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp)。
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
-                # compact narrow softmax(窄路 tw<=BI):strided-load 进连续 compact[M,BI],满宽
-                # reduce/exp/sum(microbench 最快、省 chunk 标量);sub 复用 experiment(brcb_s
-                # 广播);算完 scatter 回 in_ub[0:BI] 走共享 cast。仅窄路;宽路仍在 in_ub 满 512 算。
-                compact = T.alloc_ub([M_CHUNK, BI], accum_dtype)  # 连续窄 score temp
+                # strided-in-place softmax (替代满宽手拼): 64 列块归约暂存 + rowmax brcb 目标。
+                # 单独 alloc(不复用 brcb_d/softmax_cmp)避与 PV rescale/其它 mc 并发 race;都很小。
+                part = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # 单块 wholereduce 暂存
                 brcb_s = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # rowmax brcb 广播 [M,8]
@@ -2297,10 +2340,14 @@ def _build_scfa(
                                             ),
                                         )
                                         tw_a = (tw + 15) // 16 * 16
-                                        # softmax 按**实际宽度**分路:窄窗(tw<=BI:ori 窗 + cfa 的
-                                        # 窄 cmp)走 compact(strided-load 进连续 compact[M,BI]、满
-                                        # 宽算、scatter 回 in_ub);宽窗(tw>BI,只 scfa 的宽 cmp、最
-                                        # 多 512)走 in_ub 满 512——宽窗无 padding 可省,满宽 op 最快。
+                                        # 64-align for strided masked ops (每 chunk = 64 fp32/
+                                        # repeat 上限)。[tw:tw_64] 留 fill(-inf) -> reduce 忽略、
+                                        # exp->0;tw_a<=tw_64 故 copy-out [0:tw_a] 全在算过的范围内。
+                                        tw_64 = (tw + 63) // 64 * 64
+                                        # softmax reduce/sub/exp 按**实际宽度**分路(不是 ori/cmp):
+                                        # 窄窗(tw<=BI:ori 窗 + cfa 的窄 cmp)走 strided-in-place 省
+                                        # padding;宽窗(tw>BI,只 scfa 的宽 cmp,最多 512)走满宽——
+                                        # 无 padding 可省时一条宽 op 胜过 tw_64/64 个 strided chunk。
                                         is_narrow = tw <= BI
                                         for mc in range(NMC):
                                             r0 = vid * G2 + mc * M_CHUNK
@@ -2357,18 +2404,38 @@ def _build_scfa(
                                             #   is_first: in_max=sink, in_sum=ones(1.0)
                                             #   else:     in_max=m_i[prev], in_sum=denom[prev]
                                             # m_new=max(in_max,rowmax); expmax=exp(in_max-m_new);
-                                            # P=exp(score-m_new)。narrow(is_narrow): strided-load
-                                            # [0:BI] 进连续 compact,满宽 reduce/exp/sum(免 chunk
-                                            # 标量),算完 scatter 回 in_ub;cmp(宽 512): wide 满 512。
+                                            # P=exp(score-m_new)。reduce/sub/exp 走 strided-in-place
+                                            # 原地只算 [0:tw_64](64 列块),不碰 [tw_64:512] padding。
+                                            # ori(窄窗 tw<=BI)走 strided rowmax over [0:tw_64]:
+                                            # 64 列块 wholereducemax + 无条件 combine(fill -inf,
+                                            # 语句-if guard runtime tw_64);cmp(宽 512 全有效)走
+                                            # wide reduce_max(8-chunk 的标量开销太贵)。
                                             if is_narrow:
-                                                # strided-load [0:BI]([tw:BI]=-inf tail from fill)
-                                                # -> 连续 compact,再满宽 reduce_max(免 chunk 标量)
-                                                T.copy(in_ub[ps, :, 0:BI], compact)
-                                                T.reduce_max(
-                                                    compact,
+                                                T.tile.fill(
                                                     m_i[buf, mc, :, :],
-                                                    dim=-1,
+                                                    -T.infinity(accum_dtype),
                                                 )
+                                                for kc in range(BI // 64):
+                                                    if kc * 64 < tw_64:
+                                                        T.tile.wholereducemax(
+                                                            part,
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            64,
+                                                            M_CHUNK,
+                                                            1,
+                                                            1,
+                                                            64,
+                                                            ReduceOrder="ORDER_ONLY_VALUE",
+                                                        )
+                                                        T.tile.max(
+                                                            m_i[buf, mc, :, :],
+                                                            m_i[buf, mc, :, :],
+                                                            part,
+                                                        )
                                             else:
                                                 T.reduce_max(
                                                     in_ub[ps, :, :],
@@ -2408,9 +2475,6 @@ def _build_scfa(
                                             # 列块 row_expand_sub_experiment,免物化 softmax_cmp)+
                                             # strided masked exp;cmp: wide broadcast+sub+exp(满 512)
                                             if is_narrow:
-                                                # sub: brcb rowmax + experiment 逐 64 列(compact
-                                                # 连续、含 [tw:BI]=-inf,无需 guard);exp 满宽;算完
-                                                # scatter P 回 in_ub[0:BI] 让共享 cast 读到。
                                                 T.tile.brcb_experiment(
                                                     brcb_s,
                                                     m_i[buf, mc, :, :],
@@ -2419,42 +2483,43 @@ def _build_scfa(
                                                     8,
                                                 )
                                                 for kc in range(BI // 64):
-                                                    T.tile.row_expand_sub_experiment(
-                                                        compact[
-                                                            :, kc * 64 : kc * 64 + 64
-                                                        ],
-                                                        compact[
-                                                            :, kc * 64 : kc * 64 + 64
-                                                        ],
-                                                        brcb_s,
-                                                    )
-                                                T.tile.exp(compact, compact)
-                                                T.copy(compact, in_ub[ps, :, 0:BI])
+                                                    if kc * 64 < tw_64:
+                                                        T.tile.row_expand_sub_experiment(
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            brcb_s,
+                                                        )
+                                                for kc in range(BI // 64):
+                                                    if kc * 64 < tw_64:
+                                                        T.tile.exp_experiment(
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                        )
                                             else:
-                                                # 宽路 sub: brcb rowmax + 官方 experiment 逐 64 列
-                                                # 段(免物化 softmax_cmp 腾 UB;512=8 段)。用官方
-                                                # #1255 experiment,不引撤回的私有 row_expand_sub。
-                                                T.tile.brcb_experiment(
-                                                    brcb_s,
-                                                    m_i[buf, mc, :, :],
-                                                    M_CHUNK // 8,
-                                                    1,
-                                                    8,
+                                                T.tile.broadcast(
+                                                    softmax_cmp, m_i[buf, mc, :, :]
                                                 )
-                                                for kc in range(S2_BASE // 64):
-                                                    T.tile.row_expand_sub_experiment(
-                                                        in_ub[
-                                                            ps,
-                                                            :,
-                                                            kc * 64 : kc * 64 + 64,
-                                                        ],
-                                                        in_ub[
-                                                            ps,
-                                                            :,
-                                                            kc * 64 : kc * 64 + 64,
-                                                        ],
-                                                        brcb_s,
-                                                    )
+                                                T.tile.sub(
+                                                    in_ub[ps, :, :],
+                                                    in_ub[ps, :, :],
+                                                    softmax_cmp,
+                                                )
                                                 T.tile.exp(
                                                     in_ub[ps, :, :], in_ub[ps, :, :]
                                                 )
@@ -2486,10 +2551,27 @@ def _build_scfa(
                                             # denom += sum(P): reduce_sum 破坏 src, 放 cast 之后
                                             # (同 V pipe, pipe_barrier 隔开 cast 先读完 P)。
                                             T.pipe_barrier("v")
-                                            # narrow: 满宽 reduce_sum(P) 在连续 compact 上(P 还在
-                                            # compact,[tw:BI]=0 不影响和);cmp: wide reduce_sum(满 512)
+                                            # ori: strided rowsum(P) over [0:tw_64] 64 列块
+                                            # wholereducesum + 无条件 combine(fill 0);
+                                            # cmp: wide reduce_sum(满 512)
                                             if is_narrow:
-                                                T.reduce_sum(compact, sumP, dim=-1)
+                                                T.tile.fill(sumP, T.float32(0.0))
+                                                for kc in range(BI // 64):
+                                                    if kc * 64 < tw_64:
+                                                        T.tile.wholereducesum(
+                                                            part,
+                                                            in_ub[
+                                                                ps,
+                                                                :,
+                                                                kc * 64 : kc * 64 + 64,
+                                                            ],
+                                                            64,
+                                                            M_CHUNK,
+                                                            1,
+                                                            1,
+                                                            64,
+                                                        )
+                                                        T.tile.add(sumP, sumP, part)
                                             else:
                                                 T.reduce_sum(
                                                     in_ub[ps, :, :], sumP, dim=-1
