@@ -1614,14 +1614,7 @@ def _build_scfa(
     # SCFA: topk index table = K (=topk_cmp) selected cmp-block ids per (token,n2).
     cmp_idx_shape = [total_tokens, N2, topk_cmp]
 
-    @tilelang.jit(
-        out_idx=[11, 12],
-        workspace_idx=[13, 14, 15, 16, 17, 18],
-        # DIAGNOSTIC (revert after): disable CombineCV to test whether it splits
-        # the front-end paged-load scalar counters (pa_done/pa_cur) onto the
-        # vector core, breaking the loop-carried dependency and the QK ori load.
-        pass_configs={tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_COMBINE: False},
-    )
+    @tilelang.jit(out_idx=[11, 12], workspace_idx=[13, 14, 15, 16, 17, 18])
     def kernel():
         @T.prim_func
         def sparse_attn_sharedkv_scfa(
