@@ -390,9 +390,6 @@ def _build_cfa(
                 in_ub = T.alloc_ub(
                     [2, M_CHUNK, S2_BASE], accum_dtype
                 )  # = ref inputBuff1: s_ub(vec1 score) + o_ub(vec2 PV); ping-pong [mc&1]
-                softmax_cmp = T.alloc_ub(
-                    [M_CHUNK, S2_BASE], accum_dtype
-                )  # cmp-tile wide broadcast(rowmax) 目标(ori 走 brcb_s;仅 cmp 用满宽)
                 out_ub = T.alloc_ub(
                     [M_CHUNK, S2_BASE], dtype
                 )  # = ref outputBuff1: p_half(vec1 cast P) + o_half(vec2 cast out)
@@ -1033,13 +1030,13 @@ def _build_cfa(
                                                 T.tile.exp(compact, compact)
                                                 T.copy(compact, in_ub[ps, :, 0:BI])
                                             else:
-                                                T.tile.broadcast(
-                                                    softmax_cmp, m_i[buf, mc, :, :]
-                                                )
-                                                T.tile.sub(
+                                                # 宽路 sub: row_expand_sub(Brcb+Sub,免物化
+                                                # softmax_cmp,腾 32KB UB 给 compact)
+                                                T.tile.row_expand_sub(
                                                     in_ub[ps, :, :],
                                                     in_ub[ps, :, :],
-                                                    softmax_cmp,
+                                                    m_i[buf, mc, :, :],
+                                                    brcb_s,
                                                 )
                                                 T.tile.exp(
                                                     in_ub[ps, :, :], in_ub[ps, :, :]
@@ -1585,9 +1582,6 @@ def _build_scfa(
                 in_ub = T.alloc_ub(
                     [2, M_CHUNK, S2_BASE], accum_dtype
                 )  # = ref inputBuff1: s_ub(vec1 score) + o_ub(vec2 PV); ping-pong [mc&1]
-                softmax_cmp = T.alloc_ub(
-                    [M_CHUNK, S2_BASE], accum_dtype
-                )  # cmp-tile wide broadcast(rowmax) 目标(ori 走 brcb_s;仅 cmp 用满宽)
                 out_ub = T.alloc_ub(
                     [M_CHUNK, S2_BASE], dtype
                 )  # = ref outputBuff1: p_half(vec1 cast P) + o_half(vec2 cast out)
@@ -2421,13 +2415,13 @@ def _build_scfa(
                                                 T.tile.exp(compact, compact)
                                                 T.copy(compact, in_ub[ps, :, 0:BI])
                                             else:
-                                                T.tile.broadcast(
-                                                    softmax_cmp, m_i[buf, mc, :, :]
-                                                )
-                                                T.tile.sub(
+                                                # 宽路 sub: row_expand_sub(Brcb+Sub,免物化
+                                                # softmax_cmp,腾 32KB UB 给 compact)
+                                                T.tile.row_expand_sub(
                                                     in_ub[ps, :, :],
                                                     in_ub[ps, :, :],
-                                                    softmax_cmp,
+                                                    m_i[buf, mc, :, :],
+                                                    brcb_s,
                                                 )
                                                 T.tile.exp(
                                                     in_ub[ps, :, :], in_ub[ps, :, :]
