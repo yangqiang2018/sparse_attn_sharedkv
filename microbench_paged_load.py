@@ -65,10 +65,10 @@ def build():
                 kv_ub = T.alloc_ub((COPY_ROWS_ALIGN, D), dtype)
                 if vid == 0:
                     T.tile.fill(kv_ub, T.float16(0))
-                    done = T.alloc_var("int32")
-                    cur = T.alloc_var("int32")
-                    done = 0
-                    cur = S2_START
+                    # alloc_var scalars: init with init=, write with += (a plain
+                    # `x = x + n` rebinds the Python name and emits no TIR store).
+                    done = T.alloc_var("int32", init=0)
+                    cur = T.alloc_var("int32", init=S2_START)
                     # compile-time bounded page walk; runtime guard stops early
                     for _pg in range(MAX_PAGES):
                         if done < COPY_ROWS:
@@ -81,8 +81,8 @@ def build():
                                 KV[phys, rem : rem + run, :],
                                 kv_ub[done : done + run, :],
                             )
-                            done = done + run
-                            cur = cur + run
+                            done += run
+                            cur += run
                     T.copy(kv_ub, Out)
 
         return main
