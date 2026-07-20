@@ -253,6 +253,9 @@ def _build_cfa(
     BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
     PV_NT = D // BI  # 4 output-D tiles (= ComputeMm2 nL1Loops)
     PV_NW = BI  # 128: each output-D tile width
+    # kL0 tile width = the gemm template's kL0Size. The QK contraction walks its
+    # D-half in D2/KL0 = 2 of these. Function-scope int (see the D2 note).
+    KL0 = 128
     VEC_NUM = 2  # 2 vector cores per cube core
     G2 = G // VEC_NUM  # 32: rows per vector core
     BLK = 8  # FP32 elems per 32B block (Brcb fan-out for row_expand)
@@ -655,20 +658,75 @@ def _build_cfa(
                                                         n_actual=ncols_a,
                                                     )
                                                 else:
-                                                    T.gemm_v0_fixp(
-                                                        q_l1[0, :, :],
-                                                        kv_ring[s0, :, :],
-                                                        cL0,
-                                                        workspace_qk[cid, :, :],
-                                                        k_actual=D2,
-                                                        transpose_B=True,
-                                                        init=True,
-                                                        n_actual=ncols_a,
-                                                        cl0_base=cs,
-                                                        prime_drain=False,
-                                                        flush_last=False,
-                                                        do_fixpipe=False,
+                                                    # ComputeMm1 D-half 0, decomposed. With
+                                                    # transpose_B the template's N-tile loop
+                                                    # is a single round and its cL0BufIter
+                                                    # never advances, so all that is left is
+                                                    # the kL0 walk: D2/KL0 = 2 tiles that
+                                                    # K-accumulate into cL0[cs]. This half
+                                                    # inits and holds (both 0b10); the band
+                                                    # fixpipe below pairs with half 1's last
+                                                    # tile. real_n matches the mma's n so
+                                                    # L0B's nZ fractal strides its K-blocks
+                                                    # by the columns the mma reads. Spelled
+                                                    # out per tile: a runtime conditional in
+                                                    # an mma argument breaks the codegen (see
+                                                    # the SWA QK note).
+                                                    T.wait_flag("m", "mte1", L0AB_EV0)
+                                                    T.copy(
+                                                        q_l1[0, :, 0:KL0],
+                                                        p_l0a[0, :, :],
                                                     )
+                                                    T.copy(
+                                                        kv_ring[s0, :, 0:KL0],
+                                                        v_l0b[0, :, :],
+                                                        transpose=True,
+                                                        real_k=KL0,
+                                                        real_n=ncols_a,
+                                                    )
+                                                    T.set_flag("mte1", "m", L0AB_EV0)
+                                                    T.wait_flag("mte1", "m", L0AB_EV0)
+                                                    T.mma(
+                                                        p_l0a[0, :, :],
+                                                        v_l0b[0, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=True,
+                                                        k_actual=KL0,
+                                                        n_actual=ncols_a,
+                                                        unit_flag=0b10,
+                                                    )
+                                                    # tiny-tile hazard barrier on the RUNTIME
+                                                    # mma n (= template): (M/16)*(n/16) < 10
+                                                    # with M=G=64 means ncols_a <= 32.
+                                                    if ncols_a < 40:
+                                                        T.pipe_barrier("m")
+                                                    T.set_flag("m", "mte1", L0AB_EV0)
+                                                    T.wait_flag("m", "mte1", L0AB_EV1)
+                                                    T.copy(
+                                                        q_l1[0, :, KL0 : 2 * KL0],
+                                                        p_l0a[1, :, :],
+                                                    )
+                                                    T.copy(
+                                                        kv_ring[s0, :, KL0 : 2 * KL0],
+                                                        v_l0b[1, :, :],
+                                                        transpose=True,
+                                                        real_k=KL0,
+                                                        real_n=ncols_a,
+                                                    )
+                                                    T.set_flag("mte1", "m", L0AB_EV1)
+                                                    T.wait_flag("mte1", "m", L0AB_EV1)
+                                                    T.mma(
+                                                        p_l0a[1, :, :],
+                                                        v_l0b[1, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=False,
+                                                        k_actual=KL0,
+                                                        n_actual=ncols_a,
+                                                        unit_flag=0b10,
+                                                    )
+                                                    if ncols_a < 40:
+                                                        T.pipe_barrier("m")
+                                                    T.set_flag("m", "mte1", L0AB_EV1)
                                                 T.set_flag("mte1", "mte2", ev0)
                                                 T.wait_flag("mte2", "mte1", ev1)
                                                 if DEBUG_SERIAL:
@@ -681,20 +739,66 @@ def _build_cfa(
                                                         n_actual=ncols_a,
                                                     )
                                                 else:
-                                                    T.gemm_v0_fixp(
-                                                        q_l1[1, :, :],
-                                                        kv_ring[s1, :, :],
-                                                        cL0,
-                                                        workspace_qk[cid, :, :],
-                                                        k_actual=D2,
-                                                        transpose_B=True,
-                                                        init=False,
-                                                        n_actual=ncols_a,
-                                                        cl0_base=cs,
-                                                        prime_drain=False,
-                                                        flush_last=True,
-                                                        do_fixpipe=False,
+                                                    # ComputeMm1 D-half 1: both tiles
+                                                    # accumulate into the SAME cL0[cs]; the
+                                                    # last one is the last tile of the last
+                                                    # half, so it flushes (0b11) and pairs
+                                                    # with the band fixpipe below (that is
+                                                    # what flush_last=True bought, while
+                                                    # do_fixpipe=False kept the copy-out in
+                                                    # the kernel).
+                                                    T.wait_flag("m", "mte1", L0AB_EV0)
+                                                    T.copy(
+                                                        q_l1[1, :, 0:KL0],
+                                                        p_l0a[0, :, :],
                                                     )
+                                                    T.copy(
+                                                        kv_ring[s1, :, 0:KL0],
+                                                        v_l0b[0, :, :],
+                                                        transpose=True,
+                                                        real_k=KL0,
+                                                        real_n=ncols_a,
+                                                    )
+                                                    T.set_flag("mte1", "m", L0AB_EV0)
+                                                    T.wait_flag("mte1", "m", L0AB_EV0)
+                                                    T.mma(
+                                                        p_l0a[0, :, :],
+                                                        v_l0b[0, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=False,
+                                                        k_actual=KL0,
+                                                        n_actual=ncols_a,
+                                                        unit_flag=0b10,
+                                                    )
+                                                    if ncols_a < 40:
+                                                        T.pipe_barrier("m")
+                                                    T.set_flag("m", "mte1", L0AB_EV0)
+                                                    T.wait_flag("m", "mte1", L0AB_EV1)
+                                                    T.copy(
+                                                        q_l1[1, :, KL0 : 2 * KL0],
+                                                        p_l0a[1, :, :],
+                                                    )
+                                                    T.copy(
+                                                        kv_ring[s1, :, KL0 : 2 * KL0],
+                                                        v_l0b[1, :, :],
+                                                        transpose=True,
+                                                        real_k=KL0,
+                                                        real_n=ncols_a,
+                                                    )
+                                                    T.set_flag("mte1", "m", L0AB_EV1)
+                                                    T.wait_flag("mte1", "m", L0AB_EV1)
+                                                    T.mma(
+                                                        p_l0a[1, :, :],
+                                                        v_l0b[1, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=False,
+                                                        k_actual=KL0,
+                                                        n_actual=ncols_a,
+                                                        unit_flag=0b11,
+                                                    )
+                                                    if ncols_a < 40:
+                                                        T.pipe_barrier("m")
+                                                    T.set_flag("m", "mte1", L0AB_EV1)
                                                 T.set_flag("mte1", "mte2", ev1)
                                                 kv_iter += 2
                                                 if DEBUG_SERIAL:
@@ -1588,6 +1692,9 @@ def _build_scfa(
     BI = DEFAULT_BLOCK_I  # 128: QK column-block / PV K-sub-block / output-D tile width
     PV_NT = D // BI  # 4 output-D tiles (= ComputeMm2 nL1Loops)
     PV_NW = BI  # 128: each output-D tile width
+    # kL0 tile width = the gemm template's kL0Size. The QK contraction walks its
+    # D-half in D2/KL0 = 2 of these. Function-scope int (see the D2 note).
+    KL0 = 128
     VEC_NUM = 2  # 2 vector cores per cube core
     G2 = G // VEC_NUM  # 32: rows per vector core
     BLK = 8  # FP32 elems per 32B block (Brcb fan-out for row_expand)
@@ -2034,20 +2141,75 @@ def _build_scfa(
                                                         n_actual=ncols_a,
                                                     )
                                                 else:
-                                                    T.gemm_v0_fixp(
-                                                        q_l1[0, :, :],
-                                                        kv_ring[s0, :, :],
-                                                        cL0,
-                                                        workspace_qk[cid, :, :],
-                                                        k_actual=D2,
-                                                        transpose_B=True,
-                                                        init=True,
-                                                        n_actual=ncols_a,
-                                                        cl0_base=cs,
-                                                        prime_drain=False,
-                                                        flush_last=False,
-                                                        do_fixpipe=False,
+                                                    # ComputeMm1 D-half 0, decomposed. With
+                                                    # transpose_B the template's N-tile loop
+                                                    # is a single round and its cL0BufIter
+                                                    # never advances, so all that is left is
+                                                    # the kL0 walk: D2/KL0 = 2 tiles that
+                                                    # K-accumulate into cL0[cs]. This half
+                                                    # inits and holds (both 0b10); the band
+                                                    # fixpipe below pairs with half 1's last
+                                                    # tile. real_n matches the mma's n so
+                                                    # L0B's nZ fractal strides its K-blocks
+                                                    # by the columns the mma reads. Spelled
+                                                    # out per tile: a runtime conditional in
+                                                    # an mma argument breaks the codegen (see
+                                                    # the SWA QK note).
+                                                    T.wait_flag("m", "mte1", L0AB_EV0)
+                                                    T.copy(
+                                                        q_l1[0, :, 0:KL0],
+                                                        p_l0a[0, :, :],
                                                     )
+                                                    T.copy(
+                                                        kv_ring[s0, :, 0:KL0],
+                                                        v_l0b[0, :, :],
+                                                        transpose=True,
+                                                        real_k=KL0,
+                                                        real_n=ncols_a,
+                                                    )
+                                                    T.set_flag("mte1", "m", L0AB_EV0)
+                                                    T.wait_flag("mte1", "m", L0AB_EV0)
+                                                    T.mma(
+                                                        p_l0a[0, :, :],
+                                                        v_l0b[0, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=True,
+                                                        k_actual=KL0,
+                                                        n_actual=ncols_a,
+                                                        unit_flag=0b10,
+                                                    )
+                                                    # tiny-tile hazard barrier on the RUNTIME
+                                                    # mma n (= template): (M/16)*(n/16) < 10
+                                                    # with M=G=64 means ncols_a <= 32.
+                                                    if ncols_a < 40:
+                                                        T.pipe_barrier("m")
+                                                    T.set_flag("m", "mte1", L0AB_EV0)
+                                                    T.wait_flag("m", "mte1", L0AB_EV1)
+                                                    T.copy(
+                                                        q_l1[0, :, KL0 : 2 * KL0],
+                                                        p_l0a[1, :, :],
+                                                    )
+                                                    T.copy(
+                                                        kv_ring[s0, :, KL0 : 2 * KL0],
+                                                        v_l0b[1, :, :],
+                                                        transpose=True,
+                                                        real_k=KL0,
+                                                        real_n=ncols_a,
+                                                    )
+                                                    T.set_flag("mte1", "m", L0AB_EV1)
+                                                    T.wait_flag("mte1", "m", L0AB_EV1)
+                                                    T.mma(
+                                                        p_l0a[1, :, :],
+                                                        v_l0b[1, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=False,
+                                                        k_actual=KL0,
+                                                        n_actual=ncols_a,
+                                                        unit_flag=0b10,
+                                                    )
+                                                    if ncols_a < 40:
+                                                        T.pipe_barrier("m")
+                                                    T.set_flag("m", "mte1", L0AB_EV1)
                                                 T.set_flag("mte1", "mte2", ev0)
                                                 T.wait_flag("mte2", "mte1", ev1)
                                                 if DEBUG_SERIAL:
@@ -2060,20 +2222,66 @@ def _build_scfa(
                                                         n_actual=ncols_a,
                                                     )
                                                 else:
-                                                    T.gemm_v0_fixp(
-                                                        q_l1[1, :, :],
-                                                        kv_ring[s1, :, :],
-                                                        cL0,
-                                                        workspace_qk[cid, :, :],
-                                                        k_actual=D2,
-                                                        transpose_B=True,
-                                                        init=False,
-                                                        n_actual=ncols_a,
-                                                        cl0_base=cs,
-                                                        prime_drain=False,
-                                                        flush_last=True,
-                                                        do_fixpipe=False,
+                                                    # ComputeMm1 D-half 1: both tiles
+                                                    # accumulate into the SAME cL0[cs]; the
+                                                    # last one is the last tile of the last
+                                                    # half, so it flushes (0b11) and pairs
+                                                    # with the band fixpipe below (that is
+                                                    # what flush_last=True bought, while
+                                                    # do_fixpipe=False kept the copy-out in
+                                                    # the kernel).
+                                                    T.wait_flag("m", "mte1", L0AB_EV0)
+                                                    T.copy(
+                                                        q_l1[1, :, 0:KL0],
+                                                        p_l0a[0, :, :],
                                                     )
+                                                    T.copy(
+                                                        kv_ring[s1, :, 0:KL0],
+                                                        v_l0b[0, :, :],
+                                                        transpose=True,
+                                                        real_k=KL0,
+                                                        real_n=ncols_a,
+                                                    )
+                                                    T.set_flag("mte1", "m", L0AB_EV0)
+                                                    T.wait_flag("mte1", "m", L0AB_EV0)
+                                                    T.mma(
+                                                        p_l0a[0, :, :],
+                                                        v_l0b[0, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=False,
+                                                        k_actual=KL0,
+                                                        n_actual=ncols_a,
+                                                        unit_flag=0b10,
+                                                    )
+                                                    if ncols_a < 40:
+                                                        T.pipe_barrier("m")
+                                                    T.set_flag("m", "mte1", L0AB_EV0)
+                                                    T.wait_flag("m", "mte1", L0AB_EV1)
+                                                    T.copy(
+                                                        q_l1[1, :, KL0 : 2 * KL0],
+                                                        p_l0a[1, :, :],
+                                                    )
+                                                    T.copy(
+                                                        kv_ring[s1, :, KL0 : 2 * KL0],
+                                                        v_l0b[1, :, :],
+                                                        transpose=True,
+                                                        real_k=KL0,
+                                                        real_n=ncols_a,
+                                                    )
+                                                    T.set_flag("mte1", "m", L0AB_EV1)
+                                                    T.wait_flag("mte1", "m", L0AB_EV1)
+                                                    T.mma(
+                                                        p_l0a[1, :, :],
+                                                        v_l0b[1, :, :],
+                                                        cL0[cs, :, :],
+                                                        init=False,
+                                                        k_actual=KL0,
+                                                        n_actual=ncols_a,
+                                                        unit_flag=0b11,
+                                                    )
+                                                    if ncols_a < 40:
+                                                        T.pipe_barrier("m")
+                                                    T.set_flag("m", "mte1", L0AB_EV1)
                                                 T.set_flag("mte1", "mte2", ev1)
                                                 kv_iter += 2
                                                 if DEBUG_SERIAL:
@@ -3082,6 +3290,10 @@ def _build_swa(
     # see the D2 note: a body-level const becomes a symbolic Var and SIGSEGVs).
     PV_NT = D // BI  # 4 output-D tiles
     PV_NW = BI  # 128: each output-D tile's column width (= mma n / fixpipe nSize)
+    # kL0 tile width = the gemm template's kL0Size. The QK contraction walks its
+    # D-half in D2/KL0 = 2 of these; PV's whole K (<= BI) is one. Function-scope
+    # Python int for the same reason as D2 above.
+    KL0 = 128
     VEC_NUM = 2  # 2 vector cores per cube core
     G2 = G // VEC_NUM  # rows per vector core (= 32)
     BLK = 8  # FP32 elems per 32B block (Brcb fan-out width for row_expand)
@@ -3387,51 +3599,173 @@ def _build_swa(
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
                                     T.wait_flag("mte2", "mte1", Q_EV)
-                                    # Faithful QK = ComputeMm1, per-D-chunk: each
-                                    # 256-wide D-half accumulates into the SAME shared
-                                    # cL0 slot (cl0_base=0); chunk 0 inits + holds
-                                    # (flush_last/do_fixpipe=False), chunk 1 flushes +
-                                    # fixpipes the fully-accumulated Q@Kᵀ to
-                                    # workspace_s (= the reference's single Fixpipe
-                                    # after both kL1 halves, cube.h:591). k_actual=D2
-                                    # is each chunk's own contraction width;
-                                    # n_actual=win_align = the score's real columns.
-                                    # Each chunk reads K half from KV ring slot h; the
-                                    # per-slot MTE2_MTE1 wait gates the gemm's L1->L0,
-                                    # the MTE1_MTE2 set after releases the slot for its
-                                    # next ring user.
+                                    # Faithful QK = ComputeMm1, DECOMPOSED (the last
+                                    # gemm_v0_fixp call sites). At this call site the
+                                    # template has already collapsed to its kL0 walk:
+                                    # transpose_B makes nTile == N, so the N-tile loop
+                                    # runs a single round, cL0BufIter never advances
+                                    # inside the call, and the L0C ping-pong is the
+                                    # constant cl0_iter%2. Five of the parameters
+                                    # (transpose_A, cl0_base, prime_drain, flush_last,
+                                    # do_fixpipe) exist only to switch the template's
+                                    # own machinery off -- prime_drain=False already
+                                    # handed the L0AB flag lifecycle to the kernel and
+                                    # do_fixpipe=False already moved the fixpipe out.
+                                    #
+                                    # What remains is the kL0 walk, which is what runs
+                                    # below: each 256-wide D-half runs D2/KL0 = 2 kL0
+                                    # tiles that K-accumulate into the SAME cL0 slot,
+                                    # and only the last tile of the last half flushes.
+                                    # The four mmas therefore carry
+                                    #   (init, unit_flag) = (T,0b10) (F,0b10)
+                                    #                       (F,0b10) (F,0b11)
+                                    # = the template's (clear && kL0Idx == 0) and
+                                    # (flush_last && kL0Idx == kL0split-1). The L0AB
+                                    # slot is tileIdx&1, and tileIdx restarts at 0 per
+                                    # call, so here it is just kk. The single Fixpipe
+                                    # after both halves is the reference's single
+                                    # Fixpipe (cube.h:591); its nSize is n_actual,
+                                    # which MUST equal the mma's n or the unitFlag
+                                    # fixpipe waits on cL0 columns no mma marked ready.
+                                    #
+                                    # real_k is unnecessary on the A side (p_l0a's K
+                                    # dim already IS kL0Size); the B side needs real_n,
+                                    # because L0B's nZ fractal takes its K-block stride
+                                    # from the column count -- a full-width load
+                                    # followed by an n=win_align mma would address the
+                                    # wrong K-blocks. That is the other axis of what
+                                    # real_k solves for PV, where N is the compile-time
+                                    # PV_NW and only K is runtime.
+                                    #
+                                    # Each half reads its K from KV ring slot h: the
+                                    # per-slot MTE2_MTE1 wait gates the L1->L0 loads,
+                                    # the MTE1_MTE2 set after releases the slot.
+                                    # Spelled out per tile rather than as a kk loop:
+                                    # the unit_flag differs on the last tile, and a
+                                    # runtime conditional there breaks the mma
+                                    # codegen -- it writes the call and prints the
+                                    # args into the same stream, so an if_then_else's
+                                    # temporary declaration lands in the middle of a
+                                    # half-written call. Compile-time constants also
+                                    # keep the L1 column offsets in exactly the form
+                                    # microbench_l1_kblock.py validated (the codegen
+                                    # resolves q_l1_0[:, 128:256] to the fractal
+                                    # offset M*128, matching the template's
+                                    # A[kL0Idx * M * kL0Size] byte for byte).
+                                    cs = cl0_iter % 2
+                                    # D-half 0 (KV ring slot 0), tiles 0 and 1: tile 0
+                                    # inits the cL0 slot, both hold it (0b10).
                                     T.wait_flag("mte2", "mte1", KV_EV0)
-                                    T.gemm_v0_fixp(
-                                        q_l1_0,
-                                        kv_ring[0, :, :],
-                                        cL0,
-                                        workspace_s[cid, buf, :, :],
-                                        k_actual=D2,
-                                        transpose_B=True,
+                                    T.wait_flag("m", "mte1", L0AB_EV0)
+                                    T.copy(q_l1_0[:, 0:KL0], p_l0a[0, :, :])
+                                    T.copy(
+                                        kv_ring[0, :, 0:KL0],
+                                        v_l0b[0, :, :],
+                                        transpose=True,
+                                        real_k=KL0,
+                                        real_n=win_align,
+                                    )
+                                    T.set_flag("mte1", "m", L0AB_EV0)
+                                    T.wait_flag("mte1", "m", L0AB_EV0)
+                                    T.mma(
+                                        p_l0a[0, :, :],
+                                        v_l0b[0, :, :],
+                                        cL0[cs, :, :],
                                         init=True,
+                                        k_actual=KL0,
                                         n_actual=win_align,
-                                        cl0_base=cl0_iter % 2,
-                                        prime_drain=False,
-                                        flush_last=False,
-                                        do_fixpipe=False,
+                                        unit_flag=0b10,
                                     )
-                                    T.set_flag("mte1", "mte2", KV_EV0)
-                                    T.wait_flag("mte2", "mte1", KV_EV1)
-                                    T.gemm_v0_fixp(
-                                        q_l1_1,
-                                        kv_ring[1, :, :],
-                                        cL0,
-                                        workspace_s[cid, buf, :, :],
-                                        k_actual=D2,
-                                        transpose_B=True,
+                                    # tiny-tile hazard barrier, gated on the RUNTIME
+                                    # mma n exactly as the template: (M/16)*(n/16) <
+                                    # 10 with M=G=64 means win_align <= 32.
+                                    if win_align < 40:
+                                        T.pipe_barrier("m")
+                                    T.set_flag("m", "mte1", L0AB_EV0)
+                                    T.wait_flag("m", "mte1", L0AB_EV1)
+                                    T.copy(q_l1_0[:, KL0 : 2 * KL0], p_l0a[1, :, :])
+                                    T.copy(
+                                        kv_ring[0, :, KL0 : 2 * KL0],
+                                        v_l0b[1, :, :],
+                                        transpose=True,
+                                        real_k=KL0,
+                                        real_n=win_align,
+                                    )
+                                    T.set_flag("mte1", "m", L0AB_EV1)
+                                    T.wait_flag("mte1", "m", L0AB_EV1)
+                                    T.mma(
+                                        p_l0a[1, :, :],
+                                        v_l0b[1, :, :],
+                                        cL0[cs, :, :],
                                         init=False,
+                                        k_actual=KL0,
                                         n_actual=win_align,
-                                        cl0_base=cl0_iter % 2,
-                                        prime_drain=False,
-                                        flush_last=True,
-                                        do_fixpipe=True,
+                                        unit_flag=0b10,
                                     )
+                                    if win_align < 40:
+                                        T.pipe_barrier("m")
+                                    T.set_flag("m", "mte1", L0AB_EV1)
+                                    T.set_flag("mte1", "mte2", KV_EV0)
+                                    # D-half 1 (slot 1), tiles 2 and 3: both accumulate
+                                    # into the SAME cL0 slot; tile 3 is the last tile
+                                    # of the last half, so it flushes (0b11) and pairs
+                                    # with the fixpipe below.
+                                    T.wait_flag("mte2", "mte1", KV_EV1)
+                                    T.wait_flag("m", "mte1", L0AB_EV0)
+                                    T.copy(q_l1_1[:, 0:KL0], p_l0a[0, :, :])
+                                    T.copy(
+                                        kv_ring[1, :, 0:KL0],
+                                        v_l0b[0, :, :],
+                                        transpose=True,
+                                        real_k=KL0,
+                                        real_n=win_align,
+                                    )
+                                    T.set_flag("mte1", "m", L0AB_EV0)
+                                    T.wait_flag("mte1", "m", L0AB_EV0)
+                                    T.mma(
+                                        p_l0a[0, :, :],
+                                        v_l0b[0, :, :],
+                                        cL0[cs, :, :],
+                                        init=False,
+                                        k_actual=KL0,
+                                        n_actual=win_align,
+                                        unit_flag=0b10,
+                                    )
+                                    if win_align < 40:
+                                        T.pipe_barrier("m")
+                                    T.set_flag("m", "mte1", L0AB_EV0)
+                                    T.wait_flag("m", "mte1", L0AB_EV1)
+                                    T.copy(q_l1_1[:, KL0 : 2 * KL0], p_l0a[1, :, :])
+                                    T.copy(
+                                        kv_ring[1, :, KL0 : 2 * KL0],
+                                        v_l0b[1, :, :],
+                                        transpose=True,
+                                        real_k=KL0,
+                                        real_n=win_align,
+                                    )
+                                    T.set_flag("mte1", "m", L0AB_EV1)
+                                    T.wait_flag("mte1", "m", L0AB_EV1)
+                                    T.mma(
+                                        p_l0a[1, :, :],
+                                        v_l0b[1, :, :],
+                                        cL0[cs, :, :],
+                                        init=False,
+                                        k_actual=KL0,
+                                        n_actual=win_align,
+                                        unit_flag=0b11,
+                                    )
+                                    if win_align < 40:
+                                        T.pipe_barrier("m")
+                                    T.set_flag("m", "mte1", L0AB_EV1)
                                     T.set_flag("mte1", "mte2", KV_EV1)
+                                    # The single Fixpipe after both D-halves, fused
+                                    # with the last mma's 0b11 (= the template's
+                                    # do_fixpipe on the final chunk).
+                                    T.copy(
+                                        cL0[cs, :, :],
+                                        workspace_s[cid, buf, :, 0:win_align],
+                                        unit_flag=0b11,
+                                    )
                                     # both gemms consumed Q -> release the Q buffers
                                     # for their next ring user (next task's QK load).
                                     T.set_flag("mte1", "mte2", Q_EV)
