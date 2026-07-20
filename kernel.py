@@ -3219,23 +3219,44 @@ def _build_swa(
                                     # index a Python list with it).
                                     for h in range(2):
                                         T.wait_flag("mte1", "mte2", KV_EV0 + h)
-                                        T.copy_pa(
-                                            kv_ring[h, :, :],
-                                            ori_kv,
-                                            ori_block_table,
-                                            ori_block_size,
-                                            N2,
-                                            D,
-                                            ori_block_size * N2 * D,
-                                            ori_table_len,
-                                            D2,
-                                            win,
-                                            BI,
-                                            b,
-                                            0,
-                                            ori_left,
-                                            h * D2,
-                                        )
+                                        # Front-end paged sliding-window K load
+                                        # (replaces copy_pa): walk the window one
+                                        # page at a time -- compile-time page bound,
+                                        # runtime guard -- and T.copy each page's
+                                        # runtime row-run into the ring slot. ONE
+                                        # alloc_var: a compile-time init= is hoisted
+                                        # to kernel scope and initialised ONCE, so a
+                                        # per-load reset has to come from a RUNTIME
+                                        # init expr; derive the done count from it.
+                                        pa_start = ori_left
+                                        pa_cur = T.alloc_var("int32", init=pa_start)
+                                        for _pg in range(
+                                            (BI + ori_block_size - 1) // ori_block_size
+                                            + 1
+                                        ):
+                                            pa_done = pa_cur - pa_start
+                                            if pa_done < win:
+                                                pa_lg = pa_cur // ori_block_size
+                                                pa_ph = ori_block_table[b, pa_lg]
+                                                pa_rem = pa_cur % ori_block_size
+                                                pa_run = T.min(
+                                                    ori_block_size - pa_rem,
+                                                    win - pa_done,
+                                                )
+                                                T.copy(
+                                                    ori_kv[
+                                                        pa_ph,
+                                                        pa_rem : pa_rem + pa_run,
+                                                        0,
+                                                        h * D2 : h * D2 + D2,
+                                                    ],
+                                                    kv_ring[
+                                                        h,
+                                                        pa_done : pa_done + pa_run,
+                                                        :,
+                                                    ],
+                                                )
+                                                pa_cur += pa_run
                                         T.set_flag("mte2", "mte1", KV_EV0 + h)
                                     # QK = Q @ Kᵀ over the window; N rounds up to 16 to
                                     # match Ascend C ComputeMm1 (nL1SizeAlign =
