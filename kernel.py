@@ -526,18 +526,27 @@ def _build_cfa(
                                                         # slot. Counter and copy are both on
                                                         # the cube, so CombineCV keeps them
                                                         # together (no cube/vector split).
-                                                        pa_done = T.alloc_var(
-                                                            "int32", init=0
-                                                        )
+                                                        # ONE alloc_var only. A compile-time
+                                                        # init= (e.g. a `done` counter at 0)
+                                                        # is hoisted to kernel scope and
+                                                        # initialised ONCE, so it would not
+                                                        # reset per load wherever the h/cb
+                                                        # loop stays a runtime loop -- the
+                                                        # second load's guard then sees the
+                                                        # previous window's end and skips.
+                                                        # pa_cur's init is a RUNTIME expr, so
+                                                        # it is re-assigned per load; derive
+                                                        # the done count from it instead.
+                                                        pa_start = s2base + cb * BI
                                                         pa_cur = T.alloc_var(
-                                                            "int32",
-                                                            init=s2base + cb * BI,
+                                                            "int32", init=pa_start
                                                         )
                                                         for _pg in range(
                                                             (BI + ori_block_size - 1)
                                                             // ori_block_size
                                                             + 1
                                                         ):
+                                                            pa_done = pa_cur - pa_start
                                                             if pa_done < ncols:
                                                                 pa_lg = (
                                                                     pa_cur
@@ -571,7 +580,6 @@ def _build_cfa(
                                                                         :,
                                                                     ],
                                                                 )
-                                                                pa_done += pa_run
                                                                 pa_cur += pa_run
                                                     else:
                                                         T.copy_pa(
@@ -1838,18 +1846,27 @@ def _build_scfa(
                                                         # slot. Counter and copy are both on
                                                         # the cube, so CombineCV keeps them
                                                         # together (no cube/vector split).
-                                                        pa_done = T.alloc_var(
-                                                            "int32", init=0
-                                                        )
+                                                        # ONE alloc_var only. A compile-time
+                                                        # init= (e.g. a `done` counter at 0)
+                                                        # is hoisted to kernel scope and
+                                                        # initialised ONCE, so it would not
+                                                        # reset per load wherever the h/cb
+                                                        # loop stays a runtime loop -- the
+                                                        # second load's guard then sees the
+                                                        # previous window's end and skips.
+                                                        # pa_cur's init is a RUNTIME expr, so
+                                                        # it is re-assigned per load; derive
+                                                        # the done count from it instead.
+                                                        pa_start = s2base + cb * BI
                                                         pa_cur = T.alloc_var(
-                                                            "int32",
-                                                            init=s2base + cb * BI,
+                                                            "int32", init=pa_start
                                                         )
                                                         for _pg in range(
                                                             (BI + ori_block_size - 1)
                                                             // ori_block_size
                                                             + 1
                                                         ):
+                                                            pa_done = pa_cur - pa_start
                                                             if pa_done < ncols:
                                                                 pa_lg = (
                                                                     pa_cur
@@ -1883,7 +1900,6 @@ def _build_scfa(
                                                                         :,
                                                                     ],
                                                                 )
-                                                                pa_done += pa_run
                                                                 pa_cur += pa_run
                                                     else:
                                                         # SCFA: this cmp tile's merged KV is in
