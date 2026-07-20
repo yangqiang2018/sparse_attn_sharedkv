@@ -582,23 +582,52 @@ def _build_cfa(
                                                                 )
                                                                 pa_cur += pa_run
                                                     else:
-                                                        T.copy_pa(
-                                                            kv_ring[slot, :, :],
-                                                            cmp_kv,
-                                                            cmp_block_table,
-                                                            cmp_block_size,
-                                                            N2,
-                                                            D,
-                                                            cmp_block_size * N2 * D,
-                                                            cmp_table_len,
-                                                            D2,
-                                                            ncols,
-                                                            BI,
-                                                            b,
-                                                            0,
-                                                            s2base + cb * BI,
-                                                            h * D2,
+                                                        # Same paged walk as the ori
+                                                        # branch, on the cmp page table.
+                                                        pc_start = s2base + cb * BI
+                                                        pc_cur = T.alloc_var(
+                                                            "int32", init=pc_start
                                                         )
+                                                        for _pg in range(
+                                                            (BI + cmp_block_size - 1)
+                                                            // cmp_block_size
+                                                            + 1
+                                                        ):
+                                                            pc_done = pc_cur - pc_start
+                                                            if pc_done < ncols:
+                                                                pc_lg = (
+                                                                    pc_cur
+                                                                    // cmp_block_size
+                                                                )
+                                                                pc_ph = cmp_block_table[
+                                                                    b, pc_lg
+                                                                ]
+                                                                pc_rem = (
+                                                                    pc_cur
+                                                                    % cmp_block_size
+                                                                )
+                                                                pc_run = T.min(
+                                                                    cmp_block_size
+                                                                    - pc_rem,
+                                                                    ncols - pc_done,
+                                                                )
+                                                                T.copy(
+                                                                    cmp_kv[
+                                                                        pc_ph,
+                                                                        pc_rem : pc_rem
+                                                                        + pc_run,
+                                                                        0,
+                                                                        h * D2 : h * D2
+                                                                        + D2,
+                                                                    ],
+                                                                    kv_ring[
+                                                                        slot,
+                                                                        pc_done : pc_done
+                                                                        + pc_run,
+                                                                        :,
+                                                                    ],
+                                                                )
+                                                                pc_cur += pc_run
                                                     T.set_flag("mte2", "mte1", ev)
                                                 if DEBUG_SERIAL:
                                                     T.barrier_all()
@@ -773,41 +802,100 @@ def _build_cfa(
                                                     # LOAD V D-tile nl, K-block ks -> slot.
                                                     T.wait_flag("mte1", "mte2", ev)
                                                     if is_orim:
-                                                        T.copy_pa(
-                                                            kv_ring[slot, :, :],
-                                                            ori_kv,
-                                                            ori_block_table,
-                                                            ori_block_size,
-                                                            N2,
-                                                            D,
-                                                            ori_block_size * N2 * D,
-                                                            ori_table_len,
-                                                            PV_NW,
-                                                            krows,
-                                                            BI,
-                                                            bm,
-                                                            0,
-                                                            s2basem + ks * BI,
-                                                            nl * PV_NW,
+                                                        # Paged walk, V D-tile nl: only
+                                                        # PV_NW of the slot's columns.
+                                                        pv_start = s2basem + ks * BI
+                                                        pv_cur = T.alloc_var(
+                                                            "int32", init=pv_start
                                                         )
+                                                        for _pg in range(
+                                                            (BI + ori_block_size - 1)
+                                                            // ori_block_size
+                                                            + 1
+                                                        ):
+                                                            pv_done = pv_cur - pv_start
+                                                            if pv_done < krows:
+                                                                pv_lg = (
+                                                                    pv_cur
+                                                                    // ori_block_size
+                                                                )
+                                                                pv_ph = ori_block_table[
+                                                                    bm, pv_lg
+                                                                ]
+                                                                pv_rem = (
+                                                                    pv_cur
+                                                                    % ori_block_size
+                                                                )
+                                                                pv_run = T.min(
+                                                                    ori_block_size
+                                                                    - pv_rem,
+                                                                    krows - pv_done,
+                                                                )
+                                                                T.copy(
+                                                                    ori_kv[
+                                                                        pv_ph,
+                                                                        pv_rem : pv_rem
+                                                                        + pv_run,
+                                                                        0,
+                                                                        nl * PV_NW : nl
+                                                                        * PV_NW
+                                                                        + PV_NW,
+                                                                    ],
+                                                                    kv_ring[
+                                                                        slot,
+                                                                        pv_done : pv_done
+                                                                        + pv_run,
+                                                                        0:PV_NW,
+                                                                    ],
+                                                                )
+                                                                pv_cur += pv_run
                                                     else:
-                                                        T.copy_pa(
-                                                            kv_ring[slot, :, :],
-                                                            cmp_kv,
-                                                            cmp_block_table,
-                                                            cmp_block_size,
-                                                            N2,
-                                                            D,
-                                                            cmp_block_size * N2 * D,
-                                                            cmp_table_len,
-                                                            PV_NW,
-                                                            krows,
-                                                            BI,
-                                                            bm,
-                                                            0,
-                                                            s2basem + ks * BI,
-                                                            nl * PV_NW,
+                                                        # Same, on the cmp page table.
+                                                        qv_start = s2basem + ks * BI
+                                                        qv_cur = T.alloc_var(
+                                                            "int32", init=qv_start
                                                         )
+                                                        for _pg in range(
+                                                            (BI + cmp_block_size - 1)
+                                                            // cmp_block_size
+                                                            + 1
+                                                        ):
+                                                            qv_done = qv_cur - qv_start
+                                                            if qv_done < krows:
+                                                                qv_lg = (
+                                                                    qv_cur
+                                                                    // cmp_block_size
+                                                                )
+                                                                qv_ph = cmp_block_table[
+                                                                    bm, qv_lg
+                                                                ]
+                                                                qv_rem = (
+                                                                    qv_cur
+                                                                    % cmp_block_size
+                                                                )
+                                                                qv_run = T.min(
+                                                                    cmp_block_size
+                                                                    - qv_rem,
+                                                                    krows - qv_done,
+                                                                )
+                                                                T.copy(
+                                                                    cmp_kv[
+                                                                        qv_ph,
+                                                                        qv_rem : qv_rem
+                                                                        + qv_run,
+                                                                        0,
+                                                                        nl * PV_NW : nl
+                                                                        * PV_NW
+                                                                        + PV_NW,
+                                                                    ],
+                                                                    kv_ring[
+                                                                        slot,
+                                                                        qv_done : qv_done
+                                                                        + qv_run,
+                                                                        0:PV_NW,
+                                                                    ],
+                                                                )
+                                                                qv_cur += qv_run
                                                     T.set_flag("mte2", "mte1", ev)
                                                     if DEBUG_SERIAL:
                                                         T.barrier_all()
@@ -2099,23 +2187,53 @@ def _build_scfa(
                                                     # LOAD V D-tile nl, K-block ks -> slot.
                                                     T.wait_flag("mte1", "mte2", ev)
                                                     if is_orim:
-                                                        T.copy_pa(
-                                                            kv_ring[slot, :, :],
-                                                            ori_kv,
-                                                            ori_block_table,
-                                                            ori_block_size,
-                                                            N2,
-                                                            D,
-                                                            ori_block_size * N2 * D,
-                                                            ori_table_len,
-                                                            PV_NW,
-                                                            krows,
-                                                            BI,
-                                                            bm,
-                                                            0,
-                                                            s2basem + ks * BI,
-                                                            nl * PV_NW,
+                                                        # Paged walk, V D-tile nl: only
+                                                        # PV_NW of the slot's columns.
+                                                        pv_start = s2basem + ks * BI
+                                                        pv_cur = T.alloc_var(
+                                                            "int32", init=pv_start
                                                         )
+                                                        for _pg in range(
+                                                            (BI + ori_block_size - 1)
+                                                            // ori_block_size
+                                                            + 1
+                                                        ):
+                                                            pv_done = pv_cur - pv_start
+                                                            if pv_done < krows:
+                                                                pv_lg = (
+                                                                    pv_cur
+                                                                    // ori_block_size
+                                                                )
+                                                                pv_ph = ori_block_table[
+                                                                    bm, pv_lg
+                                                                ]
+                                                                pv_rem = (
+                                                                    pv_cur
+                                                                    % ori_block_size
+                                                                )
+                                                                pv_run = T.min(
+                                                                    ori_block_size
+                                                                    - pv_rem,
+                                                                    krows - pv_done,
+                                                                )
+                                                                T.copy(
+                                                                    ori_kv[
+                                                                        pv_ph,
+                                                                        pv_rem : pv_rem
+                                                                        + pv_run,
+                                                                        0,
+                                                                        nl * PV_NW : nl
+                                                                        * PV_NW
+                                                                        + PV_NW,
+                                                                    ],
+                                                                    kv_ring[
+                                                                        slot,
+                                                                        pv_done : pv_done
+                                                                        + pv_run,
+                                                                        0:PV_NW,
+                                                                    ],
+                                                                )
+                                                                pv_cur += pv_run
                                                     else:
                                                         # SCFA: merged V from kvMergeGm (gm%4 ring
                                                         # slot; V0 produced tile gm). Plain Nd2Nz
@@ -3384,23 +3502,37 @@ def _build_swa(
                                         # =128, d_idx=nl*128). Wait the slot's prior
                                         # consumer (QK's K half / an earlier V tile).
                                         T.wait_flag("mte1", "mte2", ev)
-                                        T.copy_pa(
-                                            kv_ring[slot, :, :],
-                                            ori_kv,
-                                            ori_block_table,
-                                            ori_block_size,
-                                            N2,
-                                            D,
-                                            ori_block_size * N2 * D,
-                                            ori_table_len,
-                                            PV_NW,
-                                            winm,
-                                            BI,
-                                            bm,
-                                            0,
-                                            ori_leftm,
-                                            nl * PV_NW,
-                                        )
+                                        # Paged walk, V D-tile nl: only PV_NW of the
+                                        # slot's columns (= copy_pa act_head_dim).
+                                        pv_start = ori_leftm
+                                        pv_cur = T.alloc_var("int32", init=pv_start)
+                                        for _pg in range(
+                                            (BI + ori_block_size - 1) // ori_block_size
+                                            + 1
+                                        ):
+                                            pv_done = pv_cur - pv_start
+                                            if pv_done < winm:
+                                                pv_lg = pv_cur // ori_block_size
+                                                pv_ph = ori_block_table[bm, pv_lg]
+                                                pv_rem = pv_cur % ori_block_size
+                                                pv_run = T.min(
+                                                    ori_block_size - pv_rem,
+                                                    winm - pv_done,
+                                                )
+                                                T.copy(
+                                                    ori_kv[
+                                                        pv_ph,
+                                                        pv_rem : pv_rem + pv_run,
+                                                        0,
+                                                        nl * PV_NW : nl * PV_NW + PV_NW,
+                                                    ],
+                                                    kv_ring[
+                                                        slot,
+                                                        pv_done : pv_done + pv_run,
+                                                        0:PV_NW,
+                                                    ],
+                                                )
+                                                pv_cur += pv_run
                                         T.set_flag("mte2", "mte1", ev)
                                         # CONSUME: L0 load (real_k=winm) -> mma
                                         # (k_actual=winm) -> fused fixpipe (unit_flag).
