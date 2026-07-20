@@ -1,5 +1,7 @@
-"""临时探针: dump 编译后的 CFA Ascend C, 查手拼 softmax 的 -inf mask(fill)为何没落到
-[tw_a:512](lse 偏大 = reduce_max 读到 padding 残留)。跑: python dump_cfa_cg.py"""
+"""临时探针: dump 编译后的 CFA Ascend C, 查前端拼 paged load 的计数器(pa_done/pa_cur)
+在 cfa 的**运行期** `if is_ori` 分支里是怎么 lowering 的 —— swa 的 is_ori 是编译期 True
+(前端拼 PASS), cfa 是运行期(FAIL), 嫌疑是 alloc_var 计数器在 runtime-if 内没正确
+声明/初始化/累加。跑: python dump_cfa_cg.py"""
 
 import os
 import re
@@ -28,18 +30,21 @@ with open("/tmp/cfa_cg.cpp", "w") as f:
 lines = src.splitlines()
 print(f"wrote /tmp/cfa_cg.cpp; total lines: {len(lines)}")
 
-# 1) 所有 fill(Duplicate)行 —— mask 应该是对 512 宽的一条
-print("\n=== Duplicate / Fill 行 ===")
+# 1) 计数器 pa_done / pa_cur 的每一处: 声明? 初始化? 累加? 还是裸用未初始化?
+print("\n=== pa_done / pa_cur 的所有出现(声明/init/累加/使用)===")
 for i, ln in enumerate(lines):
-    if re.search(r"Duplicate|Fill\b", ln):
-        print(f"{i:5d}: {ln.strip()[:130]}")
+    if re.search(r"\bpa_done\b|\bpa_cur\b", ln):
+        print(f"{i:5d}: {ln.strip()[:150]}")
 
-# 2) 第一处 ReduceMax 前 45 行(手拼 softmax 的 mask+load+mul 区)
-first_rm = next(
-    (i for i, l in enumerate(lines) if re.search(r"ReduceMax|WholeReduceMax", l)),
-    None,
-)
-print(f"\n=== 第一处 ReduceMax @ {first_rm}, 前 45 行(mask/load/mul 区)===")
-if first_rm is not None:
-    for i in range(max(0, first_rm - 45), first_rm + 3):
-        print(f"{i:5d}: {lines[i].rstrip()[:130]}")
+# 2) 前端拼发出的 GM->L1 paged copy
+print("\n=== copy_gm_to_l1 行(前端拼的 paged load)===")
+for i, ln in enumerate(lines):
+    if "copy_gm_to_l1" in ln:
+        print(f"{i:5d}: {ln.strip()[:170]}")
+
+# 3) 第一处 copy_gm_to_l1 的上下文: 看它外面的 runtime if / for 结构和计数器位置
+first_c = next((i for i, ln in enumerate(lines) if "copy_gm_to_l1" in ln), None)
+print(f"\n=== 第一处 copy_gm_to_l1 @ {first_c}, 前 40 行上下文(runtime if/for 结构)===")
+if first_c is not None:
+    for i in range(max(0, first_c - 40), min(len(lines), first_c + 4)):
+        print(f"{i:5d}: {lines[i].rstrip()[:150]}")
