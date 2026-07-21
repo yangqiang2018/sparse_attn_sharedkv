@@ -3,12 +3,17 @@
 The full suite (``test_sparse_attn_sharedkv.py``) runs the three prefill cases
 at ``S1=8192``; the CPU golden reference takes minutes at that size, which makes
 the kernel-development correctness loop slow. This file runs the SAME three
-prefill scenarios (swa / cfa / scfa, TND, B=1) through the SAME kernel code
-paths at a small ``S1`` -- only the shape is shrunk (``S1`` / ``seqused_kv`` /
-paged block counts). ``BI``, ``NI_ori`` / ``NI_cmp``, cube-direct, the paged
-block-boundary split, and the cmp masking are all identical to the 8K cases, so
-this is a faithful (just smaller) correctness gate -- and the golden costs ~100x
-less, so these cases run by DEFAULT (they are NOT marked ``slow``).
+prefill scenarios (swa / cfa / scfa, TND) through the SAME kernel code paths at
+a small ``S1`` -- only the shape is shrunk (``S1`` / ``seqused_kv`` / paged block
+counts). ``BI``, ``NI_ori`` / ``NI_cmp``, cube-direct, the paged block-boundary
+split, and the cmp masking are all identical to the 8K cases, so this is a
+faithful (just smaller) correctness gate -- and the golden costs ~100x less, so
+these cases run by DEFAULT (they are NOT marked ``slow``).
+
+Each scenario runs twice: once at ``B=1`` (matching the 8K suite) and once at
+``B=2`` with two ragged sequences. The whole 8K suite is ``B=1``, which cannot
+distinguish a correct ``block_table[b, lg]`` from one that drops ``b`` -- see
+``_shrink_multibatch``.
 
 Coverage at ``S1=1024`` (chosen by a paged-block audit, see ``_FAST_S1``):
 
@@ -99,10 +104,55 @@ def _shrink(name: str, s1: int = _FAST_S1) -> dict:
     return cfg
 
 
+def _shrink_multibatch(name: str, seqs: tuple[int, ...] = (768, 512)) -> dict:
+    """Derive a small MULTI-BATCH prefill config from an 8K one.
+
+    Every scenario above runs ``B=1``, which leaves the block table's leading
+    index untested: with one batch ``b`` is always 0, so a kernel that indexes
+    ``block_table[b, lg]`` and a kernel that indexes ``block_table[lg]`` read the
+    same memory and agree. ``gen_ori_kv_paged`` hands each batch a distinct
+    shuffled slice of the physical blocks, so at ``B>1`` those two disagree
+    immediately -- every batch but the first reads batch 0's pages and attends
+    over the wrong KV.
+
+    The two sequences differ in length, so the ragged path (per-batch ``act_q`` /
+    ``act_kv``, the ``q_prefix`` token offsets, the ``s < act_q`` task guard) is
+    exercised alongside the table indexing rather than only the uniform case.
+    """
+    cfg = dict(SCENARIOS[name])
+    cu = [0]
+    for s in seqs:
+        cu.append(cu[-1] + s)
+    cfg.update(
+        B=len(seqs),
+        S1=max(seqs),
+        T1=sum(seqs),
+        cu_seqlens_q=cu,
+        seqused_kv=list(seqs),
+    )
+    # Paged blocks are drawn from one shared pool, so the counts are summed over
+    # batches (gen_ori_kv_paged rejects a pool smaller than that), plus slack.
+    cfg["block_num1"] = sum(math.ceil(s / cfg["block_size1"]) for s in seqs) + 2
+    if cfg["scenario"] >= 2:
+        cfg["block_num2"] = (
+            sum(
+                max(1, math.ceil((s // cfg["cmp_ratio"]) / cfg["block_size2"]))
+                for s in seqs
+            )
+            + 1
+        )
+    return cfg
+
+
 FAST_SCENARIOS = {
     "swa_prefill_fast": _shrink("swa_prefill"),
     "cfa_prefill_fast": _shrink("cfa_prefill"),
     "scfa_prefill_fast": _shrink("scfa_prefill"),
+    # B=2. swa reaches only the ori block table; cfa and scfa also read the cmp
+    # table, and scfa reads it again from the vector-side topk gather.
+    "swa_prefill_b2": _shrink_multibatch("swa_prefill"),
+    "cfa_prefill_b2": _shrink_multibatch("cfa_prefill"),
+    "scfa_prefill_b2": _shrink_multibatch("scfa_prefill"),
 }
 
 
