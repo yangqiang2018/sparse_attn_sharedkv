@@ -414,7 +414,9 @@ def _build_cfa(
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
                 # strided-in-place softmax (替代满宽手拼): 64 列块归约暂存 + rowmax brcb 目标。
                 # 单独 alloc(不复用 brcb_d/softmax_cmp)避与 PV rescale/其它 mc 并发 race;都很小。
-                part = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # 单块 wholereduce 暂存
+                part = T.alloc_ub(
+                    [M_CHUNK, 1], accum_dtype
+                )  # 单个 64 列块的 reduce 暂存
                 brcb_s = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # rowmax brcb 广播 [M,8]
@@ -1203,7 +1205,7 @@ def _build_cfa(
                                             # P=exp(score-m_new)。reduce/sub/exp 走 strided-in-place
                                             # 原地只算 [0:tw_64](64 列块),不碰 [tw_64:512] padding。
                                             # ori(窄窗 tw<=BI)走 strided rowmax over [0:tw_64]:
-                                            # 64 列块 wholereducemax + 无条件 combine(fill -inf,
+                                            # 64 列块 reduce_max + 无条件 combine(fill -inf,
                                             # 语句-if guard runtime tw_64);cmp(宽 512 全有效)走
                                             # wide reduce_max(8-chunk 的标量开销太贵)。
                                             if is_narrow:
@@ -1213,19 +1215,14 @@ def _build_cfa(
                                                 )
                                                 for kc in range(BI // 64):
                                                     if kc * 64 < tw_64:
-                                                        T.tile.wholereducemax(
-                                                            part,
+                                                        T.reduce_max(
                                                             in_ub[
                                                                 ps,
                                                                 :,
                                                                 kc * 64 : kc * 64 + 64,
                                                             ],
-                                                            64,
-                                                            M_CHUNK,
-                                                            1,
-                                                            1,
-                                                            64,
-                                                            ReduceOrder="ORDER_ONLY_VALUE",
+                                                            part,
+                                                            dim=-1,
                                                         )
                                                         T.tile.max(
                                                             m_i[buf, mc, :, :],
@@ -1348,24 +1345,20 @@ def _build_cfa(
                                             # (同 V pipe, pipe_barrier 隔开 cast 先读完 P)。
                                             T.pipe_barrier("v")
                                             # ori: strided rowsum(P) over [0:tw_64] 64 列块
-                                            # wholereducesum + 无条件 combine(fill 0);
+                                            # 64 列块 reduce_sum + 无条件 combine(fill 0);
                                             # cmp: wide reduce_sum(满 512)
                                             if is_narrow:
                                                 T.tile.fill(sumP, T.float32(0.0))
                                                 for kc in range(BI // 64):
                                                     if kc * 64 < tw_64:
-                                                        T.tile.wholereducesum(
-                                                            part,
+                                                        T.reduce_sum(
                                                             in_ub[
                                                                 ps,
                                                                 :,
                                                                 kc * 64 : kc * 64 + 64,
                                                             ],
-                                                            64,
-                                                            M_CHUNK,
-                                                            1,
-                                                            1,
-                                                            64,
+                                                            part,
+                                                            dim=-1,
                                                         )
                                                         T.tile.add(sumP, sumP, part)
                                             else:
@@ -1901,7 +1894,9 @@ def _build_scfa(
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
                 # strided-in-place softmax (替代满宽手拼): 64 列块归约暂存 + rowmax brcb 目标。
                 # 单独 alloc(不复用 brcb_d/softmax_cmp)避与 PV rescale/其它 mc 并发 race;都很小。
-                part = T.alloc_ub([M_CHUNK, 1], accum_dtype)  # 单块 wholereduce 暂存
+                part = T.alloc_ub(
+                    [M_CHUNK, 1], accum_dtype
+                )  # 单个 64 列块的 reduce 暂存
                 brcb_s = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # rowmax brcb 广播 [M,8]
@@ -2825,7 +2820,7 @@ def _build_scfa(
                                             # P=exp(score-m_new)。reduce/sub/exp 走 strided-in-place
                                             # 原地只算 [0:tw_64](64 列块),不碰 [tw_64:512] padding。
                                             # ori(窄窗 tw<=BI)走 strided rowmax over [0:tw_64]:
-                                            # 64 列块 wholereducemax + 无条件 combine(fill -inf,
+                                            # 64 列块 reduce_max + 无条件 combine(fill -inf,
                                             # 语句-if guard runtime tw_64);cmp(宽 512 全有效)走
                                             # wide reduce_max(8-chunk 的标量开销太贵)。
                                             if is_narrow:
@@ -2835,19 +2830,14 @@ def _build_scfa(
                                                 )
                                                 for kc in range(BI // 64):
                                                     if kc * 64 < tw_64:
-                                                        T.tile.wholereducemax(
-                                                            part,
+                                                        T.reduce_max(
                                                             in_ub[
                                                                 ps,
                                                                 :,
                                                                 kc * 64 : kc * 64 + 64,
                                                             ],
-                                                            64,
-                                                            M_CHUNK,
-                                                            1,
-                                                            1,
-                                                            64,
-                                                            ReduceOrder="ORDER_ONLY_VALUE",
+                                                            part,
+                                                            dim=-1,
                                                         )
                                                         T.tile.max(
                                                             m_i[buf, mc, :, :],
@@ -2970,24 +2960,20 @@ def _build_scfa(
                                             # (同 V pipe, pipe_barrier 隔开 cast 先读完 P)。
                                             T.pipe_barrier("v")
                                             # ori: strided rowsum(P) over [0:tw_64] 64 列块
-                                            # wholereducesum + 无条件 combine(fill 0);
+                                            # 64 列块 reduce_sum + 无条件 combine(fill 0);
                                             # cmp: wide reduce_sum(满 512)
                                             if is_narrow:
                                                 T.tile.fill(sumP, T.float32(0.0))
                                                 for kc in range(BI // 64):
                                                     if kc * 64 < tw_64:
-                                                        T.tile.wholereducesum(
-                                                            part,
+                                                        T.reduce_sum(
                                                             in_ub[
                                                                 ps,
                                                                 :,
                                                                 kc * 64 : kc * 64 + 64,
                                                             ],
-                                                            64,
-                                                            M_CHUNK,
-                                                            1,
-                                                            1,
-                                                            64,
+                                                            part,
+                                                            dim=-1,
                                                         )
                                                         T.tile.add(sumP, sumP, part)
                                             else:
