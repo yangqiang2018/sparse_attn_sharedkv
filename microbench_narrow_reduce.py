@@ -55,14 +55,17 @@ pass_configs = {
 }
 
 
+# A per-row result is one scalar per row. Keep it 1-D [M]: the reduce validator
+# accepts [M] for dim=-1, and a [M, 1] column hits the 32B-block-aligned
+# copy_ub_to_gm path on the way out, which reorders the values.
 def build_real_shape(kind):
     reduce_op = T.reduce_max if kind == "max" else T.reduce_sum
 
     @T.prim_func
-    def main(src: T.Tensor([M, BUF], dtype), out: T.Tensor([1, M], dtype)):
+    def main(src: T.Tensor([M, BUF], dtype), out: T.Tensor([M], dtype)):
         with T.Kernel(1, is_npu=True) as (cid, vid):
             ub = T.alloc_ub([M, BUF], dtype)
-            acc = T.alloc_ub([1, M], dtype)
+            acc = T.alloc_ub([M], dtype)
             if vid == 0:
                 T.copy(src, ub)
                 reduce_op(ub, acc, dim=-1, real_shape=[M, VALID])
@@ -75,10 +78,10 @@ def build_wholereduce(kind):
     whole = T.tile.wholereducemax if kind == "max" else T.tile.wholereducesum
 
     @T.prim_func
-    def main(src: T.Tensor([M, BUF], dtype), out: T.Tensor([M, 1], dtype)):
+    def main(src: T.Tensor([M, BUF], dtype), out: T.Tensor([M], dtype)):
         with T.Kernel(1, is_npu=True) as (cid, vid):
             ub = T.alloc_ub([M, BUF], dtype)
-            acc = T.alloc_ub([M, 1], dtype)
+            acc = T.alloc_ub([M], dtype)
             if vid == 0:
                 T.copy(src, ub)
                 # mask = the logical width; srcrepstride steps one physical row
@@ -102,16 +105,16 @@ def build_wholereduce(kind):
     return main
 
 
-def run(tag, func_def, kind, out_is_row):
+def run(tag, func_def, kind):
     torch.manual_seed(0)
     data = torch.randn(M, BUF, dtype=torch.float32)
     # Poison the padding: including it changes the answer.
     data[:, VALID:] = 100.0 if kind == "max" else 7.0
 
     ref = (
-        data[:, :VALID].max(dim=-1, keepdim=True).values
+        data[:, :VALID].max(dim=-1).values
         if kind == "max"
-        else data[:, :VALID].sum(dim=-1, keepdim=True)
+        else data[:, :VALID].sum(dim=-1)
     )
 
     try:
@@ -123,10 +126,15 @@ def run(tag, func_def, kind, out_is_row):
         print(f"  {tag:<12} {kind:<3} COMPILE/RUN FAILED: {repr(exc)[:110]}")
         return
 
-    got2d = got if out_is_row else got.T
-    diff = (got2d - ref.T).abs().max().item()
+    diff = (got - ref).abs().max().item()
     verdict = "OK" if diff < 1e-3 else "WRONG"
-    print(f"  {tag:<12} {kind:<3} max|diff|={diff:10.4f}  {verdict}")
+    # A contiguous misread lands row 0's chunks in every slot, so show row 0/1
+    # to make the failure mode legible rather than just a magnitude.
+    print(
+        f"  {tag:<12} {kind:<3} max|diff|={diff:10.4f}  {verdict}"
+        f"   got[:2]={[round(v, 3) for v in got[:2].tolist()]}"
+        f" ref[:2]={[round(v, 3) for v in ref[:2].tolist()]}"
+    )
 
 
 if __name__ == "__main__":
@@ -135,8 +143,8 @@ if __name__ == "__main__":
     print("padding poisoned, so including it cannot pass by luck")
     print("=" * 72)
     for kind in ("max", "sum"):
-        run("real_shape", build_real_shape(kind), kind, out_is_row=True)
-        run("wholereduce", build_wholereduce(kind), kind, out_is_row=False)
+        run("real_shape", build_real_shape(kind), kind)
+        run("wholereduce", build_wholereduce(kind), kind)
     print("=" * 72)
     print("real_shape WRONG + wholereduce OK  -> real_shape is broken on ascendc;")
     print("   route A = fix it (lower narrow real_shape to the wholereduce path),")
