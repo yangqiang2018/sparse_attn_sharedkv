@@ -423,7 +423,7 @@ def _build_cfa(
                 brcb_d = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
-                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp)。
+                # 手拼替代 SoftmaxFlashV2: sumP=reduce_sum(P) 临时(替代 softmax_tmp)。
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
                 # strided-in-place softmax (替代满宽手拼): 64 列块归约暂存 + rowmax brcb 目标。
                 # 单独 alloc(不复用 brcb_d/softmax_cmp)避与 PV rescale/其它 mc 并发 race;都很小。
@@ -1173,7 +1173,7 @@ def _build_cfa(
                                             # output done reading it) = ref WaitFlag
                                             # <V_MTE2>(BUF1+pong):415.
                                             T.wait_flag("v", "mte2", IN_EV + ps)
-                                            # 手拼替代 007: 满宽 fill -inf mask, 再用 014 只搬
+                                            # 手拼替代 SoftmaxFlashV2: 满宽 fill -inf mask, 再用运行期 extent copy 只搬
                                             # 有效 tw_a 列 -> [tw_a:512] 留 -inf, 定长满宽(512)
                                             # reduce/exp 等价只算有效窗口(绕开变长 reduce)。
                                             # fill(V)->copy(MTE2) 复用 IN_EV+ps 握手。
@@ -1212,7 +1212,7 @@ def _build_cfa(
                                             # V-pipe order mul -> softmax (= ref
                                             # PipeBarrier<PIPE_V>:423).
                                             T.pipe_barrier("v")
-                                            # 手拼 online softmax(替代 007): 产出 m_i/expmax/P;
+                                            # 手拼 online softmax(替代 SoftmaxFlashV2): 产出 m_i/expmax/P;
                                             # denom 的 in_sum*expmax 部分在此, sum(P) 部分在 cast
                                             # 之后(reduce_sum 破坏 src)。in_max/in_sum 分支:
                                             #   is_first: in_max=sink, in_sum=ones(1.0)
@@ -1393,7 +1393,7 @@ def _build_cfa(
                                             T.wait_flag("v", "mte3", OUT_EV)
                                             # copy out only the tw_a valid P columns
                                             # (the cube PV reads exactly the window) --
-                                            # = ref width, saves MTE3 (needs 014).
+                                            # = ref width, saves MTE3 (needs the runtime inner-extent copy).
                                             T.copy(
                                                 out_ub[:, 0:tw_a],
                                                 workspace_p[
@@ -1917,7 +1917,7 @@ def _build_scfa(
                 brcb_d = T.alloc_ub(
                     [M_CHUNK, BLK], accum_dtype
                 )  # Brcb scratch (row_expand)
-                # 手拼替代 007: sumP=reduce_sum(P) 临时(替代 softmax_tmp)。
+                # 手拼替代 SoftmaxFlashV2: sumP=reduce_sum(P) 临时(替代 softmax_tmp)。
                 sumP = T.alloc_ub([M_CHUNK, 1], accum_dtype)
                 # strided-in-place softmax (替代满宽手拼): 64 列块归约暂存 + rowmax brcb 目标。
                 # 单独 alloc(不复用 brcb_d/softmax_cmp)避与 PV rescale/其它 mc 并发 race;都很小。
@@ -2616,7 +2616,7 @@ def _build_scfa(
                         # covers every cmp tile). Phase A: ONE kvMergeGm slot, GM->UB->GM
                         # in M_CHUNK batches under barriers (= ref CopyInSingleKv +
                         # CopyOutMrgeResult, blockCount=1 fallback shape); the fused
-                        # 2-token gather [015] + cmpLoop%4 ring + ping-pong are Phase D.
+                        # 2-token gather + cmpLoop%4 ring + ping-pong are Phase D.
                         if g < GLOOP:
                             v0task = g // MAX_TILES
                             v0tile = g % MAX_TILES
@@ -2805,7 +2805,7 @@ def _build_scfa(
                                             # output done reading it) = ref WaitFlag
                                             # <V_MTE2>(BUF1+pong):415.
                                             T.wait_flag("v", "mte2", IN_EV + ps)
-                                            # 手拼替代 007: 满宽 fill -inf mask, 再用 014 只搬
+                                            # 手拼替代 SoftmaxFlashV2: 满宽 fill -inf mask, 再用运行期 extent copy 只搬
                                             # 有效 tw_a 列 -> [tw_a:512] 留 -inf, 定长满宽(512)
                                             # reduce/exp 等价只算有效窗口(绕开变长 reduce)。
                                             # fill(V)->copy(MTE2) 复用 IN_EV+ps 握手。
@@ -2844,7 +2844,7 @@ def _build_scfa(
                                             # V-pipe order mul -> softmax (= ref
                                             # PipeBarrier<PIPE_V>:423).
                                             T.pipe_barrier("v")
-                                            # 手拼 online softmax(替代 007): 产出 m_i/expmax/P;
+                                            # 手拼 online softmax(替代 SoftmaxFlashV2): 产出 m_i/expmax/P;
                                             # denom 的 in_sum*expmax 部分在此, sum(P) 部分在 cast
                                             # 之后(reduce_sum 破坏 src)。in_max/in_sum 分支:
                                             #   is_first: in_max=sink, in_sum=ones(1.0)
@@ -3025,7 +3025,7 @@ def _build_scfa(
                                             T.wait_flag("v", "mte3", OUT_EV)
                                             # copy out only the tw_a valid P columns
                                             # (the cube PV reads exactly the window) --
-                                            # = ref width, saves MTE3 (needs 014).
+                                            # = ref width, saves MTE3 (needs the runtime inner-extent copy).
                                             T.copy(
                                                 out_ub[:, 0:tw_a],
                                                 workspace_p[
@@ -3484,7 +3484,7 @@ def _build_swa(
                 # Vector UB scratch.
                 s_ub = T.alloc_ub([G2, BI], accum_dtype)
                 p_half = T.alloc_ub([G2, BI], dtype)
-                # 手拼 softmax(替代 007)新增: m_2d = broadcast(max) 的 [G2,BI] 目标;
+                # 手拼 softmax(替代 SoftmaxFlashV2)新增: m_2d = broadcast(max) 的 [G2,BI] 目标;
                 # sumP = reduce_sum(P) 的 [G2,1] 临时。
                 m_2d = T.alloc_ub([G2, BI], accum_dtype)
                 sumP = T.alloc_ub([G2, 1], accum_dtype)
@@ -3493,7 +3493,7 @@ def _build_swa(
                 sink_ub = T.alloc_ub([G2, 1], accum_dtype)
                 lse_ub = T.alloc_ub([G2, 1], accum_dtype)
                 # 手拼 softmax 状态: expmax_ub 复用为 denom 的 sink 项 expsink=exp(sink-m)。
-                # (ones_ub 是 007 的 in_sum seed, 手拼不再需要, 保留其一次性 fill 无害。)
+                # (ones_ub 是 SoftmaxFlashV2 的 in_sum seed, 手拼不再需要, 保留其一次性 fill 无害。)
                 ones_ub = T.alloc_ub([G2, 1], accum_dtype)
                 expmax_ub = T.alloc_ub([G2, 1], accum_dtype)
                 # [G2,8] Brcb scratch for the output row-broadcast div (faithful
@@ -4007,15 +4007,15 @@ def _build_swa(
                                     ori_left = T.max(s_global - ori_win_left, 0)
                                     # winm = window length (= Ascend C
                                     # actualSingleProcessSInnerSize) = 有效列数(动态)。
-                                    # 手拼只搬/算前 winm 列(014 运行期 extent copy),其余
+                                    # 手拼只搬/算前 winm 列(运行期 extent copy),其余
                                     # 到 BI 用 -inf mask,故不再需要 win_align 对齐。
                                     winm = s_global + 1 - ori_left
                                     # copy-in s_ub + sink (MTE2). WAR: wait s_ub free
                                     # (prev task's compute done reading it) = ref
                                     # WaitFlag<V_MTE2>(block_vector.h:415).
                                     T.wait_flag("v", "mte2", SV_S_EV)
-                                    # 手拼替代 007: 先满宽 fill -inf mask, 再用 014(运行期
-                                    # inner-extent copy)只搬有效 winm 列 -> [winm:BI] 保持
+                                    # 手拼替代 SoftmaxFlashV2: 先满宽 fill -inf mask, 再用运行期
+                                    # inner-extent copy 只搬有效 winm 列 -> [winm:BI] 保持
                                     # -inf, 定长满宽 reduce/exp 等价于只算有效列(exp(-inf)=0、
                                     # max(-inf,·)=·), 绕开"变长 reduce"。fill(V)->copy(MTE2)
                                     # 用 SV_S_EV 做一次 V->MTE2 握手(与下方 copy->compute 同
@@ -4039,7 +4039,7 @@ def _build_swa(
                                     # V-pipe order mul -> softmax (= ref PipeBarrier
                                     # <PIPE_V>, :423).
                                     T.pipe_barrier("v")
-                                    # 手拼 sink-seeded 单块 softmax(替代 007 SoftmaxFlashV2):
+                                    # 手拼 sink-seeded 单块 softmax(替代 SoftmaxFlashV2):
                                     #   m = max(sink, rowmax(有效列))
                                     #   P = exp(score - m)
                                     #   denom = exp(sink - m) + sum(P)
