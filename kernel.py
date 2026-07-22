@@ -132,10 +132,11 @@ def build_sparse_attn_sharedkv(
 
     if scenario == 3:
         # SCFA (scenario 3) = CFA + topk SPARSE cmp: instead of reading the cmp
-        # segment densely (copy_pa), a vector V0 stage gathers the topk-selected
-        # cmp blocks (via cmp_indices / GetRealS2Idx) into a contiguous kvMergeGm,
-        # then C1/V1/C2/V2 process the merged KV exactly as CFA. = _build_cfa
-        # generalised with the prepended V0 merge + syncV0C1 handshake.
+        # segment densely (the reference's DataCopyPA), a vector V0 stage gathers
+        # the topk-selected cmp blocks (via cmp_indices / GetRealS2Idx) into a
+        # contiguous kvMergeGm, then C1/V1/C2/V2 process the merged KV exactly as
+        # CFA. = _build_cfa generalised with the prepended V0 merge + syncV0C1
+        # handshake.
         return _build_scfa(
             batch=batch,
             max_seq=max_seq,
@@ -157,7 +158,8 @@ def build_sparse_attn_sharedkv(
         )
 
     # CFA (scenario 2): the reference's SWA class with templateMode==CFA_TEMPLATE.
-    # = SWA + a cmp KV segment (read sequentially via copy_pa, no topk/gather) →
+    # = SWA + a cmp KV segment (read sequentially, = the reference's DataCopyPA;
+    # no topk/gather) →
     # multi-tile s2 sequence (ori tiles + cmp tiles) threaded by one online-softmax
     # flash-accumulation chain + PV rescale. cmp segment length per task =
     # actCmpS2Size = (cmpMaskRight + s1EndIdx + 1) / cmp_ratio (swa_kernel.h:378-381).
@@ -201,15 +203,23 @@ def _build_cfa(
     core_num,
 ):
     """CFA (scenario 2) = the reference SWA class's CFA_TEMPLATE path: SWA + a cmp
-    KV segment read sequentially via copy_pa (NO topk / NO gather -- that is SCFA).
+    KV segment read sequentially (the reference's DataCopyPA; NO topk / NO gather
+    -- that is SCFA).
 
     Reverse-degenerates our SWA single-tile kernel back to the reference's
-    multi-KV-tile online softmax. Instruction-level faithful (verified): every op
-    maps to an existing primitive emitting the exact reference instruction
-    (copy_pa->DataCopyPA, gemm_v0_fixp->Mmad/Fixpipe, softmax_flash_v2->SoftmaxFlashV2,
-    row_expand_div->RowDivs, row_expand_mul_nd[013]->RowMuls, T.copy->DataCopyPad,
-    T.set_flag->MTE3_MTE2 fence); the rest is pure kernel structure mirroring
-    ProcessBalance / SoftmaxFlashV2Compute / DealBmm2ResBaseBlock.
+    multi-KV-tile online softmax. Instruction-level faithful (verified) and built
+    from STANDARD primitives only -- each reference instruction is reached as:
+      DataCopyPA      -> a front-end paged T.copy walk (one T.copy per page run)
+      Mmad + Fixpipe  -> a kernel-driven T.mma chain (unit_flag marks the flush)
+                         followed by T.copy(cL0 -> GM band)
+      DataCopyPad     -> T.copy (GM <-> UB)
+      SoftmaxFlashV2  -> hand-built from T.reduce_max / T.reduce_sum plus
+                         T.tile.{max,sub,exp,mul,add}
+      RowSubs / RowMuls / RowDivs -> T.tile.brcb_experiment + the matching
+                         T.tile.row_expand_{sub,mul,div}_experiment
+      MTE3_MTE2 fence -> T.set_flag / T.wait_flag
+    The rest is pure kernel structure mirroring ProcessBalance /
+    SoftmaxFlashV2Compute / DealBmm2ResBaseBlock.
 
     STRUCTURE (verified against swa_kernel.h:728-769 ProcessBalance/PreloadPipeline):
     the reference flattens (bN2, gS1, s2) into a single ``gloop`` that advances PER
@@ -299,7 +309,7 @@ def _build_cfa(
     DEBUG_SERIAL = False
     # Shared KV 3-slot L1 ring (= reference kvL1BufIter%3): QK's K D-halves and PV's
     # V tiles rotate the SAME 3 slots; per-slot MTE2_MTE1/MTE1_MTE2 reverse flags let
-    # the next copy_pa (the 1961us mte2) overlap the current gemm/mma. Slot is a
+    # the next KV load (the 1961us mte2) overlap the current gemm/mma. Slot is a
     # RUNTIME kv_iter%3 (bands/K-blocks are runtime-guarded; a fixed Python slot
     # would break flag balance when a band is skipped). Flag id by slot via
     # Select(slot<2, KV_EV0+slot, KV_EV2) -- runtime ids OK (FlagOpCodegen PrintExpr's
@@ -363,8 +373,11 @@ def _build_cfa(
             workspace_o: T.Tensor([core_num, 2, G, D], accum_dtype),  # 15 PV (raw)
             # running online-softmax PV accumulator (= reference vec2ResGm):
             workspace_acc: T.Tensor([core_num, 2, G, D], accum_dtype),  # 16
-            # QK shape-token: gemm_v0_fixp(do_fixpipe=False) (DEBUG_SERIAL=False path)
-            # derives M,N from a dst it NEVER writes (the fixpipe is T.copy(cL0->band)).
+            # QK shape-token, now UNUSED. The fixpipe-fused gemm this path used to
+            # call derived M,N from this dst without ever writing it; the
+            # kernel-driven mma chain takes its shape from the mma args instead and
+            # the fixpipe is an explicit T.copy(cL0->band), so nothing reads or
+            # writes this buffer. Kept to hold workspace slot 17 (workspace_idx).
             workspace_qk: T.Tensor([core_num, G, BI], accum_dtype),  # 17
         ):
             with T.Kernel(core_num, is_npu=True) as (cid, vid):
@@ -471,9 +484,10 @@ def _build_cfa(
                                         # tir.Select. Both lower to an INLINE ternary
                                         # (SelectNode); a runtime T.if_then_else instead
                                         # lowers to a statement (int32_t condval; if{}),
-                                        # which the codegen cannot inline into the copy_pa
-                                        # arg list (bad C++). For ori (rel=-1) the cmp
-                                        # branch = min(512, act_cmp+512)=512, unused.
+                                        # which the codegen cannot inline into a load
+                                        # or mma arg list (bad C++). For ori (rel=-1)
+                                        # the cmp branch = min(512, act_cmp+512)=512,
+                                        # unused.
                                         tw = tir.Select(
                                             is_ori,
                                             win,
@@ -496,7 +510,7 @@ def _build_cfa(
                                         # QK over 128-col blocks (ComputeMm1 nL1Loops):
                                         # each band loads its 2 K D-halves into 2 KV-ring
                                         # slots (per-slot reverse flags overlap the next
-                                        # band's copy_pa with the current gemm), accumulates
+                                        # band's KV load with the current gemm), accumulates
                                         # them into one cL0 ping-pong slot via gemm_v0, then
                                         # T.copy(cL0 -> ws_s band) is the standalone band
                                         # Fixpipe.
@@ -524,9 +538,10 @@ def _build_cfa(
                                                     T.wait_flag("mte1", "mte2", ev)
                                                     if is_ori:
                                                         # Front-end paged sliding-window KV
-                                                        # load (replaces copy_pa): walk the
-                                                        # window one page at a time (compile-
-                                                        # time bound), T.copy each page's
+                                                        # load (= the reference's paged
+                                                        # DataCopyPA): walk the window one
+                                                        # page at a time (compile-time
+                                                        # bound), T.copy each page's
                                                         # runtime row-run into the L1 ring
                                                         # slot. Counter and copy are both on
                                                         # the cube, so CombineCV keeps them
@@ -640,12 +655,12 @@ def _build_cfa(
                                                 # DEBUG_SERIAL=True: gemm_v0 (no unitFlag,
                                                 # self-L0AB on event 0, standalone fixpipe)
                                                 # -- the barriered debug path. False (perf):
-                                                # gemm_v0_fixp(prime_drain=False shares L0AB
-                                                # {4,5} primed once, do_fixpipe=False leaves
+                                                # the decomposed T.mma chain below (shares the
+                                                # L0AB {4,5} pair primed once, and leaves
                                                 # cL0 for the 0b11 band fixpipe) = ComputeMm1
                                                 # Mmad; the last mma 0b11 lets fixpipe(cb) ||
                                                 # mma(cb+1) (cL0 ping-pong), so band cb+1's
-                                                # copy_pa(mte2) overlaps band cb's gemm(mac)
+                                                # KV load (mte2) overlaps band cb's gemm(mac)
                                                 # -- the overlap gemm_v0's per-call FIX_M
                                                 # drain blocks. (0b11 needs the FUSED 0b11
                                                 # fixpipe, so only the no-barrier path.)
@@ -807,9 +822,10 @@ def _build_cfa(
                                                     T.barrier_all()
                                                 # band Fixpipe cL0[cs] -> strided ws_s band
                                                 # (realDstN = 512 = ComputeMm1 dstStride).
-                                                # 0b11 pairs with gemm_v0_fixp's last mma
-                                                # (0b11) -> fixpipe(cb) || mma(cb+1) via the
-                                                # cL0 ping-pong; standalone + barrier on the
+                                                # 0b11 pairs with the decomposed QK
+                                                # chain's last mma (0b11) -> fixpipe(cb)
+                                                # || mma(cb+1) via the cL0 ping-pong;
+                                                # standalone + barrier on the
                                                 # DEBUG_SERIAL (gemm_v0) debug path.
                                                 if DEBUG_SERIAL:
                                                     T.copy(
@@ -1633,15 +1649,23 @@ def _build_scfa(
     core_num,
 ):
     """CFA (scenario 2) = the reference SWA class's CFA_TEMPLATE path: SWA + a cmp
-    KV segment read sequentially via copy_pa (NO topk / NO gather -- that is SCFA).
+    KV segment read sequentially (the reference's DataCopyPA; NO topk / NO gather
+    -- that is SCFA).
 
     Reverse-degenerates our SWA single-tile kernel back to the reference's
-    multi-KV-tile online softmax. Instruction-level faithful (verified): every op
-    maps to an existing primitive emitting the exact reference instruction
-    (copy_pa->DataCopyPA, gemm_v0_fixp->Mmad/Fixpipe, softmax_flash_v2->SoftmaxFlashV2,
-    row_expand_div->RowDivs, row_expand_mul_nd[013]->RowMuls, T.copy->DataCopyPad,
-    T.set_flag->MTE3_MTE2 fence); the rest is pure kernel structure mirroring
-    ProcessBalance / SoftmaxFlashV2Compute / DealBmm2ResBaseBlock.
+    multi-KV-tile online softmax. Instruction-level faithful (verified) and built
+    from STANDARD primitives only -- each reference instruction is reached as:
+      DataCopyPA      -> a front-end paged T.copy walk (one T.copy per page run)
+      Mmad + Fixpipe  -> a kernel-driven T.mma chain (unit_flag marks the flush)
+                         followed by T.copy(cL0 -> GM band)
+      DataCopyPad     -> T.copy (GM <-> UB)
+      SoftmaxFlashV2  -> hand-built from T.reduce_max / T.reduce_sum plus
+                         T.tile.{max,sub,exp,mul,add}
+      RowSubs / RowMuls / RowDivs -> T.tile.brcb_experiment + the matching
+                         T.tile.row_expand_{sub,mul,div}_experiment
+      MTE3_MTE2 fence -> T.set_flag / T.wait_flag
+    The rest is pure kernel structure mirroring ProcessBalance /
+    SoftmaxFlashV2Compute / DealBmm2ResBaseBlock.
 
     STRUCTURE (verified against swa_kernel.h:728-769 ProcessBalance/PreloadPipeline):
     the reference flattens (bN2, gS1, s2) into a single ``gloop`` that advances PER
@@ -1756,7 +1780,7 @@ def _build_scfa(
     DEBUG_SERIAL = False
     # Shared KV 3-slot L1 ring (= reference kvL1BufIter%3): QK's K D-halves and PV's
     # V tiles rotate the SAME 3 slots; per-slot MTE2_MTE1/MTE1_MTE2 reverse flags let
-    # the next copy_pa (the 1961us mte2) overlap the current gemm/mma. Slot is a
+    # the next KV load (the 1961us mte2) overlap the current gemm/mma. Slot is a
     # RUNTIME kv_iter%3 (bands/K-blocks are runtime-guarded; a fixed Python slot
     # would break flag balance when a band is skipped). Flag id by slot via
     # Select(slot<2, KV_EV0+slot, KV_EV2) -- runtime ids OK (FlagOpCodegen PrintExpr's
@@ -1833,8 +1857,11 @@ def _build_scfa(
             workspace_o: T.Tensor([core_num, 2, G, D], accum_dtype),  # 15 PV (raw)
             # running online-softmax PV accumulator (= reference vec2ResGm):
             workspace_acc: T.Tensor([core_num, 2, G, D], accum_dtype),  # 16
-            # QK shape-token: gemm_v0_fixp(do_fixpipe=False) (DEBUG_SERIAL=False path)
-            # derives M,N from a dst it NEVER writes (the fixpipe is T.copy(cL0->band)).
+            # QK shape-token, now UNUSED. The fixpipe-fused gemm this path used to
+            # call derived M,N from this dst without ever writing it; the
+            # kernel-driven mma chain takes its shape from the mma args instead and
+            # the fixpipe is an explicit T.copy(cL0->band), so nothing reads or
+            # writes this buffer. Kept to hold workspace slot 17 (workspace_idx).
             workspace_qk: T.Tensor([core_num, G, BI], accum_dtype),  # 17
             # SCFA V0 merged sparse KV (= reference kvMergeGm). 4-deep ring indexed
             # by the flat tile g%4 (= reference cmpLoop%4, but a pure function of g so
@@ -1842,7 +1869,7 @@ def _build_scfa(
             # keeps tiles g,g-1,g-2 in flight, so g%4-distinct slots avoid the V0-write
             # vs cube-read WAR. V0 (vector) gathers topk-selected cmp tokens here; cube
             # cmp QK/PV read it via a plain Nd2Nz copy (= block_cube.h:448-478, NOT
-            # paged copy_pa).
+            # a paged DataCopyPA-style walk).
             kvMergeGm: T.Tensor(
                 [core_num, KVMERGE_RING, S2_BASE, D], dtype
             ),  # 18  (KVMERGE_RING-deep ring = ref MERGE_CACHE_GM_BUF_NUM=4)
@@ -1964,9 +1991,10 @@ def _build_scfa(
                                         # tir.Select. Both lower to an INLINE ternary
                                         # (SelectNode); a runtime T.if_then_else instead
                                         # lowers to a statement (int32_t condval; if{}),
-                                        # which the codegen cannot inline into the copy_pa
-                                        # arg list (bad C++). For ori (rel=-1) the cmp
-                                        # branch = min(512, act_cmp+512)=512, unused.
+                                        # which the codegen cannot inline into a load
+                                        # or mma arg list (bad C++). For ori (rel=-1)
+                                        # the cmp branch = min(512, act_cmp+512)=512,
+                                        # unused.
                                         tw = tir.Select(
                                             is_ori,
                                             win,
@@ -1993,7 +2021,7 @@ def _build_scfa(
                                         # QK over 128-col blocks (ComputeMm1 nL1Loops):
                                         # each band loads its 2 K D-halves into 2 KV-ring
                                         # slots (per-slot reverse flags overlap the next
-                                        # band's copy_pa with the current gemm), accumulates
+                                        # band's KV load with the current gemm), accumulates
                                         # them into one cL0 ping-pong slot via gemm_v0, then
                                         # T.copy(cL0 -> ws_s band) is the standalone band
                                         # Fixpipe.
@@ -2029,9 +2057,10 @@ def _build_scfa(
                                                     T.wait_flag("mte1", "mte2", ev)
                                                     if is_ori:
                                                         # Front-end paged sliding-window KV
-                                                        # load (replaces copy_pa): walk the
-                                                        # window one page at a time (compile-
-                                                        # time bound), T.copy each page's
+                                                        # load (= the reference's paged
+                                                        # DataCopyPA): walk the window one
+                                                        # page at a time (compile-time
+                                                        # bound), T.copy each page's
                                                         # runtime row-run into the L1 ring
                                                         # slot. Counter and copy are both on
                                                         # the cube, so CombineCV keeps them
@@ -2095,9 +2124,10 @@ def _build_scfa(
                                                         # SCFA: this cmp tile's merged KV is in
                                                         # kvMergeGm (V0 produced it; QK waited
                                                         # EV_V0 before this cb loop). Plain Nd2Nz
-                                                        # (= block_cube.h:459) replaces paged
-                                                        # copy_pa; the slot holds only this tile's
-                                                        # tokens at local 0 so row = cb*BI (not
+                                                        # (= block_cube.h:459) replaces the
+                                                        # reference's paged DataCopyPA; the
+                                                        # slot holds only this tile's tokens
+                                                        # at local 0 so row = cb*BI (not
                                                         # s2base+cb*BI). g%4 = ring slot.
                                                         T.copy(
                                                             kvMergeGm[
@@ -2116,12 +2146,12 @@ def _build_scfa(
                                                 # DEBUG_SERIAL=True: gemm_v0 (no unitFlag,
                                                 # self-L0AB on event 0, standalone fixpipe)
                                                 # -- the barriered debug path. False (perf):
-                                                # gemm_v0_fixp(prime_drain=False shares L0AB
-                                                # {4,5} primed once, do_fixpipe=False leaves
+                                                # the decomposed T.mma chain below (shares the
+                                                # L0AB {4,5} pair primed once, and leaves
                                                 # cL0 for the 0b11 band fixpipe) = ComputeMm1
                                                 # Mmad; the last mma 0b11 lets fixpipe(cb) ||
                                                 # mma(cb+1) (cL0 ping-pong), so band cb+1's
-                                                # copy_pa(mte2) overlaps band cb's gemm(mac)
+                                                # KV load (mte2) overlaps band cb's gemm(mac)
                                                 # -- the overlap gemm_v0's per-call FIX_M
                                                 # drain blocks. (0b11 needs the FUSED 0b11
                                                 # fixpipe, so only the no-barrier path.)
@@ -2283,9 +2313,10 @@ def _build_scfa(
                                                     T.barrier_all()
                                                 # band Fixpipe cL0[cs] -> strided ws_s band
                                                 # (realDstN = 512 = ComputeMm1 dstStride).
-                                                # 0b11 pairs with gemm_v0_fixp's last mma
-                                                # (0b11) -> fixpipe(cb) || mma(cb+1) via the
-                                                # cL0 ping-pong; standalone + barrier on the
+                                                # 0b11 pairs with the decomposed QK
+                                                # chain's last mma (0b11) -> fixpipe(cb)
+                                                # || mma(cb+1) via the cL0 ping-pong;
+                                                # standalone + barrier on the
                                                 # DEBUG_SERIAL (gemm_v0) debug path.
                                                 if DEBUG_SERIAL:
                                                     T.copy(
@@ -2440,8 +2471,10 @@ def _build_scfa(
                                                     else:
                                                         # SCFA: merged V from kvMergeGm (gm%4 ring
                                                         # slot; V0 produced tile gm). Plain Nd2Nz
-                                                        # replaces paged copy_pa. PV reads K-block
-                                                        # ks (rows) x D-tile nl; local row = ks*BI.
+                                                        # replaces the reference's paged
+                                                        # DataCopyPA. PV reads K-block ks
+                                                        # (rows) x D-tile nl; local row =
+                                                        # ks*BI.
                                                         T.copy(
                                                             kvMergeGm[
                                                                 cid,
@@ -3271,9 +3304,10 @@ def _build_swa(
     BI = DEFAULT_BLOCK_I  # kv window tile (= 128)
     # PV output-D tiling (= ComputeMm2 nL1Loops): D=512 -> 4 tiles of 128. The
     # decomposed PV drives these 4 tiles itself (kernel-driven mma + fused fixpipe
-    # = gemm_v0_fixp internal nL0split=4), so the V D-slices can later enter the
-    # 3-slot KV ring per tile. Function-scope Python ints (NOT prim_func body --
-    # see the D2 note: a body-level const becomes a symbolic Var and SIGSEGVs).
+    # = the Ascend C fixpipe-fused gemm's internal nL0split=4), so the V D-slices
+    # can later enter the 3-slot KV ring per tile. Function-scope Python ints (NOT
+    # prim_func body -- see the D2 note: a body-level const becomes a symbolic Var
+    # and SIGSEGVs).
     PV_NT = D // BI  # 4 output-D tiles
     PV_NW = BI  # 128: each output-D tile's column width (= mma n / fixpipe nSize)
     # kL0 tile width = the gemm template's kL0Size. The QK contraction walks its
@@ -3334,17 +3368,15 @@ def _build_swa(
     Q_EV = 1  # Q (both D-halves) reverse flag
     P_EV = 7  # P reverse flag
 
-    # L0AB M_MTE1 ping-pong flags. These match the gemm_v0_fixp template's
-    # DEDICATED shared-mode base L0AB_MM_EVENT (=4) and +1 (=5) -- NOT the default
-    # L0AB_EVENT (=0). The shared (prime_drain=False) gemm holds these two M_MTE1
-    # flags SET across the whole cube loop, so they must be disjoint from the
-    # template's per-call MTE2_MTE1/MTE1_MTE2 self-pair fences (which stay on
-    # {0,1}) and from the KV ring flags ({2,3,6}); {4,5} is the free pair (faithful
-    # to the reference, which puts M_MTE1 on its own EVENT_ID3/4 disjoint from the
-    # L1 flags). Primed ONCE before the cube loop (= AllocEventID,
-    # block_cube.h:225-226) and drained ONCE after it (= FreeEventID, :239-240);
-    # the gemm calls consume/re-arm them per tile rather than re-priming at every
-    # QK/PV boundary.
+    # L0AB M_MTE1 ping-pong flags, driven by the kernel's own QK/PV mma chains.
+    # {4,5}, NOT the default event 0: these two M_MTE1 flags stay SET across the
+    # whole cube loop, so they must be disjoint from the per-call MTE2_MTE1/
+    # MTE1_MTE2 self-pair fences (which stay on {0,1}) and from the KV ring flags
+    # ({2,3,6}); {4,5} is the free pair (faithful to the reference, which puts
+    # M_MTE1 on its own EVENT_ID3/4 disjoint from the L1 flags). Primed ONCE
+    # before the cube loop (= AllocEventID, block_cube.h:225-226) and drained ONCE
+    # after it (= FreeEventID, :239-240); the mma chains consume/re-arm them per
+    # tile rather than re-priming at every QK/PV boundary.
     L0AB_EV0 = 4
     L0AB_EV1 = 5
 
@@ -3398,12 +3430,11 @@ def _build_swa(
                 # D-halves are separate 2D buffers (= the reference's two L1 blocks);
                 # a [2,...] 3D array sliced by a const index would work too (3D-slice
                 # is fine -- the earlier LowerTileOp segfault was a SYMBOLIC buffer
-                # dim D2, not 3D slicing; see D2's def note). PV's V stays a whole
-                # [BI,D] buffer: the whole-V gemm_v0_fixp already does the faithful
-                # per-output-D-tile fused fixpipe + cL0 ping-pong internally
-                # (nL0split=4 = ComputeMm2 nL1Loops); V into separate ring slots is
-                # an OVERLAP concern, deferred to the KV/QP ring (Layer 3). 2*[G,256]
-                # + 2*[BI,256] + [BI,D] + [G,BI] = 64+128+128+16 = 336KB < 512KB L1.
+                # dim D2, not 3D slicing; see D2's def note). PV's V does NOT get a
+                # whole [BI,D] buffer: its 4 output-D tiles rotate through the shared
+                # KV 3-slot ring below (Layer 3), one [BI,128] slice per tile
+                # (= ComputeMm2 nL1Loops=4). 2*[G,256] + [3,BI,256] + [G,BI] =
+                # 64+192+16 = 272KB < 512KB L1.
                 q_l1_0 = T.alloc_L1([G, D2], dtype)  # Q D-half 0 (D[0:256])
                 q_l1_1 = T.alloc_L1([G, D2], dtype)  # Q D-half 1 (D[256:512])
                 # Shared KV 3-slot ring (= reference kvL1 ring): QK's 2 K D-halves
@@ -3411,7 +3442,7 @@ def _build_swa(
                 # load_position % 3 (6 loads/task; 6 % 3 == 0 so the phase resets per
                 # task -- identical to the reference's continuous kvL1BufIter % 3
                 # since 6 is divisible by 3). K halves write the full [BI,256]; V
-                # tiles write the first [BI,128] (same copy_pa dstNzC0Stride=BI, so
+                # tiles write the first [BI,128] (same DataCopyPA dstNzC0Stride=BI, so
                 # the slot's Nz layout is consistent for both). 3*128*256*2 = 192KB.
                 # Per-slot reverse flags (KV_EV0/1/2) replace the single KV_QK/PV_EV,
                 # priming the L1 ring for the eventual barrier removal.
@@ -3441,10 +3472,11 @@ def _build_swa(
                 cl0_iter = T.alloc_var("int32", init=0)
                 # PV decomposition L0A/L0B ping-pong (kernel-driven per-tile mma).
                 # P[G,winm] -> p_l0a, V tile [winm,128] -> v_l0b, alternating slot
-                # pp = nl&1 (= gemm_v0_fixp tileIdx&1 = 0,1,0,1 for the 4 tiles).
-                # These are OFFSET-0 views of the same A2/B2 space QK's gemm_v0_fixp
-                # uses whole; the per-tile M_MTE1(4/5) flag chain orders QK's L0 use
-                # before PV writes here (QK's last mma SetFlag<M_MTE1> -> PV's first
+                # pp = nl&1 (= the Ascend C template's tileIdx&1 = 0,1,0,1 for the
+                # 4 tiles). These are OFFSET-0 views of the same A2/B2 space QK's
+                # own mma chain uses whole; the per-tile M_MTE1(4/5) flag chain
+                # orders QK's L0 use before PV writes here (QK's last mma
+                # SetFlag<M_MTE1> -> PV's first
                 # WaitFlag<M_MTE1>), so the address overlap is safe. p_l0a [2,64,128]
                 # =32KB, v_l0b [2,128,128]=64KB (within the 64KB A2/B2 each).
                 p_l0a = T.alloc_L0A([2, G, BI], dtype)  # P activations
@@ -3478,11 +3510,11 @@ def _build_swa(
                 with T.Scope("C"):
                     # AllocEventID (block_cube.h:225-226): prime the two L0AB
                     # M_MTE1 ping-pong flags ONCE for the whole cube loop. The
-                    # shared QK/PV gemm_v0_fixp calls (prime_drain=False) consume
-                    # and re-arm these per tile instead of self-priming+draining
-                    # the L0AB ring at every call boundary -- faithful to the
-                    # reference, where ComputeMm1/Mm2 never touch the L0AB flag
-                    # lifecycle (only the per-slot Wait/Set inside the tile loop).
+                    # QK/PV mma chains consume and re-arm these per tile instead
+                    # of self-priming+draining the L0AB ring at every QK/PV
+                    # boundary -- faithful to the reference, where ComputeMm1/Mm2
+                    # never touch the L0AB flag lifecycle (only the per-slot
+                    # Wait/Set inside the tile loop).
                     T.set_flag("m", "mte1", L0AB_EV0)
                     T.set_flag("m", "mte1", L0AB_EV1)
                     # AllocEventID (cont.): prime the 3 KV-ring slots' MTE1_MTE2
@@ -3515,8 +3547,8 @@ def _build_swa(
                                     # two 256-wide D-halves into their own L1 slots.
                                     # Q half h = Q[tok, :, h*256:(h+1)*256] (a strided
                                     # GM slice, = CopyInMm1AToL1 headOffset=h*256,
-                                    # headSize=256); K half h = copy_pa with
-                                    # act_head_dim=256, d_idx=h*256 (= DataCopyPA
+                                    # headSize=256); K half h is the paged walk below
+                                    # over D columns [h*256, h*256+256) (= DataCopyPA
                                     # startPos.dIdx=kL1*256, actHeadDim=256).
                                     # Q reverse flag: wait the Q buffers' prior consumer
                                     # (primed once / the previous task's QK gemm), load
@@ -3536,9 +3568,10 @@ def _build_swa(
                                     for h in range(2):
                                         T.wait_flag("mte1", "mte2", KV_EV0 + h)
                                         # Front-end paged sliding-window K load
-                                        # (replaces copy_pa): walk the window one
-                                        # page at a time -- compile-time page bound,
-                                        # runtime guard -- and T.copy each page's
+                                        # (= the reference's DataCopyPA): walk the
+                                        # window one page at a time -- compile-time
+                                        # page bound, runtime guard -- and T.copy
+                                        # each page's
                                         # runtime row-run into the ring slot. ONE
                                         # alloc_var: a compile-time init= is hoisted
                                         # to kernel scope and initialised ONCE, so a
@@ -3576,27 +3609,27 @@ def _build_swa(
                                         T.set_flag("mte2", "mte1", KV_EV0 + h)
                                     # QK = Q @ Kᵀ over the window; N rounds up to 16 to
                                     # match Ascend C ComputeMm1 (nL1SizeAlign =
-                                    # SASAlign(window, 16)); copy_pa loads `win` KV
-                                    # rows. cL0[slot 0][0:win_align] is the score -- the
-                                    # [win:win_align] tail is Q@unloaded-KV, but the
+                                    # SASAlign(window, 16)); the paged walk loads
+                                    # `win` KV rows. cL0[slot 0][0:win_align] is
+                                    # the score -- the [win:win_align] tail is
+                                    # Q@unloaded-KV, but the
                                     # softmax compacts/processes win_align and the
                                     # reduce/PV use winm, so it is excluded exactly as
                                     # in the reference. [win_align:BI] stays
                                     # uninitialised; the softmax never reads it.
                                     win_align = (win + 15) // 16 * 16
                                     T.wait_flag("mte2", "mte1", Q_EV)
-                                    # Faithful QK = ComputeMm1, DECOMPOSED (the last
-                                    # gemm_v0_fixp call sites). At this call site the
-                                    # template has already collapsed to its kL0 walk:
-                                    # transpose_B makes nTile == N, so the N-tile loop
-                                    # runs a single round, cL0BufIter never advances
-                                    # inside the call, and the L0C ping-pong is the
-                                    # constant cl0_iter%2. Five of the parameters
-                                    # (transpose_A, cl0_base, prime_drain, flush_last,
-                                    # do_fixpipe) exist only to switch the template's
-                                    # own machinery off -- prime_drain=False already
-                                    # handed the L0AB flag lifecycle to the kernel and
-                                    # do_fixpipe=False already moved the fixpipe out.
+                                    # Faithful QK = ComputeMm1, DECOMPOSED. This was
+                                    # the last site still calling a fixpipe-fused
+                                    # gemm, and by then the template had already
+                                    # collapsed to its kL0 walk: transpose_B makes
+                                    # nTile == N, so the N-tile loop ran a single
+                                    # round, cL0BufIter never advanced inside the
+                                    # call, and the L0C ping-pong was the constant
+                                    # cl0_iter%2. Five of its parameters existed only
+                                    # to switch the template's own machinery off --
+                                    # the L0AB flag lifecycle had already been handed
+                                    # to the kernel and the fixpipe already moved out.
                                     #
                                     # What remains is the kL0 walk, which is what runs
                                     # below: each 256-wide D-half runs D2/KL0 = 2 kL0
@@ -3784,8 +3817,9 @@ def _build_swa(
                                     T.copy(workspace_p[cid, bufm, :, :], p_l1)
                                     T.set_flag("mte2", "mte1", P_EV)
                                     T.wait_flag("mte2", "mte1", P_EV)
-                                    # PV = ComputeMm2, decomposed (= gemm_v0_fixp
-                                    # nL0split=4) + V D-tiles into the SHARED KV 3-ring.
+                                    # PV = ComputeMm2, decomposed (= the Ascend C
+                                    # fixpipe-fused gemm's nL0split=4) + V D-tiles
+                                    # into the SHARED KV 3-ring.
                                     # Each of the 4 output-D tiles: LOAD V tile -> ring
                                     # slot (per-slot reverse flag), then CONSUME it (L0
                                     # load + mma + fused fixpipe). load+consume are
@@ -3823,7 +3857,7 @@ def _build_swa(
                                         # consumer (QK's K half / an earlier V tile).
                                         T.wait_flag("mte1", "mte2", ev)
                                         # Paged walk, V D-tile nl: only PV_NW of the
-                                        # slot's columns (= copy_pa act_head_dim).
+                                        # slot's columns (= DataCopyPA actHeadDim).
                                         pv_start = ori_leftm
                                         pv_cur = T.alloc_var("int32", init=pv_start)
                                         for _pg in range(
