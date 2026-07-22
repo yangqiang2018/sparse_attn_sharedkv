@@ -1,0 +1,1822 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>编译器改动带来的新写法</title>
+<style>
+  :root{
+    --bg:#f7f7f4; --panel:#ffffff; --ink:#1f2328; --muted:#5b6470;
+    --line:#e3e6ea; --accent:#2f6fea; --accent-soft:#eaf1ff;
+    --blue:#3b82f6; --blue-bg:#dbeafe; --blue-ink:#1e40af;
+    --green:#10b981; --green-bg:#d1fae5; --green-ink:#065f46;
+    --amber:#f59e0b; --amber-bg:#fef3c7; --amber-ink:#92400e;
+    --purple:#8b5cf6; --purple-bg:#ede9fe; --purple-ink:#5b21b6;
+    --red:#ef4444; --red-ink:#b91c1c;
+    --gray:#9ca3af; --gray-bg:#eceef1; --gray-ink:#4b5563;
+    --code-bg:#f4f6f8; --code-ink:#1c2733;
+    --radius:12px;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",Consolas,"Cascadia Code",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:16.5px; line-height:1.85;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:0 22px 120px;}
+
+  /* ---- header ---- */
+  header.hero{ max-width:880px; margin:0 auto; padding:54px 22px 26px; }
+  .kicker{
+    display:inline-block; font-size:12.5px; letter-spacing:.16em; font-weight:700;
+    color:var(--accent); background:var(--accent-soft); padding:5px 12px; border-radius:999px;
+    text-transform:uppercase; margin-bottom:18px;
+  }
+  h1{font-size:38px; line-height:1.22; margin:.1em 0 .35em; letter-spacing:-.01em;}
+  .sub{color:var(--muted); font-size:16px; margin:0;}
+
+  /* ---- typography ---- */
+  h2{
+    font-size:25px; margin:64px 0 18px; padding-top:16px; letter-spacing:-.01em;
+    border-top:2px solid var(--line);
+  }
+  h2 .num{color:var(--accent); font-variant-numeric:tabular-nums; margin-right:.45em;}
+  h3{font-size:19px; margin:34px 0 12px; color:#2b3340;}
+  p{margin:14px 0;}
+  a{color:var(--accent); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  strong{font-weight:700; color:#16324f;}
+  ul,ol{margin:14px 0; padding-left:1.4em;}
+  li{margin:7px 0;}
+  hr{border:none; border-top:1px solid var(--line); margin:40px 0;}
+
+  /* inline code */
+  code{
+    font-family:var(--mono); font-size:.88em; background:var(--code-bg);
+    color:#b3344a; padding:2px 6px; border-radius:6px; border:1px solid #e7e2e4;
+  }
+  /* code blocks */
+  pre{
+    background:#0f1b2d; color:#dbe7f3; border-radius:var(--radius);
+    padding:18px 20px; overflow:auto; font-family:var(--mono); font-size:14px;
+    line-height:1.7; margin:18px 0; border:1px solid #0a1320;
+    box-shadow:0 1px 0 rgba(0,0,0,.04);
+  }
+  pre code{background:none; color:inherit; border:none; padding:0; font-size:inherit;}
+  pre .cmt{color:#7d93ad;} pre .hl{color:#ffd479;} pre .ok{color:#7ee0a1;}
+  pre .kw{color:#c792ea;} pre .fn{color:#82aaff;}
+
+  /* blockquote / callout */
+  blockquote{
+    margin:18px 0; padding:14px 18px; background:var(--panel);
+    border-left:4px solid var(--accent); border-radius:0 10px 10px 0;
+    color:#33414f; box-shadow:0 1px 2px rgba(20,40,80,.05);
+  }
+  blockquote p:first-child{margin-top:0}
+  blockquote p:last-child{margin-bottom:0}
+
+  .note{
+    margin:18px 0; padding:16px 18px; background:var(--accent-soft);
+    border:1px solid #d4e2ff; border-radius:var(--radius); font-size:15px; color:#2b4a73;
+  }
+  .note p{margin:6px 0}
+  .note code{background:#fff;}
+  .warn{
+    margin:18px 0; padding:14px 18px; background:var(--amber-bg);
+    border:1px solid #f3d27a; border-radius:var(--radius); font-size:15px; color:#7a4d09;
+  }
+  .warn code{background:#fff;}
+
+  /* tables */
+  .tablewrap{overflow-x:auto; margin:18px 0;}
+  table{border-collapse:collapse; width:100%; font-size:15px; background:var(--panel);
+    border-radius:10px; overflow:hidden; box-shadow:0 1px 2px rgba(20,40,80,.05);}
+  th,td{padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{background:#eef2f7; font-weight:700; color:#2b3340;}
+  tr:last-child td{border-bottom:none;}
+  td code,th code{font-size:.85em;}
+  .hl-row td{background:#fffaf0;}
+  .num-cell{font-family:var(--mono); font-variant-numeric:tabular-nums;}
+
+  /* TOC */
+  nav.toc{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 24px; margin:30px 0;
+  }
+  nav.toc h2{border:none; margin:0 0 10px; padding:0; font-size:16px; color:var(--muted);
+    letter-spacing:.04em; text-transform:uppercase;}
+  nav.toc ol{margin:0; padding-left:1.5em; columns:2; column-gap:34px;}
+  nav.toc li{margin:5px 0; break-inside:avoid;}
+  nav.toc a{color:#33414f;}
+  nav.toc .ix{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums;}
+
+  /* figures */
+  figure{margin:26px 0; padding:0;}
+  figure svg{display:block; width:100%; height:auto;}
+  .figcard{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:22px; box-shadow:0 2px 10px rgba(20,40,80,.05);
+  }
+  figcaption{font-size:13.5px; color:var(--muted); text-align:center; margin-top:12px;}
+  .fig-mono{font-family:var(--mono);}
+  .figtitle{margin:0 0 14px; font-size:14.5px; font-weight:700; color:#334155;}
+
+  /* ===== equations ===== */
+  .eqwrap{display:flex; justify-content:center; margin:22px 0;}
+  .eq{font-family:var(--mono); font-size:17px; display:inline-flex; align-items:center;
+      gap:.45em; flex-wrap:wrap; justify-content:center; background:var(--panel);
+      border:1px solid var(--line); border-radius:12px; padding:18px 24px;
+      box-shadow:0 1px 2px rgba(20,40,80,.05); color:#22303f;}
+  .eq .op{color:var(--muted); padding:0 .12em; font-size:.95em;}
+  .t-blue{color:var(--blue-ink);} .t-amber{color:var(--amber-ink);} .t-green{color:var(--green-ink);} .t-purple{color:var(--purple-ink);}
+
+  /* ===== chips / pills ===== */
+  .chip{font-family:var(--mono); font-size:13.5px; border-radius:9px; padding:6px 12px; border:1.5px solid; font-weight:600;}
+  .chip.k{background:#eff6ff; border-color:#93c5fd; color:#1e40af;}
+  .chip.v{background:#ecfdf5; border-color:#6ee7b7; color:#065f46;}
+  .chip.f{background:#f8fafc; border-color:#cbd5e1; color:#64748b; border-style:dashed;}
+  .chiprow{display:flex; gap:9px; flex-wrap:wrap; margin:10px 0; justify-content:center;}
+  .pill{font-family:var(--mono); font-size:12px; padding:2px 9px; border-radius:999px; font-weight:700;}
+  .pill.b1{background:var(--blue-bg); color:var(--blue-ink);}
+  .pill.b2{background:var(--green-bg); color:var(--green-ink);}
+  .pill.up{background:var(--amber-bg); color:var(--amber-ink);}
+
+  /* compare two results */
+  .vs{display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:14px; margin:8px 0;}
+  .vscard{border:1.5px solid var(--line); border-radius:12px; padding:14px 16px; text-align:center; background:var(--panel);}
+  .vscard .lab{font-size:12.5px; color:var(--muted); margin-bottom:6px;}
+  .vscard .val{font-family:var(--mono); font-size:20px; font-weight:700; color:#0b3d91;}
+  .vsmid{font-size:26px; color:var(--green); font-weight:700;}
+  .vscard.bad{border-top:4px solid var(--red);}
+  .vscard.good{border-top:4px solid var(--green);}
+
+  /* side nav (table of contents) */
+  .sidenav{display:none;}
+  @media (min-width:1180px){
+    .sidenav{
+      display:block; position:fixed; top:0; left:0; width:264px; height:100vh;
+      overflow-y:auto; padding:30px 16px 48px; box-sizing:border-box;
+      background:#fbfbf8; border-right:1px solid var(--line);
+    }
+    .sidenav .snav-title{
+      margin:0 0 14px; padding-left:12px; font-size:12px; font-weight:700;
+      letter-spacing:.14em; text-transform:uppercase; color:var(--muted);
+    }
+    .sidenav ol{list-style:none; margin:0; padding:0;}
+    .sidenav li{margin:1px 0;}
+    .sidenav a{
+      display:flex; gap:9px; align-items:baseline; padding:6px 11px;
+      border-radius:8px; border-left:2px solid transparent;
+      color:#475461; font-size:13.5px; line-height:1.45;
+    }
+    .sidenav a .n{color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; min-width:16px; text-align:right;}
+    .sidenav a:hover{background:var(--accent-soft); text-decoration:none;}
+    .sidenav a.active{background:var(--accent-soft); color:var(--accent); font-weight:700; border-left-color:var(--accent);}
+    nav.toc{display:none;}
+    header.hero{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+    .wrap{margin-left:max(300px, calc((100% - 880px)/2)); margin-right:auto;}
+  }
+
+  /* back to top */
+  .totop{
+    position:fixed; right:22px; bottom:22px; width:44px; height:44px; border-radius:50%;
+    background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center;
+    font-size:20px; box-shadow:0 4px 14px rgba(47,111,234,.4); opacity:.92; z-index:50;
+  }
+  .totop:hover{text-decoration:none; opacity:1;}
+
+  @media (max-width:640px){
+    body{font-size:16px;}
+    h1{font-size:30px;}
+    nav.toc ol{columns:1;}
+    .vs{grid-template-columns:1fr;}
+    .vsmid{transform:rotate(90deg);}
+  }
+
+  /* ===== 本篇专用 ===== */
+  .prhead{
+    display:flex; flex-wrap:wrap; align-items:center; gap:10px;
+    margin:6px 0 14px;
+  }
+  .badge{
+    font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:.03em;
+    padding:3px 10px; border-radius:999px; border:1.5px solid;
+  }
+  .badge.fix{background:#fef2f2; border-color:#fca5a5; color:#b91c1c;}
+  .badge.feat{background:#eff6ff; border-color:#93c5fd; color:#1e40af;}
+  .badge.both{background:#f5f3ff; border-color:#c4b5fd; color:#5b21b6;}
+  .badge.merged{background:var(--green-bg); border-color:#6ee7b7; color:var(--green-ink);}
+  .badge.open{background:var(--amber-bg); border-color:#f3d27a; color:var(--amber-ink);}
+  .prlink{font-family:var(--mono); font-size:13px; font-weight:700;}
+
+  /* before / after */
+  .ba{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:20px 0;}
+  .ba > div{min-width:0;}
+  .balab{
+    font-size:13px; font-weight:700; margin:0 0 8px; display:flex; align-items:center; gap:7px;
+  }
+  .balab .dot{width:9px; height:9px; border-radius:50%; display:inline-block;}
+  .ba .old .balab{color:var(--red-ink);}
+  .ba .old .balab .dot{background:var(--red);}
+  .ba .new .balab{color:var(--green-ink);}
+  .ba .new .balab .dot{background:var(--green);}
+  .ba pre{margin:0;}
+  .ba .old pre{border-left:4px solid var(--red);}
+  .ba .new pre{border-left:4px solid var(--green);}
+  @media (max-width:900px){ .ba{grid-template-columns:1fr;} }
+
+  /* source reference chip above a code block */
+  .srcref{
+    display:inline-block; font-family:var(--mono); font-size:12.5px;
+    background:#eef2f7; color:#41536b; border:1px solid var(--line);
+    border-radius:7px 7px 0 0; padding:4px 11px; margin:18px 0 -18px;
+    position:relative; z-index:1; font-weight:600;
+  }
+  .srcref + pre{border-top-left-radius:0;}
+  .cap{font-size:14px; color:var(--muted); margin:9px 0 0;}
+
+  /* symptom callout */
+  .sym{
+    margin:16px 0; padding:14px 18px; background:#fef2f2;
+    border:1px solid #fca5a5; border-left:4px solid var(--red);
+    border-radius:0 10px 10px 0; font-size:15px; color:#7f1d1d;
+  }
+  .sym code{background:#fff;}
+  .sym .t{font-weight:700; display:block; margin-bottom:4px;}
+
+  /* overview table */
+  table.ovw td:nth-child(1){white-space:nowrap; font-family:var(--mono); font-size:13px;}
+  table.ovw td:nth-child(2){white-space:nowrap;}
+  .zero{color:var(--green-ink); font-weight:700;}
+</style>
+</head>
+<body>
+<a id="top"></a>
+
+<aside class="sidenav" aria-label="目录">
+  <p class="snav-title">目录</p>
+  <ol>
+    <li><a href="#s0"><span class="n">0</span><span>导读 · 一页总览</span></a></li>
+    <li><a href="#s1"><span class="n">1</span><span>运行期整数夹取编得过</span></a></li>
+    <li><a href="#s2"><span class="n">2</span><span>gemm_v0 内部按 N 切列</span></a></li>
+    <li><a href="#s3"><span class="n">3</span><span>运行期列宽的 GM↔UB 搬运</span></a></li>
+    <li><a href="#s4"><span class="n">4</span><span>gemm 输出列数可用运行期值</span></a></li>
+    <li><a href="#s5"><span class="n">5</span><span>带行 stride 的窄窗掩码 exp</span></a></li>
+    <li><a href="#s6"><span class="n">6</span><span>内核自己驱动 cube 流水</span></a></li>
+    <li><a href="#s7"><span class="n">7</span><span>多维标量下标跨维展平</span></a></li>
+    <li><a href="#s8"><span class="n">8</span><span>窄行归约按物理行宽跨行</span></a></li>
+    <li><a href="#s9"><span class="n">9</span><span>合起来看 · 速查表</span></a></li>
+  </ol>
+</aside>
+
+<header class="hero">
+  <span class="kicker">tilelang-ascend · 上游编译器改动</span>
+  <h1>编译器改动带来的新写法</h1>
+  <p class="sub">六个上游 PR、八处改动 —— 每一处让 TileLang 里原来写不出来（或者写出来编不过、算错、挂死）的东西，现在能写成什么样子</p>
+</header>
+
+<div class="wrap">
+
+  <div class="note">
+    <p><strong>这篇文档回答一个问题：</strong>这些编译器 bugfix 和特性增加，让 TileLang 里多出了哪些写法。每一节的结构都一样 —— 原来想写什么、原来会怎样、编译器改了什么、现在能怎么写（最小例子）、以及 <code>kernel.py</code> 里的真实用法。</p>
+    <p><strong>读者设定：</strong>写过 TileLang kernel、知道昇腾的 GM / L1 / L0A / L0B / L0C / UB 各级内存和 Cube / Vector / MTE 各条流水，这些不再赘述。</p>
+  </div>
+
+  <!-- ===================== TOC ===================== -->
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol start="0">
+      <li><span class="ix">0.</span> <a href="#s0">导读 · 一页总览</a></li>
+      <li><span class="ix">1.</span> <a href="#s1">整数标量 max/min 发成三元表达式 —— 让运行期夹取在昇腾后端编得过</a></li>
+      <li><span class="ix">2.</span> <a href="#s2">gemm_v0 在模板内部按列切 N，让 headDim=512 的 PV 矩阵乘能一句写完</a></li>
+      <li><span class="ix">3.</span> <a href="#s3">GM↔UB copy / atomic_add 的最内（列）维可以是运行期表达式了 —— 按真实窗口宽度搬，而不是按 buffer 定宽搬</a></li>
+      <li><span class="ix">4.</span> <a href="#s4">gemm_v0 / mma 的运行期输出列数 n_actual —— 让 QK 只算真实窗口那几列</a></li>
+      <li><span class="ix">5.</span> <a href="#s5">exp_experiment：带行 stride 的掩码 exp —— 在物理宽 512 的分数缓冲里，原地只 exp 窗口那 64 列</a></li>
+      <li><span class="ix">6.</span> <a href="#s6">让内核自己驱动 L1→L0→mma→fixpipe：real_k / real_n / k_actual / n_actual / unit_flag 五件套</a></li>
+      <li><span class="ix">7.</span> <a href="#s7">多维 buffer 的标量下标要跨维展平 —— <code>block_table[b, lg]</code> 不再别名到第 0 行</a></li>
+      <li><span class="ix">8.</span> <a href="#s8">窄行归约按物理行宽 stride —— 只归约宽 tile 里的一段列</a></li>
+      <li><span class="ix">9.</span> <a href="#s9">合起来看 · 速查表</a></li>
+    </ol>
+  </nav>
+
+  <!-- ===================== 0 ===================== -->
+  <h2 id="s0"><span class="num">0</span>导读 · 一页总览</h2>
+
+  <h3>0.1　这八处改动分别在哪个 PR 里</h3>
+
+  <p>六个上游 PR，八处能力。前五处已经在 <code>tile-ai/tilelang-ascend</code> 的集成分支 <code>ascendc_pto</code> 上，直接可用；后三处在 <a href="https://github.com/tile-ai/tilelang-ascend/pull/1422">PR #1422</a> 里，还没合。</p>
+
+  <div class="tablewrap">
+  <table class="ovw">
+    <tr>
+      <th>PR</th><th>性质</th><th>能力</th><th>原来</th><th>现在</th>
+    </tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1309">#1309</a></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s1">运行期整数标量夹取</a></td><td>混宽整数夹取发裸 max 调用，bisheng 报 ambiguous，整个 kernel 编不出来</td><td>整数标量 max/min 一律打成三元，运行期夹取可直接当切片边界写</td></tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1312">#1312</a></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s2">gemm_v0 大 N 列切分</a></td><td>PV 的 N=512 一跑就崩，B 片 128KB 撑爆 L0B</td><td>一句 T.gemm_v0 写完 PV，模板内部切 4×128 列</td></tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1337">#1337</a></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s3">GM↔UB 搬运的运行期列宽</a></td><td>切成运行期宽度会生成非法 C++、编不过，只能按定宽满宽搬</td><td>最内维可写运行期表达式，只搬真实窗口那几列，模板列维自动回退</td></tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1352">#1352</a></td><td><span class="badge feat">Feat</span></td><td><a href="#s4">gemm/mma 运行期输出列数 n_actual</a></td><td>输出列数只能是编译期模板 N，整块 N 列算完再到下游把尾巴掩掉</td><td>传一个运行期 n_actual，cube 只算真实窗口那几列，0b11 融合 fixpipe 才搬得了窄带</td></tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1399">#1399</a></td><td><span class="badge feat">Feat</span></td><td><a href="#s5">宽缓冲里的窄窗原地 exp</a></td><td>要么整块 exp 满 512 列白算，要么逐行发 16 条 Exp</td><td>一条 exp_experiment 盖住全部 16 行，行间自动按 512 列 stride</td></tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1422">#1422</a> <span class="badge open">未合</span></td><td><span class="badge both">Feat + Bugfix</span></td><td><a href="#s6">内核驱动的 cube 流水拆分</a></td><td>三步只能整块交给 T.gemm_v0，K/N 是编译期值</td><td>内核逐块发 mma，K/N 走运行期，0b11 配对 fixpipe</td></tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1422">#1422</a> <span class="badge open">未合</span></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s7">多维 buffer 标量索引跨维展平</a></td><td>标量读写只发最内层下标，前导维丢掉，每个 batch 都读回第 0 行</td><td>按 buffer 形状跨全维折成线性偏移，table[b, lg] 真正取到第 b 行</td></tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1422">#1422</a> <span class="badge open">未合</span></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s8">宽 tile 里的窄列段行归约</a></td><td>直写切片静默算错，只能用 deprecated 原语手填步长</td><td>直接写列切片或 real_shape，每行只归约那一段</td></tr>
+  </table>
+  </div>
+
+  <h3>0.2　版本前提</h3>
+
+  <ul>
+    <li><strong>第 1–5 节</strong>（PR #1309 / #1312 / #1337 / #1352 / #1399）已合入上游 <code>ascendc_pto</code>，拉最新代码就有。</li>
+    <li><strong>第 6–8 节</strong>（PR #1422）尚未合入。要跑本仓 <code>kernel.py</code>，编译器需要切到 fork 分支 <code>feat/ascend-kernel-driven-cube</code>（<code>3a546966</code>）。</li>
+    <li>八处改动<strong>全部只作用于 <code>target="ascendc"</code></strong>（非-PTO）这条 codegen；<code>target="pto"</code> 走另一份 <code>codegen_ascend_pto.cc</code>，除了第 8 节里一处「跳过尾参」的兼容性改动外没有被碰过。</li>
+  </ul>
+
+  <h3>0.3　一条贯穿始终的判据</h3>
+
+  <p>本算子在忠实复刻 Ascend C 实现的过程中，一共提出过 <strong>15 处</strong>「TileLang 表达不了、需要加原语」的需求。逐条核实之后，最终只有 <strong>8 处</strong>是真正非改编译器不可的，而这 8 处里：</p>
+
+  <div class="tablewrap">
+  <table>
+    <tr><th>类别</th><th>数量</th><th>说明</th></tr>
+    <tr><td>纯 Bugfix</td><td class="num-cell">5</td><td>编译器本来就是错的：编不出来、静默算错、或者挂死</td></tr>
+    <tr><td>已有原语加可选运行期参数</td><td class="num-cell">2</td><td><code>n_actual</code>、以及 <code>real_k</code>/<code>real_n</code>/<code>k_actual</code>/<code>unit_flag</code> 五件套</td></tr>
+    <tr class="hl-row"><td><strong>新增原语</strong></td><td class="num-cell"><strong>1</strong></td><td>只有 <code>exp_experiment</code> 一个（第 5 节）</td></tr>
+  </table>
+  </div>
+
+  <p>另外 7 处需求最后都消失了 —— 详见<a href="#s9">第 9 节</a>。它们消失的方式恰好印证了一条判据：</p>
+
+  <blockquote><p><strong>高阶操作优先在前端用基础原语组合出来，除非必须对接高阶库；通用的、带运行期 extent 的低阶原语，优于绑定某个具体库的高阶原语。</strong></p></blockquote>
+
+
+  <!-- ===================== 1 ===================== -->
+<h2 id="s1"><span class="num">1</span>整数标量 max/min 发成三元表达式 —— 让运行期夹取在昇腾后端编得过</h2>
+
+<div class="prhead">
+  <span class="badge fix">Bugfix</span>
+  <span class="badge merged">已合入 2026-07-07</span>
+  <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1309">PR #1309</a>
+</div>
+
+<blockquote><p><strong>一句话：</strong>原来 kernel 里只要出现一个运行期（编译期折不掉）、且两个操作数整数宽度不一致的 <code>T.max</code> / <code>T.min</code>，生成的 AscendC 就会被 bisheng 顶回来 <code>call to 'max' is ambiguous</code>，整个 kernel 编不出来；现在整数标量 max/min 一律打成 <code>(a &gt; b ? a : b)</code>，运行期夹取可以随便写。</p></blockquote>
+
+<h3>1.1　这块机制是什么</h3>
+
+<p>非-PTO 的 <code>CodeGenTileLangAscend</code> 继承自 TVM 的 <code>CodeGenC</code>，干的事是把 TIR 打印成一份 AscendC C++ 源码，再交给 bisheng 编译。TIR 里 <code>T.max(a, b)</code> / <code>T.min(a, b)</code> 是 <code>MaxNode</code> / <code>MinNode</code> 两种表达式节点，<code>CodeGenC</code> 的默认打法是发一个裸的、不带命名空间的 <code>max(a, b)</code> / <code>min(a, b)</code> 函数调用，把类型决议甩给 C++ 重载。</p>
+
+<p>生成源码的 prelude 只 include 了 <code>tl_templates/ascend/common.h</code>、<code>acl/acl.h</code>、<code>runtime/rt_ffts.h</code>（<code>codegen_ascend.cc:102-104</code>），并没有 <code>&lt;algorithm&gt;</code>，也没有 <code>using namespace std</code>。所以这个裸 <code>max</code> 解析到哪个重载，完全取决于 CANN 头文件链恰好拖进来了什么。</p>
+
+<p>另一个关键前提：编译期能算出结果的 max/min 会在 Simplify 阶段被折成 <code>IntImm</code> 常量，根本走不到 codegen。只有依赖运行期值（张量取值、grid 变量、<code>T.alloc_var</code> 游标、<code>T.symbolic</code> 形状）的 max/min 才会真的被打印出来。</p>
+
+<h3>1.2　原来写不出来的东西</h3>
+
+<p>内核作者想写的是「运行期整数夹取」——滑动窗口的左边界要夹到序列开头 0、分页 KV 一次 DMA 能搬多少行要在「本物理页剩余行」和「窗口还差多少行」之间取小、tile 尾段的实际列宽要在 tile 宽和剩余 token 数之间取小。这些量依赖 <code>seqused_kv</code> / <code>act_q_lens</code> / <code>block_table</code> 或 grid 变量，编译期一个都定不下来。</p>
+
+<div class="srcref">改动前会这么写</div>
+<pre><code>BI, ORI_WIN_LEFT = 128, 127        # 编译期常量放 prim_func 外层
+
+@T.prim_func
+def main(K: T.Tensor((S, D), "float16"), O: T.Tensor((S, D), "float16")):
+    with T.Kernel(core_num, is_npu=True) as (cid, vid):
+        k_ub = T.alloc_ub((BI, D), "float16")
+        # cid 是 grid block 变量,codegen 发成 auto cid = AscendC::GetBlockIdx(),
+        # auto 取的是 GetBlockIdx() 的 int64 返回类型。它对 int 字面量 0 做整数
+        # 夹取,就是一个操作数宽度不一致的 Max 节点。
+        ori_left = T.max(cid * BI - ORI_WIN_LEFT, 0)   # &lt;-- 这一行就是雷
+        T.copy(K[ori_left, 0], k_ub)
+        T.copy(k_ub, O[cid * BI, 0])</code></pre>
+
+<div class="sym"><span class="t">会发生什么</span>不是算错，是<strong>根本编不出来</strong>。codegen 把夹取内联成裸调用 <code>max((cid * 128 - 127), 0)</code>，直接塞进 DMA 的行偏移表达式里；bisheng 编这份生成源码时报 <code>error: call to 'max' is ambiguous</code> —— <code>max(int64_t, int)</code> 的多个重载同样可行，决议不出来。报错点落在生成的 C++ 临时文件上，回溯不到 Python 源码的那一行，第一次撞上只看得到一坨陌生的行号。</div>
+
+<div class="note"><p>触发条件比「任何运行期整数 max/min」窄。commit 正文把范围限定为 <code>mixed integer widths</code>：歧义来自宽度不一致的组合（典型就是 <code>auto cid = AscendC::GetBlockIdx()</code> 拿到的 int64 对上 int 字面量，见 <code>codegen_ascend.cc:749</code>）。同宽的运行期夹取（两个 int32_t）在改动前也能编过 —— 仓里 <code>testing/python/language/test_tilelang_ascend_language_alloc_codegen.py</code> 早在本 PR 之前就带着 <code>T.min(prefix_len_b, block_N)</code> 在 <code>target="ascendc"</code> 下通过。</p></div>
+
+<p><strong>为什么在内核侧绕不过去：</strong></p>
+<ol>
+  <li>夹取结果紧接着就要当 <code>T.copy</code> / <code>copy_pa</code> 的切片上下界和搬运行数用（<code>ori_kv[pv_ph, pv_rem : pv_rem + pv_run, ...]</code>），必须是<strong>表达式</strong>。<code>T.if_then_else</code> 会 lower 成语句（<code>int32_t condval; if {...}</code>），塞不进 copy 的参数表 —— kernel.py 自己在 1961-1969 行把这条写进注释了。</li>
+  <li>唯一的表达式级替代是每处手写 <code>tir.Select(a &gt; b, a, b)</code>。kernel.py 里 <code>T.min(</code> / <code>T.max(</code> 合计 37 处（<code>T.min</code> 28 + <code>T.max</code> 9），人肉替换啰嗦且漏一个就炸，而这正是编译器现在自动做的事。</li>
+  <li>更关键的是 <code>Max</code> 节点<strong>不只来自手写的 T.max</strong>：编译器自己的 pass 也会造。<code>src/transform/ascend_storage_rewrite.cc:794</code> 的 <code>combo_size = max(combo_size, sz_nbits)</code>（其中 <code>sz</code> 在超 int32 时被 <code>make_const(DataType::Int(64), ...)</code> 造成 int64，正是混宽场景）、<code>src/transform/merge_shared_memory_allocations.cc:355</code> 的 <code>max_inner_offset = max(max_inner_offset, inner_offset)</code>。内核侧一个 <code>T.max</code> 都不写，也不保证没有整数 Max 节点走到 codegen。</li>
+</ol>
+
+<h3>1.3　编译器改了什么</h3>
+
+<ul>
+  <li><code>src/target/codegen_ascend.cc:436-449</code>：新增 <code>PrintIntMinMaxTernary(const PrimExpr &amp;a, const PrimExpr &amp;b, const char *cmp, std::ostream &amp;os)</code>，把节点打成 <code>(a cmp b ? a : b)</code>，用三元彻底绕开重载决议。注释里写明了不用 <code>std::max&lt;T&gt;</code> 的理由 —— 生成的 AscendC kernel prelude 没有 include <code>&lt;algorithm&gt;</code>。</li>
+  <li><code>src/target/codegen_ascend.cc:454-468</code>：override <code>VisitExpr_(const MaxNode *op, ...)</code> 传 <code>"&gt;"</code>、<code>VisitExpr_(const MinNode *op, ...)</code> 传 <code>"&lt;"</code>。两者用同一个守卫（455 / 463 行）<code>if ((op-&gt;dtype.is_int() || op-&gt;dtype.is_uint()) &amp;&amp; op-&gt;dtype.lanes() == 1)</code>，不满足就 <code>CodeGenC::VisitExpr_(op, os)</code> 原样落回。</li>
+  <li><code>src/target/codegen_ascend.h:54-57</code>：声明这两个 <code>VisitExpr_</code> 和 <code>PrintIntMinMaxTernary</code>；和邻居 <code>FloorDivNode</code> / <code>FloorModNode</code> 一样<strong>不加 <code>final</code></strong>，与加了 <code>final</code> 的 <code>MulNode</code> / <code>SelectNode</code> 那几个区分开。</li>
+  <li><code>testing/python/language/test_tilelang_ascend_language_integer_minmax_index.py</code>：新增回归单测（111 行）。三个刻意设计：用 grid 变量 <code>cid</code>（int64）对 int 字面量强制造出混宽的运行期 max/min；把夹取结果当成 DMA 的<strong>源行偏移</strong>用掉，让它逃过 DCE 真正走到 codegen；<code>target</code> 参数化跑 <code>["ascendc", "pto"]</code>，<code>op</code> 参数化跑 <code>["max", "min"]</code>。session 级 <code>autouse</code> fixture 先 <code>tilelang.cache.clear_cache()</code>，否则缓存 kernel 会把 codegen 回归整个掩盖掉。</li>
+</ul>
+
+<div class="note"><p>本节所有编译器侧行号以 fork 分支 <code>feat/ascend-kernel-driven-cube</code> @ <code>3a546966</code>（已含全部已合入 PR）为准。在合入点 <code>cf1ae11d</code> 上，<code>codegen_ascend.cc</code> 的这批位置整体前移一行（<code>PrintIntMinMaxTernary</code> 落在 435 行），<code>codegen_ascend.h</code> 的行号不变。</p></div>
+
+<h3>1.4　现在可以这么写</h3>
+
+<p><strong>没有新 API，签名一个字都没变</strong>。写的还是 <code>T.max(a, b)</code> / <code>T.min(a, b)</code>（由 <code>tilelang/language/__init__.py</code> 的 <code>from tvm.script.parser.tir import *</code> 从 TIR 透传进来），变的只是它们在昇腾后端被打印成什么。生效条件严格限定为「整数或无符号整数」<strong>且</strong>「<code>lanes() == 1</code> 的标量」。</p>
+
+<div class="srcref">最小例子</div>
+<pre><code>import tilelang
+import tilelang.language as T
+
+M, N, BM = 1024, 256, 128
+M_NUM = M // BM        # 8 个 block
+ROWS = BM // 2         # 编译期常量必须留在 prim_func 外层
+
+VEC_PASS_CONFIGS = {
+    tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_COMBINE: True,
+    tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_SYNC: True,
+    tilelang.PassConfigKey.TL_ASCEND_AUTO_SYNC: True,
+    tilelang.PassConfigKey.TL_ASCEND_MEMORY_PLANNING: True,
+}
+
+@T.prim_func
+def main(A: T.Tensor((M, N), "float"), C: T.Tensor((M, N), "float")):
+    with T.Kernel(M_NUM, is_npu=True) as (cid, vid):
+        # cid 是 int64 的 grid block 变量,和 int 字面量 0 混宽做整数夹取。
+        src = T.max(cid - 1, 0)
+        a_ub = T.alloc_ub((ROWS, N), "float")
+        voff = vid * ROWS
+        T.copy(A[src * BM + voff, 0], a_ub)     # 读「夹取后的邻居 tile」
+        T.copy(a_ub, C[cid * BM + voff, 0])     # 写自己这块 tile
+
+func = tilelang.compile(main, out_idx=[-1],
+                        pass_configs=VEC_PASS_CONFIGS, target="ascendc")</code></pre>
+
+<p class="cap">重点只有 <code>src = T.max(cid - 1, 0)</code> 这一行：<code>cid</code> 是 int64 的 grid 变量，<code>0</code> 是 int 字面量，混宽标量整数 max。改动前这行打成裸的 <code>max(cid - 1, 0)</code>，bisheng 报 <code>call to 'max' is ambiguous</code>，整个 kernel 编译失败；改动后打成 <code>((cid - 1) &gt; 0 ? (cid - 1) : 0)</code>，没有重载需要决议，结果就是「每块读它左边那块、第 0 块读自己」。另外三处不是凑数：把 <code>src</code> 用作 DMA 行偏移是为了让夹取活到 codegen（只算不用会被 DCE 删掉，问题就复现不出来）；<code>M_NUM</code> / <code>ROWS</code> 必须定义在 <code>@T.prim_func</code> 外层，否则会被 parser 绑成 Let-Var、把 <code>a_ub</code> 的 shape 变成非 <code>IntImm</code>；<code>pass_configs</code> 也不能省 —— <code>_TARGET_PASS_DEFAULTS["ascendc"]</code> 是空 dict，不显式开 <code>AUTO_SYNC</code> 的话 MTE2 和 MTE3 之间不插 flag，两条 DMA 无依赖就是数据竞争。</p>
+
+<h3>1.5　kernel.py 里的真实用法（一）：SWA 滑窗左边界</h3>
+
+<div class="srcref">kernel.py:3506-3512 · SWA · QK 打分</div>
+<pre><code>act_q = act_q_lens[b]
+if s &lt; act_q:
+    act_kv = seqused_kv[b]
+    tok = q_prefix[b] + s
+    s_global = act_kv - act_q + s
+    ori_left = T.max(s_global - ori_win_left, 0)
+    win = s_global + 1 - ori_left</code></pre>
+
+<p>这是 SWA 每个 query token 进 QK 之前必须先算出来的两件事：它能看到的 KV 区间从哪开始、有多长。<code>s_global = act_kv - act_q + s</code> 是该 token 在<strong>整条 KV 序列</strong>上的全局位置，由 <code>seqused_kv[b]</code>（该 batch 真实 KV 长度）和 <code>act_q_lens[b]</code>（该 batch 真实 query 长度）算出，两者都是运行期从张量里读的。滑窗左边界本该是 <code>s_global - ori_win_left</code>（滑窗左半径，本仓断言 ≤127），但对序列<strong>开头</strong>那几个 token 这个值是负的，必须夹到 0，否则 <code>win</code> 会算成大于 128、后面 <code>T.copy</code> 的切片直接越界读到别的 batch 的 KV。夹完之后 <code>win = s_global + 1 - ori_left</code> 就是该 token 真实的窗口长度：序列开头短、往后稳定在 128。这两个值一路喂给 copy_pa 的搬运行数、gemm 的 <code>real_k</code> / <code>k_actual</code>、以及在线 softmax 的有效列数，是整个 SWA 的骨架尺寸。</p>
+
+<p>这里的操作数目前都在 int32 域内（3504-3505 行 <code>b = T.cast(pid // max_seq, "int32")</code> / <code>s = T.cast(pid % max_seq, "int32")</code> 已经把 grid 变量降到 int32），所以这条具体的 <code>T.max</code> 在改动前也能编过。改动的价值在于把「能不能编过」从「上游有没有记得 cast」这个约定里解耦出来 —— 少一个 cast、或者哪个 pass 自己造出一个 int64 操作数，就不再是编译失败。</p>
+
+<h3>1.6　kernel.py 里的真实用法（二）：分页 KV 一次能搬多少行</h3>
+
+<div class="srcref">kernel.py:3833-3855 · SWA · PV 分页搬运</div>
+<pre><code>pv_done = pv_cur - pv_start
+if pv_done &lt; winm:
+    pv_lg = pv_cur // ori_block_size
+    pv_ph = ori_block_table[bm, pv_lg]
+    pv_rem = pv_cur % ori_block_size
+    pv_run = T.min(
+        ori_block_size - pv_rem,
+        winm - pv_done,
+    )
+    T.copy(
+        ori_kv[
+            pv_ph,
+            pv_rem : pv_rem + pv_run,
+            0,
+            nl * PV_NW : nl * PV_NW + PV_NW,
+        ],
+        kv_ring[
+            slot,
+            pv_done : pv_done + pv_run,
+            0:PV_NW,
+        ],
+    )
+    pv_cur += pv_run</code></pre>
+
+<p>这是 PagedAttention 的分页走查循环：窗口内的 V 在显存里不连续，按 <code>ori_block_size</code> 行一页散落在 <code>ori_kv</code> 里，页的物理编号要经 <code>ori_block_table[bm, pv_lg]</code> 查表。每轮搬一段连续行，段长 <code>pv_run</code> 同时受两个上界约束 —— <code>ori_block_size - pv_rem</code> 是「当前物理页从 <code>pv_rem</code> 往后还剩多少行」（跨页得换 <code>pv_ph</code>，不能一口气搬过去），<code>winm - pv_done</code> 是「本 token 的窗口还差多少行没搬完」（搬多了会把窗口外的 KV 混进 PV 累加，结果静默错）。取小之后 <code>pv_run</code> 同时出现在源切片、目的切片和游标推进三个位置 —— 源和目的<strong>两侧都切</strong>，运行期长度才真的落到 DMA 的 validRow 上。三个操作数里只有 <code>ori_block_size</code> 是编译期常量，<code>pv_rem</code> / <code>winm</code> / <code>pv_done</code> 全是运行期值，这个 min 折不掉、必然走到 codegen。这也是「绕不过去」最直白的例子：<code>pv_run</code> 是切片边界，只能是表达式，<code>T.if_then_else</code> lower 成语句就塞不进 <code>T.copy</code> 的参数表。</p>
+
+<h3>1.7　kernel.py 里的真实用法（三）：SCFA 压缩域尾 tile 列宽</h3>
+
+<div class="srcref">kernel.py:1957-1978 · SCFA · 压缩域 tile 划分</div>
+<pre><code>is_ori = tile == 0
+ori_left = T.max(s_global - ori_win_left, 0)
+win = s_global + 1 - ori_left
+rel = tile - 1
+# tile column width. Inner cmp-tail conditional
+# is T.min (last tile: act_cmp-rel*512 &lt; 512;
+# else &gt;=512 -&gt; 512); the ori/cmp pick is a
+# tir.Select. Both lower to an INLINE ternary
+# (SelectNode); a runtime T.if_then_else instead
+# lowers to a statement (int32_t condval; if{}),
+# which the codegen cannot inline into the copy_pa
+# arg list (bad C++). For ori (rel=-1) the cmp
+# branch = min(512, act_cmp+512)=512, unused.
+tw = tir.Select(
+    is_ori,
+    win,
+    T.min(
+        S2_BASE,
+        T.min(act_cmp, topk_cmp)
+        - rel * S2_BASE,
+    ),
+)</code></pre>
+
+<p>SCFA 的 KV 分两段：一段是原始滑窗（<code>is_ori</code>，tile 0），一段是被 topk 选中并合并过的压缩 KV（tile ≥1，每块 512 宽）。上面 1951-1954 行先算 <code>act_cmp = (s_global + 1) // cmp_ratio</code>（该 token 在压缩域上可见的 token 数）和 <code>cmp_tiles = (T.min(act_cmp, topk_cmp) + S2_BASE - 1) // S2_BASE</code>，<code>topk_cmp</code> 是 topk 只保留 K 个压缩块的上限，取小才是真正要算的压缩 token 数，直接决定这个 token 要跑几轮 tile 循环。这里的 <code>tw</code> 是当前 tile 的<strong>实际列宽</strong>：压缩分支里外层 <code>T.min(S2_BASE, ...)</code> 处理尾 tile 不足 512 的情况，<code>tw</code> 随后在 2010 行被切成 <code>ncols = T.min(BI, tw - cb * BI)</code> 的 128 宽列块喂给 gemm（CFA 的 505 行是同款代码，属于另一个 kernel）。</p>
+
+<p>代码里那段原生注释顺带解释了为什么只能用<strong>内联三元</strong>类的东西（<code>tir.Select</code> / <code>T.min</code>）而不能用 <code>T.if_then_else</code> —— 后者 lower 成语句，codegen 没法把它内联进 copy_pa 的参数表，生成的是编不过的 C++。这正是本条改动「为什么必须在编译器侧做」的另一面证据。同时这也是全仓嵌套最深的一处夹取，直接对应 1.8 里的三元膨胀问题。</p>
+
+<h3>1.8　兼容性与坑</h3>
+
+<p><strong>兼容性：</strong>浮点和向量路径的产物<strong>逐字节不变</strong>，靠的是守卫式落回 —— 两个 override 都是 <code>if ((op-&gt;dtype.is_int() || op-&gt;dtype.is_uint()) &amp;&amp; op-&gt;dtype.lanes() == 1) { 新路径 } else { CodeGenC::VisitExpr_(op, os); }</code>，浮点标量以及任何 <code>lanes() &gt; 1</code> 的向量 max/min 走的还是原封不动的 <code>CodeGenC</code> 打印，NaN 语义和向量语义一个字都没碰。整数标量这一侧则是<strong>语义等价、文本改变</strong>：仓里本来就存在运行期整数 max/min（<code>test_tilelang_ascend_language_alloc_codegen.py</code> 里的 <code>T.min(prefix_len_b, block_N)</code>、<code>examples/tile_kernels/moe/moe_topk_gate.py:55</code> 的 <code>T.min(batch_idx_0 * VEC_NUM + vid, num_tokens - 1)</code>），它们的生成源码会从裸调用变成三元。改动只动 <code>codegen_ascend.cc</code> 和 <code>codegen_ascend.h</code>（加上新增的单测，全 PR 共 3 个文件、156 行净增），<code>codegen_ascend_pto.cc</code> 完全没碰。</p>
+
+<div class="warn"><p>PR 描述里那句 <code>Existing kernels only used compile-time-foldable T.max / T.min, so the gap was latent.</code> 与仓内实际不符：<code>alloc_codegen</code> 那个测试在本 PR 之前就带着运行期标量整数 <code>T.min</code> 跑 <code>target="ascendc"</code>。所以「潜伏未被触发」只对混宽那一类成立，不能推出「老代码产物逐字节不变」。</p></div>
+
+<div class="warn"><p>上游回归单测的 docstring 写着 <code>pto already emitted std::max / std::min</code>，这句是错的，值得回上游订正。<code>src/target/codegen_ascend_pto.h</code> 的 overload 列表里<strong>没有</strong> <code>MaxNode</code> / <code>MinNode</code>，<code>codegen_ascend_pto.cc</code> 里也没有对应的 <code>VisitExpr_</code>；pto 走的是和修复前 ascendc <strong>完全同一条</strong> <code>CodeGenC</code> 裸调用路径，prelude（<code>codegen_ascend_pto.cc:474-477</code>）同样没有 <code>&lt;algorithm&gt;</code>。文件顶部那个 <code>#include &lt;algorithm&gt;</code> 和 220 / 436 / 1146 行的 <code>std::max</code> / <code>std::min</code> 是 codegen 这份宿主 C++ 自己在用，跟生成的 kernel 无关。测试里 pto 用例能过，只说明 pto 工具链的头文件恰好能无歧义解析该组合，不代表 pto 结构上免疫；真要同样保险，pto 侧得照样加 override。</p></div>
+
+<ul>
+  <li><strong>只管标量整数。</strong>守卫是 <code>(is_int() || is_uint()) &amp;&amp; lanes() == 1</code>。浮点标量的 <code>T.max</code> / <code>T.min</code> 仍走 <code>CodeGenC</code> 默认的裸 <code>max(a, b)</code>，同样的歧义风险原样还在，只是本仓还没撞到。真要做运行期浮点夹取，优先用向量原语（ascend_max / clamp_max 一类），或自己写 <code>tir.Select(a &gt; b, a, b)</code>。</li>
+  <li><strong>三元把每个操作数各打印两遍，嵌套按 2 的幂膨胀。</strong><code>PrintIntMinMaxTernary</code> 里 <code>a</code> 和 <code>b</code> 各 <code>PrintExpr</code> 两次，所以每嵌一层，内层节点的文本翻一倍。上面 1973-1977 行的 <code>T.min(S2_BASE, T.min(act_cmp, topk_cmp) - rel * S2_BASE)</code>：外层把操作数 <code>b</code> 打两遍，内层 min 的三元文本出现 <strong>2</strong> 次，它的叶操作数 <code>act_cmp</code> / <code>topk_cmp</code> 各出现 <strong>4</strong> 次；再往里嵌一层，最内层的叶操作数就是 8 次。写多层夹取时留意生成源码的体积和可读性，必要时先把内层结果落到 <code>T.alloc_var</code> 标量上。（<code>SelectNode</code> 走 <code>PrintExpr</code> 返回字符串、每个分支只印一次，不额外放大。）</li>
+  <li><strong>dump codegen 看不到三元 ≠ 改动没生效。</strong>编译期能折的 max/min 在 Simplify 阶段就成了 <code>IntImm</code>，压根到不了 <code>VisitExpr_(MaxNode)</code>。要验证这条改动，操作数里必须至少有一个是真的运行期值（张量取值、grid 变量、alloc_var 游标）。</li>
+  <li><strong>只对 <code>target="ascendc"</code>（非-PTO）生效。</strong>pto 是另一份 codegen，没有这两个 override（见上面的 warn）。本仓 SWA / CFA / SCFA 全部走非-PTO codegen，所以这条是刚需；在 pto 上验证是验不出差别的。</li>
+  <li><strong>三元只解决重载决议，没解决整型提升。</strong><code>a</code> 和 <code>b</code> 的符号扩展 / 整型提升还是 C 的老规矩：int64 的 grid 变量对 int 字面量取 max，结果类型是 int64。夹完要当 int32 索引用的话，仍然建议显式 <code>T.cast(..., "int32")</code> —— kernel.py:3504-3505 的两个 <code>T.cast</code> 就是先把 grid 变量降到 int32、让后面所有夹取都留在 int32 域的写法，值得照抄。</li>
+  <li><strong>生成的表达式外层已经带括号</strong>（<code>os &lt;&lt; "("</code> … <code>os &lt;&lt; ")"</code>），可以直接嵌进更大的算式，不用自己再包一层。</li>
+  <li><strong>别指望它顺带修好整数除法。</strong>同一份 codegen 里的 <code>FloorDiv</code> / <code>FloorMod</code> 发成 C 的 <code>/</code> 和 <code>%</code>（截断语义），负被除数下和 TIR 的 floor 语义差 1，那是另一个独立的坑。夹取用 max/min、取页号用 <code>//</code> 的组合里，如果操作数可能为负，先确认除法那一侧。</li>
+</ul>
+
+
+  <!-- ===================== 2 ===================== -->
+<h2 id="s2"><span class="num">2</span>gemm_v0 在模板内部按列切 N，让 headDim=512 的 PV 矩阵乘能一句写完</h2>
+
+<div class="prhead">
+  <span class="badge fix">Bugfix</span>
+  <span class="badge merged">已合入 2026-07-14</span>
+  <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1312">PR #1312</a>
+</div>
+
+<blockquote><p><strong>一句话：</strong>原来 <code>gemm_v0</code> 只切 K 不切 N，N 一大（PV 的 headDim=512）就要把 128KB 的 B 片塞进整块只有 64KB 的 L0B，运行期把 cube 打崩；现在模板内部自动按 128 列切 N，一句 <code>T.gemm_v0</code> 就能写完整个 PV。</p></blockquote>
+
+<h3>2.1　这块机制是什么</h3>
+<p>昇腾 cube 单元做一次 mma，两个操作数必须先从 L1 搬到 L0A / L0B 这两块各 64KB 的片上缓冲，累加器落在 L0C。<code>gemm_v0</code> 是 TileLang Ascend 后端的块级矩阵乘模板（<code>src/tl_templates/ascend/common.h</code>），它把 <code>&lt;M, N, K&gt;</code> 的 gemm 拆成若干次 mma，并用 L0A/L0B 双缓冲（乒乓）把「L1→L0 搬运」和「上一片的 mma」重叠起来。</p>
+<p>预算是分段的：整条 (N-tile, K-tile) 序列只有一步时，单槽可以占满 64KB；一旦步数大于 1、乒乓真的开始轮转，每槽就只剩 32KB。改动前 <code>gemm_v0</code> 只在 K 方向切（<code>kL0Size=128</code>），B 操作数在 L0B 里的槽大小恒等于 <code>N * kL0Size</code>——N 有多大就占多大，模板自己完全不管它装不装得下。</p>
+
+<h3>2.2　原来写不出来的东西</h3>
+<p>attention 的第二个矩阵乘 PV（O = P @ V）想按 Ascend C 参考的 ComputeMm2 那样一句写完：M=G=64、N=headDim=512、K=window≤128，P 和整块 V 各在一个 L1 buffer 里，结果累加进一块 [64, 512] 的 L0C。</p>
+
+<div class="srcref">改动前会这么写</div>
+<pre><code># 想写成这样（sparse_attn_sharedkv 早期 SWA，一句 PV）：
+kv_l1 = T.alloc_L1([BI, D], dtype)        # [128, 512] 整窗 V
+p_l1  = T.alloc_L1([G, BI], dtype)        # [64, 128]  P
+acc_o_l0c = T.alloc_L0C([G, D], accum_dtype)
+T.copy(workspace_p[cid, :, :], p_l1)
+T.gemm_v0(p_l1, kv_l1, acc_o_l0c, init=True)   # M=64, N=512, K=128
+
+# 实际当年被迫写成这样（K 劈两半的绕法）：
+kv_l1_0 = T.alloc_L1([BI // 2, D], dtype)
+kv_l1_1 = T.alloc_L1([BI // 2, D], dtype)
+p_l1_0  = T.alloc_L1([G, BI // 2], dtype)
+p_l1_1  = T.alloc_L1([G, BI // 2], dtype)
+T.copy(workspace_p[cid, :, 0 : BI // 2], p_l1_0)
+T.copy(workspace_p[cid, :, BI // 2 : BI], p_l1_1)
+T.gemm_v0(p_l1_0, kv_l1_0, acc_o_l0c, init=True)
+T.gemm_v0(p_l1_1, kv_l1_1, acc_o_l0c, init=False)</code></pre>
+
+<div class="sym"><span class="t">会发生什么</span>第一种写法编译得过，运行期挂死：aicore 报 CCU instruction address check error。不是逻辑错，是地址越界——B 片 = K * N * sizeof(half) = 128 * 512 * 2 = 128KB，而整块 L0B 只有 64KB，超了 2 倍。（这个 shape 的 K=128 正好等于 <code>kL0Size</code>，<code>kL0split == 1</code>，旧循环只跑一轮、<code>pp = kL0Idx &amp; 1</code> 恒为 0，乒乓根本不轮转，可用的就是整块 64KB；32KB 的每槽预算是修复后 <code>kNumSteps &gt; 1</code> 才成立的约束。）写穿 L0B 之后 cube 的指令/地址被冲掉，表现为硬件异常而不是干净的报错。</div>
+
+<p>同一个 kernel 的 QK 反而没事：它走 <code>transpose_B</code> 路径，N = block_I = 128、B 片 128 * 128 * 2 = 32KB，K=D2=256 分两个 K 片、乒乓轮转，32KB 正好卡在预算里。所以这个坑只有 N 大的那一侧才踩得到。</p>
+
+<p><strong>为什么在内核侧绕不过去：</strong>内核侧只能拿 K 换 N——把 K=BI 的收缩拆成两个 BI/2 半，让每个 B 片降到 512 * 64 * 2 = 64KB。切片操作数本身是能传的（<code>_retrieve_shape</code> / <code>_retrieve_ptr</code> 都有 <code>BufferRegion</code> 分支，<code>tilelang/language/ascend.py:66-71</code> 与 <code>98-111</code>，这两个分支在 #1312 的父提交上就已存在），但 <code>_retrieve_ptr</code> 是按紧凑 row-major 累加 <code>indices[i] * strides[i]</code> 算基址偏移的，而 L1 上的 B 走 zN 分形布局：沿 K 切出来的后半段在 zN 下根本不是一段连续内存，用单个指针偏移表达不出来，写出来也不报错、是静默指到错地址。所以「切一刀」必须真的多申请一组完整 L1 buffer。代价是三层的：</p>
+<ol>
+  <li>L1 占用翻倍，且窗口被人为劈成两段；</li>
+  <li>workspace 的读写从 1 次变 2 次，cube 侧和 vector 侧的 cross-core sync 点数要逐个配平（半 0 写↔半 0 读、半 1 写↔半 1 读），错一个就死锁；</li>
+  <li>为了配平，vector 侧的 s_ub / P 也得按列半段搬，而列半段的 UB 子块拷贝会把 s_ub 的 stride 搞错、逐行污染 LSE。</li>
+</ol>
+<p>更要命的是：这么切之后 tiling 已经和 Ascend C 参考的 ComputeMm2（按 N_SPLIT_SIZE 切 N）对不上了，忠实复刻这个目标本身就废了。真正的切分点在 N 上，而 N 的切分只能发生在模板内部——L0B 的槽划分、乒乓事件、L0C 的列带偏移全都是模板自己管的，内核根本够不着。</p>
+
+<h3>2.3　编译器改了什么</h3>
+<ul>
+  <li><code>src/tl_templates/ascend/common.h</code>：新增编译期常量 <code>nMaxByL0B = 32KB / (kL0Size * sizeof(T1))</code>（half + <code>kL0Size=128</code> 时正好是 128，与 Ascend C 参考的 N_SPLIT_SIZE 对齐）、<code>nTile = (transpose_B || N &lt;= nMaxByL0B) ? N : nMaxByL0B</code>、<code>nL0split = N / nTile</code>。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：原来的单层 K 循环外面套了一层 N 循环。每个 N-tile 只把自己那 <code>(kL0Size x nTile)</code> 的 B 子块载进 L0B，mma 的模板参数从 <code>&lt;M, N&gt;</code> 改成 <code>&lt;M, nTile&gt;</code>，结果累加进 L0C 自己那条列带 <code>C[cNOffset]</code>。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：子块偏移直接照抄 catlass 的 tla 分形布局——L0C 第 n0 列在 <code>n0 * roundUp16(M)</code>（MakeLayoutL0C 的 N1 stride），L1 里 zN 布局的 B 第 n0 列在 <code>n0 * roundUp16(K)</code>（MakeLayout&lt;zN&gt; 的 C1 stride），和循环里原本就在用的 K 偏移 <code>B[kL0Idx * 16 * kL0Size]</code> 同源（那个硬编码的 16 后来被 #1401 换成 <code>ELE_NUM_PER_C0</code>）。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：(N-tile, K-tile) 二维序列被拍平成一个 <code>tileIdx</code>，乒乓槽选择改成 <code>pp = tileIdx &amp; 1</code>，L0A/L0B 的 prime/drain（M_MTE1 的 SetFlag/WaitFlag）整段只做一次，让 N-tile 之间也能搬运/计算重叠。第一版「每个 N-tile 各自 drain」会把 N-tile 串行化，被这个拍平取代。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：新增两条 static_assert 兜住 L0A/L0B 容量——B 片 <code>nTile * kL0Size * sizeof(T1)</code> 和 A 片 <code>M * kL0Size * sizeof(T1)</code> 都必须 ≤ <code>kL0Budget</code>（单步 64KB、乒乓真轮转时 32KB）；再加一条 <code>N % nTile == 0</code>。</li>
+  <li><code>testing/python/language/test_tilelang_ascend_language_gemm_v0_n_tiling.py</code>：新增回归测试，覆盖 N=512 的大 N 路径与 N=128 的兼容对照。</li>
+</ul>
+
+<div class="note"><strong>前端签名一个参数都没加。</strong>切 N 是模板为了塞进 L0B 而做的内部行为，不该让内核作者操心。前端仍然是 <code>T.gemm_v0(A, B, C, transpose_A=False, transpose_B=False, init=False, kL0Size=128, n_actual=None)</code>（<code>tilelang/language/ascend.py:343</code>；其中 <code>n_actual</code> 是后来 #1352 加的，与本条无关），M/N/K 照旧从 A/B/C 三个 buffer 的 shape 推出来（<code>M, N = C_shape[-2], C_shape[-1]</code>）。变化只在语义上：以前「N 必须小到能整个塞进一个 L0B 槽」是一条没写出来的隐式前提，越界就是运行期硬件异常；现在超出单槽的非转置 B 路径会自动切成 <code>nL0split</code> 段，真正装不下的情况改由编译期 static_assert 明确拒绝。</div>
+
+<h3>2.4　现在可以这么写</h3>
+<div class="srcref">最小例子</div>
+<pre><code>import tilelang
+import tilelang.language as T
+
+CUBE_CONFIGS = {
+    tilelang.PassConfigKey.TL_ASCEND_AUTO_SYNC: True,
+    tilelang.PassConfigKey.TL_ASCEND_MEMORY_PLANNING: True,
+}
+
+@T.prim_func
+def pv(P: T.Tensor((64, 128), "float16"),
+       V: T.Tensor((128, 512), "float16"),
+       O: T.Tensor((64, 512), "float16")):
+    with T.Kernel(1, is_npu=True) as (cid, _):
+        P_L1 = T.alloc_L1((64, 128), "float16")     # M=64,  K=128
+        V_L1 = T.alloc_L1((128, 512), "float16")    # K=128, N=headDim=512
+        O_L0 = T.alloc_L0C((64, 512), "float")
+        with T.Scope("C"):
+            T.copy(P[0, 0], P_L1)
+            T.copy(V[0, 0], V_L1)
+            # 改动前：这一句要把 K*N*2 = 128*512*2 = 128KB 的 B 片一次塞进
+            #   L0B（整块 64KB）--&gt; 运行期 aicore 报 CCU instruction
+            #   address check error，不是编译报错。
+            # 改动后：模板内部把 N 切成 nL0split=4 段、每段 nTile=128 列，
+            #   每段 B 片 128*128*2 = 32KB 正好装下，分别累加进 O_L0 的
+            #   第 nl 条列带。内核这一行一个字都不用改。
+            T.gemm_v0(P_L1, V_L1, O_L0, init=True)
+            T.copy(O_L0, O[0, 0])
+
+f = tilelang.compile(pv, out_idx=[-1], pass_configs=CUBE_CONFIGS, target="ascendc")</code></pre>
+<p class="cap">关键在 <code>T.gemm_v0(P_L1, V_L1, O_L0, init=True)</code> 这一行——它在改动前后<strong>逐字节相同</strong>，区别全在模板内部：改动前它编译得过、跑起来把 cube 打崩；改动后它按 4×128 列自动切分，正好复现 Ascend C 参考里 ComputeMm2 的 N_SPLIT_SIZE 切法。<code>pass_configs</code> 那两行不能省：<code>tl.ascend_auto_sync</code> 在 C++ 侧默认 false（<code>src/transform/ascend_sync_insert.cc</code> 关掉时直接 <code>return f</code>），而 <code>_TARGET_PASS_DEFAULTS["ascendc"]</code> 是空表、不会替 caller 打开它——省掉之后 MTE2(GM→L1) → MTE1(L1→L0) → M(mma) → FIX(L0C→GM) 之间一条 set_flag/wait_flag 都不会插，是裸的跨 pipe RAW 竞争。另有两个容易撞的形状约束：<code>V_L1</code> 必须是 (K, N) 且走默认 zN 布局（N-tile 的列偏移写死成 zN 的 <code>n0 * roundUp16(K)</code>）；M=64 也不是随便取的，L0C 要整块放下 <code>roundUp16(M) * N * 4</code> = 128KB，M 再大就超出 A2/A3 的 L0C 了。</p>
+
+<h3>2.5　kernel.py 里的真实用法（一）：SWA 的 PV 列带切分</h3>
+<div class="srcref">kernel.py:3811-3889（# ... 处为省略）· SWA · PV 阶段（= Ascend C ComputeMm2）</div>
+<pre><code>for nl in range(PV_NT):
+    slot = (2 + nl) % 3
+    pp = nl % 2
+    cs = cl0_iter % 2
+    # ... 3815-3868：ev = 本槽的环事件；分页把 V 的第 nl 个 D 块搬进
+    #     kv_ring[slot]；再把 p_l1 / kv_ring[slot] 载进 pp 号 L0A/L0B 槽
+    T.mma(
+        p_l0a[pp, :, :],
+        v_l0b[pp, :, :],
+        cL0[cs, :, :],
+        init=True,
+        k_actual=winm,
+        unit_flag=0b11,
+    )
+    T.set_flag("m", "mte1", L0AB_EV0 + pp)
+    # ... 3878-3879：把环槽释放给下一个使用者
+    T.copy(
+        cL0[cs, :, :],
+        workspace_o[
+            cid,
+            bufm,
+            :,
+            nl * PV_NW : (nl + 1) * PV_NW,
+        ],
+        unit_flag=0b11,
+    )</code></pre>
+<p>这是 SWA 的 PV 阶段：把 softmax 之后的概率矩阵 P（[64, window]）乘上滑窗内的 V（[window, 512]），得到这个 token 上 64 个 query head 的输出。<code>PV_NT = D // BI = 4</code>、<code>PV_NW = BI = 128</code>（<code>kernel.py:3277-3278</code>），也就是把 headDim=512 的输出切成 4 条 128 列的带，每条带独立走一次「载 V 列块 → mma → fixpipe 写 <code>workspace_o</code> 的第 nl 条列带」，乒乓槽选择 <code>pp = nl % 2</code> 跟模板里的 <code>tileIdx &amp; 1</code> 一模一样。这 4×128 正是 #1312 在模板里加的 <code>nL0split=4</code> / <code>nTile=128</code>——<code>kernel.py:3273-3274</code> 的注释直接写着「decomposed PV drives these 4 tiles itself (kernel-driven mma + fused fixpipe = gemm_v0_fixp internal nL0split=4)」。</p>
+<div class="note"><strong>诚实说明：</strong>这段代码今天已经不再调用 <code>T.gemm_v0</code> 了，PV 后来被解构成内核驱动的 mma，好让 V 的 D 切片能逐块进 3 槽 KV 环、和分页搬运重叠。但切分形状、列带偏移、乒乓槽轮转全部原样继承自这条改动：是它先证明了「N 必须按 128 列切」这件事能跑通、能和 Ascend C 参考对齐，内核后来才敢把这个循环搬到自己手里再往里插环调度。没有它，PV 只能按 K 劈成两半、多申请一倍 L1、还得手工配平 cross-core sync，走不到今天这个形态。</div>
+
+<h3>2.6　kernel.py 里的真实用法（二）：CFA / SCFA 的 QK 不被切</h3>
+<div class="srcref">kernel.py:653-661 · CFA · QK 打分（DEBUG_SERIAL 调试路径）</div>
+<pre><code>if DEBUG_SERIAL:
+    T.gemm_v0(
+        q_l1[0, :, :],
+        kv_ring[s0, :, :],
+        cL0[cs, :, :],
+        transpose_B=True,
+        init=True,
+        n_actual=ncols_a,
+    )</code></pre>
+<p>CFA 的 QK 打分：把这个 token 的 64 个 query head（<code>q_l1</code> 的第 0 个 D 半段）和 KV 环里 slot <code>s0</code> 的 K 做 <code>Q @ K</code> 转置乘，结果累加进 <code>cL0</code> 的第 <code>cs</code> 个槽。<code>DEBUG_SERIAL</code> 是一条排障开关：打开时用整块 <code>T.gemm_v0</code> 加 <code>T.barrier_all()</code> 串行跑，关掉时（生产路径，<code>DEBUG_SERIAL = False</code>）走手工解构的 mma 流水。列在这里是为了展示 #1312 的<strong>兼容性保证</strong>，而不是它的切分能力：这一句是 <code>transpose_B=True</code>，而模板里 <code>nTile = (transpose_B || N &lt;= nMaxByL0B) ? N : nMaxByL0B</code>，转置 B 的路径一律不切，<code>nL0split == 1</code>、<code>tileIdx == kL0Idx</code>，展开成和加 N-tiling 之前同一条单趟路径。M、N 由 <code>cL0[cs]</code> 的 shape [G=64, BI=128] 推出，B 片 128 * 128 * 2 = 32KB，本来就装得下——这也正是 QK 侧从来没踩过 L0B 溢出的原因。</p>
+<p>SCFA（topk 稀疏压缩注意力）在 <code>kernel.py:2129-2137</code> 有一处与之逐字符相同的调用，两边的 <code>ncols_a</code> 也是同一个运行期表达式 <code>(ncols + 15) // 16 * 16</code>（<code>506</code> / <code>2011</code>）；差别在更上游的 <code>tw</code>——SCFA（<code>1970-1978</code>）多套一层 <code>T.min(act_cmp, topk_cmp)</code> 的 topk 钳位，CFA（<code>477-481</code>）只用 <code>act_cmp</code>。三个 kernel 里还活着的 <code>T.gemm_v0</code> 调用（<code>654 / 735 / 2130 / 2211</code>）全部是 <code>transpose_B</code> 的 DEBUG_SERIAL 调试路径，所以本算子今天已经没有走 N-tiling 的生产调用点——这条能力在本算子里的位置是「先由它解决 PV 的 L0B 溢出、跑通 4×128 的忠实切分，之后被更细的内核驱动拆分接管」；但作为通用 <code>gemm_v0</code> 对大 N 的必要修复，对任何 headDim 较大的 attention 或普通 GEMM caller，它依然是唯一能用的写法。</p>
+
+<h3>2.7　兼容性与坑</h3>
+<p><strong>兼容性：</strong>老代码逐字节不变靠两个编译期默认值。第一，<code>nTile = (transpose_B || N &lt;= nMaxByL0B) ? N : nMaxByL0B</code>——只要是转置 B 的 caller，或者 N 本来就小于等于单槽装得下的列数（half + <code>kL0Size=128</code> 时是 128），<code>nTile</code> 就等于 N，于是 <code>nL0split = 1</code>。第二，外层 N 循环只跑一轮时 <code>bNOffset = 0</code>、<code>cNOffset = 0</code>、<code>tileIdx == kL0Idx</code>，L0B 槽偏移 <code>pp * (nTile * kL0Size)</code> 退化回原来的 <code>pp * (N * kL0Size)</code>，mma 的模板参数 <code>&lt;M, nTile&gt;</code> 退化回 <code>&lt;M, N&gt;</code>，L0A/L0B 的 prime/drain 位置也和原来完全一致。所有既有 caller 走的都是和改动前同一条展开路径。唯一新增的是编译期检查：原来会在运行期把 cube 打崩的 shape，现在被 static_assert 在编译期挡下来——把静默故障变成显式失败，不影响任何本来就能正确跑的代码。</p>
+<ul>
+  <li>N 必须能被 <code>nTile</code> 整除，否则编译期报 <code>"gemm_v0 N-tiling requires N divisible by the N tile size"</code>。<code>nTile</code> 在 half + <code>kL0Size=128</code> 时是 128，所以大 N 的非转置 caller 实际要求 N 是 128 的倍数。</li>
+  <li>只有 <code>transpose_B == false</code> 的路径会被切。转置 B 的 caller 一律保持 <code>nTile == N</code>，所以一个 N 很大的 <code>transpose_B</code> caller 不会被自动救回来，而是撞上 <code>"gemm_v0: the (kL0Size x nTile) B tile does not fit its L0B ping-pong slot"</code>——这是有意的，因为转置 B 在 L1 里的布局不同，列偏移公式不通用。</li>
+  <li>N-tile 的列偏移写死成 <code>nL0Idx * nTile * roundUp16(K)</code>，这是 zN 布局的 C1 stride。B 在 L1 里必须是默认的 zN 布局；换了别的 layout annotation，这个偏移就是错的，而且是静默算错、不报错。</li>
+  <li>M 方向不切。<code>M * kL0Size * sizeof(T1)</code> 必须 ≤ <code>kL0Budget</code>，M 太大会撞 L0A 那条 static_assert。想要更大的 M 只能调小 <code>kL0Size</code>（但那会同时把 <code>nTile</code> 调大，因为 <code>nMaxByL0B = 32KB / (kL0Size * sizeof(T1))</code>）。</li>
+  <li>乒乓预算是分段的：只有一步（<code>kNumSteps == 1</code>）时单槽可以用满 64KB；一旦 (N-tile, K-tile) 步数大于 1、乒乓真的开始轮转，每槽就只剩 32KB。所以「多加了一个 K 片之后突然编译不过」是预期行为，不是回归。</li>
+  <li>这条修复只在 ascendc 后端。PTO 后端有一套独立的 <code>gemm_v0</code>（<code>src/tl_templates/pto/common.h</code> 里的 <code>gemm_v0_inner</code> / <code>TileMatL0B</code>），没有被覆盖。</li>
+  <li>和 <code>n_actual</code>（<code>transpose_B</code> 路径上运行期少算几列）是两个正交机制，不会同时生效：<code>n_actual</code> 只走转置路径，N-tiling 只走非转置路径。别指望用 <code>n_actual</code> 规避大 N 的 L0B 溢出。</li>
+</ul>
+
+<div class="warn"><strong>L0C 没有 static_assert 兜底。</strong>L0C 容量是 device-dependent（A2/A3 128KB、A5 256KB），而 device 侧模板里拿不到 arch 宏（<code>ASCEND_*_L0C_SIZE</code> 只存在于 host 侧 codegen），写死一个字面量会误拒合法的 A5 caller、或者在 A2/A3 上放行超限的 caller，所以模板只在注释里写明约束、由 caller 自己保证。<code>roundUp16(M) * N * sizeof(T2)</code> 超了不会有任何提示。典型陷阱：M=128、N=512、fp32 累加需要 256KB，在 A2/A3 上会静默踩坏 L0C。</div>
+
+<div class="note"><strong>回归测试怎么设计的：</strong><code>test_tilelang_ascend_language_gemm_v0_n_tiling.py</code> 构造一个最朴素的 <code>C = A @ B</code>（<code>transpose_B=False</code>），整块 A/B 一次拷进 L1，K 切分和 N 切分全部交给 <code>gemm_v0</code> 内部，再和 <code>a @ b</code> 的 torch 结果比。三个 shape 分工不同：<code>(M=64, N=512, K=128)</code> 就是真实的 PV shape，旧代码下 B 片 128KB、是整块 L0B 的两倍，必挂；<code>(64, 512, 256)</code> 把 K 也切成 2 段，专压拍平后的 (N-tile, K-tile) 流水（2 K-tile × 4 N-tile = 8 步），<code>tileIdx</code> 的乒乓槽映射或 <code>cNOffset</code>/<code>bNOffset</code> 算错时是静默错值而不是崩，只有真跑数值比对才抓得到；<code>(128, 128, 128)</code> 则是<strong>旧代码也能跑通</strong>的兼容对照组（K 只有一片、<code>kNumSteps == 1</code>，单槽预算就是整块 64KB，而 L0B 槽 128 * 128 * 2 = 32KB、L0A 槽同样 32KB），用来证明 <code>nL0split == 1</code> 时新循环和原路径等价。dtype 参数化跑 float16 和 bfloat16（bf16 在这个 N/K 下累加误差更大，容差放到 2e-2）。另有一个 session 级 <code>clear_cache</code> fixture 先清 tilelang 缓存——否则一个陈旧的已编译 kernel 会把 codegen 回归整个掩盖掉。M 取 64 而不是 128 也是刻意的：N=512、fp32 累加时 L0C 需要 <code>roundUp16(M) * N * 4</code>，M=128 就要 256KB，只有 A5 放得下。</div>
+
+
+  <!-- ===================== 3 ===================== -->
+<h2 id="s3"><span class="num">3</span>GM↔UB copy / atomic_add 的最内（列）维可以是运行期表达式了 —— 按真实窗口宽度搬，而不是按 buffer 定宽搬</h2>
+
+<div class="prhead">
+  <span class="badge fix">Bugfix</span>
+  <span class="badge merged">已合入 2026-07-17</span>
+  <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1337">PR #1337</a>
+</div>
+
+<blockquote><p><strong>一句话：</strong>原来 GM↔UB 的 <code>T.copy</code> 只能切编译期常量宽度，一旦切成运行期宽度 <code>[..., 0:tw]</code> 就生成非法 C++、内核根本编译不过；现在运行期内层 extent 合法，能只搬真实有效的那几列。</p></blockquote>
+
+<h3>3.1　这块机制是什么</h3>
+<p>昇腾非-PTO（ascendc）codegen 里，GM↔UB 的搬运最终落到 <code>src/tl_templates/ascend/common.h</code> 的两个 C++ 模板函数：<code>copy_gm_to_ub&lt;T, dstN, dstM&gt;</code> 和 <code>copy_ub_to_gm&lt;T, srcN, srcM&gt;</code>。列维 <code>dstN</code> / <code>srcN</code> 是<strong>编译期模板实参</strong>，语义是 UB tile 的行距 —— <code>DataCopyPad</code> 用 <code>(dstN - maskShapeN)</code> 算行间 stride；而这一次实际要搬多少列，由<strong>运行期函数参</strong> <code>maskShapeN</code> 承载（lowering 里叫 <code>validCol_src</code> / <code>validCol_dst</code>，由 <code>compute_valid_extent</code> 从 region 的 extent 算出来）。</p>
+<p>lowering 侧 <code>AscendCopy::Lower</code> 是用 <code>std::stringstream</code> 把模板名和模板实参拼成一个字符串常量，模板实参直接 <code>ss &lt;&lt; PrimExpr</code> 打印进去。所以塞进模板的 PrimExpr 必须是编译期常量，否则打印出来的是 TVMScript 文本，原样进了生成的 .cpp。同一处的行维模板参 <code>dstM</code>（走 <code>compute_blocklen</code>）<strong>早就有</strong> <code>IsInstance&lt;IntImmNode&gt;()</code> 守卫，唯独列维漏了。</p>
+
+<h3>3.2　原来写不出来的东西</h3>
+<p>cfa / scfa 的 vector softmax，UB 和 GM workspace 都是定宽 <code>S2_BASE = 512</code>，但真实窗口宽度（ori 窗 ≤ 128，cmp tile ≤ 512）只有运行期才知道。内核作者想对齐 Ascend C 参考实现 <code>block_vector.h</code> 的 DealBmm1（它只处理 <code>columnCount = actualSingleProcessSInnerSizeAlign</code> 列），把 <code>T.copy</code> 切成运行期宽度，只搬、只写有效的那几列。</p>
+<div class="srcref">改动前会这么写</div>
+<pre><code># UB / GM workspace 都是定宽 S2_BASE = 512,
+# 但真实窗口宽度只有 64 / 128, 且要等 seqused_kv / act_q_lens 读出来才知道
+tw = tir.Select(is_first, win, T.min(S2_BASE, act_cmp - rel * S2_BASE))
+tw_a = (tw + 15) // 16 * 16          # 纯运行期表达式
+
+# 想只搬有效的那几列(= 参考实现 DealBmm1 的 columnCount)
+T.copy(
+    workspace_s[cid, buf, r0 : r0 + M_CHUNK, 0:tw],
+    in_ub[ps, :, 0:tw],
+)
+# ...
+T.copy(
+    out_ub[:, 0:tw_a],
+    workspace_p[cid, buf, r0 : r0 + M_CHUNK, 0:tw_a],
+)</code></pre>
+<div class="sym"><span class="t">会发生什么</span>编译期直接挂，不是算错、也不是挂死 —— 根本编不出二进制。lowering 把 region 的运行期 extent <code>ss &lt;&lt;</code> 进了模板实参，PrimExpr 的流式输出是 TVMScript 文本，于是生成的 .cpp 里出现形如 <code>copy_gm_to_ub&lt;float, T.min(512, act_cmp - rel * 512), 16&gt;(...)</code> 的东西，编译器报 <code>error: use of undeclared identifier 'T'</code>。那个 <code>T</code> 是 TVMScript 的命名空间前缀被原样打印进 C++ 的结果，跟模板里的 <code>typename T</code> 无关，纯属撞名。</div>
+<p><strong>为什么在内核侧绕不过去：</strong></p>
+<ol>
+  <li><strong>数据通路本来就是通的，只差模板那一格。</strong><code>copy_gm_to_ub</code> 的 C++ 侧早就有运行期的 <code>maskShapeN</code> 参数，<code>compute_valid_extent</code> 也一直在正确下传 <code>validCol_*</code>。但前端 <code>T.copy</code> 没有「只给 mask、不切 region」的口子：不切 → extent == shape == 512（满宽搬，零收益）；切 <code>0:tw</code> → 撞模板 bug。死结只能在 codegen 解。</li>
+  <li><strong>没有别的原语能替代。</strong><code>copy_l0c_to_gm</code> 是 L0C→GM，<code>copy_pa</code> 是 paged gather，都发不出「运行期宽度 + strided 连续 GM↔UB」这条 DMA。</li>
+  <li><strong>退回定宽 512 搬的代价。</strong>读侧会把窗口外上一轮遗留在 <code>workspace_s</code> 里的 stale QK 一并读进 UB，而后面定长满宽的 <code>reduce_max</code> / <code>reduce_sum</code> 会读到这段区间 —— 吃的是上一轮的残留分数（内容不可控），lse 与 softmax 分母直接错；写侧每个 m-chunk 都按 512 列满宽写回，而 ori 窗那一支实际只有 ≤ 128 列有效，其余全是废数据 —— 满宽搬运下 msprof 上 CFA vector 的 mte2 是 Ascend C 的 1.8 倍（1722 vs 954）。</li>
+  <li><strong>穷举编译期宽度也不行。</strong><code>tw</code> 由 <code>seqused_kv</code> / <code>act_q_lens</code> 在运行期决定，1..512 全枚举成静态分支是代码爆炸。</li>
+</ol>
+
+<h3>3.3　编译器改了什么</h3>
+<ul>
+  <li><code>src/op/ascend.cc</code> · <code>AscendCopy::Lower</code>（gm2ub 分支）：模板列维改成「extent 是 <code>IntImm</code> 就照用（既有调用逐字节不变），是运行期表达式就回退用 <code>dst-&gt;shape[last]</code>」，回退值再 <code>ICHECK</code> 一次必须是编译期常量。</li>
+  <li><code>src/op/ascend.cc</code> · <code>AscendCopy::Lower</code>（ub2gm 分支）：同一套 <code>IntImm</code> 判定，回退用 <code>src-&gt;shape[last]</code>。</li>
+  <li><code>src/op/ascend.cc</code> · <code>AscendAtomicAdd::Lower</code>：抽出一个 <code>atomic_tmpl_n</code> 按同样规则算好，同时喂给 <code>atomic_add_ub_to_gm&lt;T, N, M&gt;</code> 和非-UB 分支的两处模板实参（原来那两处各自直接用 <code>src_extents[last]</code>）。</li>
+  <li>新增 <code>testing/python/language/test_tilelang_ascend_language_copy_runtime_extent.py</code>（182 行）作为回归测试：GM 张量与 UB tile 全部定宽 512，运行期宽度 <code>n</code> 用 <code>T.symbolic("n")</code> 通过一个 dummy 输入的 shape 带进 kernel，gm2ub / ub2gm / atomic_add 三条路径都切 <code>[..., 0:n]</code>。旧 lowering 在<strong>编译阶段</strong>就崩，测试连跑都跑不到，不需要靠数值断言来抓。</li>
+</ul>
+<p>API 签名一个字没改（<code>T.copy</code> 实为 <code>copy_op.py:257</code> 的 <code>npu_copy_v2</code>，<code>T.tile.atomic_add</code> 在 <code>ascend_tile.py:191</code>），变的只是这两个 API 能接受的 region 形态：方向是 GM→UB / UB→GM（含 atomic_add 的 UB→GM）时，region 的<strong>最内维 slice 上界</strong>现在可以是运行期 PrimExpr —— <code>T.symbolic</code> 变量、<code>tir.Select</code> / <code>T.min</code> 的结果、从 GM 标量算出来的 int32，都行。</p>
+
+<h3>3.4　现在可以这么写</h3>
+<div class="srcref">最小例子</div>
+<pre><code>import tilelang
+import tilelang.language as T
+
+n = T.symbolic("n")  # 运行期列宽:编译期只知道有这么个符号
+
+@T.prim_func
+def main(
+    A: T.Tensor((128, 512), "float"),   # 定宽 GM workspace
+    NW: T.Tensor((n,), "int32"),        # dummy 输入:用它的 shape 把运行期 n 带进 kernel
+    C: T.Tensor((128, 512), "float"),
+):
+    with T.Kernel(2, is_npu=True) as (cid, vid):
+        a_ub = T.alloc_ub((64, 512), "float")   # UB 定宽 512 = 行距
+        # 关键:内层 extent 是运行期表达式 n
+        #   模板列维 -&gt; 回退用 a_ub 的编译期 shape 512(行距)
+        #   真实列数 -&gt; 走函数参 maskShapeN = n
+        #   [n:512] 空档 -&gt; copy 自己 Duplicate 成 pad_value
+        T.copy(
+            A[cid * 64 : cid * 64 + 64, 0:n],
+            a_ub[:, 0:n],
+            pad_value=-T.infinity("float"),
+        )
+        # 满宽写回,把 [n:512] 的空档一起导出 -&gt; pad_value 的效果直接可见
+        T.copy(a_ub, C[cid * 64 : cid * 64 + 64, :])
+
+kernel = tilelang.compile(
+    main,
+    out_idx=[-1],
+    target="ascendc",
+    pass_configs={
+        tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_COMBINE: True,
+        tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_SYNC: True,
+        tilelang.PassConfigKey.TL_ASCEND_AUTO_SYNC: True,
+        tilelang.PassConfigKey.TL_ASCEND_MEMORY_PLANNING: True,
+    },
+)</code></pre>
+<p class="cap">关键在 <code>T.copy</code> 的 <code>0:n</code> —— <code>n</code> 是 <code>T.symbolic</code>，改动前这一行会让生成的 .cpp 编不过。写回方向对称：把最后一句换成 <code>T.copy(a_ub[:, 0:n], C[cid * 64 : cid * 64 + 64, 0:n])</code> 就是上游单测的 round-trip 写法，同样是改动前编不过的形态。<code>pad_value=-T.infinity("float")</code> 不是装饰：删掉它，<code>[n:512]</code> 就从 -inf 变成默认值 0（<strong>不是</strong> UB 里原有的内容），满宽写回的 C 立刻不同。<code>pass_configs</code> 也不能省 —— ascendc 目标的默认 pass 配置是空字典、<code>TL_ASCEND_AUTO_SYNC</code> 默认 False，不开自动同步又不手写 <code>T.set_flag</code> / <code>T.wait_flag</code> 的话，MTE2 还在往 <code>a_ub</code> 写、MTE3 已经可能把它搬走，拿到的是随机脏数而不是编译错误。</p>
+
+<h3>3.5　kernel.py 里的真实用法（一）：SWA 滑窗分数 copy-in（GM→UB）</h3>
+<div class="srcref">kernel.py:3974-3997 · SWA · 单块在线 softmax 的分数搬入</div>
+<pre><code># winm = window length (= Ascend C
+# actualSingleProcessSInnerSize) = 有效列数(动态)。
+# 手拼只搬/算前 winm 列(014 运行期 extent copy),其余
+# 到 BI 用 -inf mask,故不再需要 win_align 对齐。
+winm = s_global + 1 - ori_left
+# copy-in s_ub + sink (MTE2). WAR: wait s_ub free
+# (prev task's compute done reading it) = ref
+# WaitFlag&lt;V_MTE2&gt;(block_vector.h:415).
+T.wait_flag("v", "mte2", SV_S_EV)
+# 手拼替代 007: 先满宽 fill -inf mask, 再用 014(运行期
+# inner-extent copy)只搬有效 winm 列 -&gt; [winm:BI] 保持
+# -inf, 定长满宽 reduce/exp 等价于只算有效列(exp(-inf)=0、
+# max(-inf,·)=·), 绕开"变长 reduce"。fill(V)-&gt;copy(MTE2)
+# 用 SV_S_EV 做一次 V-&gt;MTE2 握手(与下方 copy-&gt;compute 同
+# buffer 的 V&lt;-&gt;MTE2 复用同一 event)。
+T.tile.fill(s_ub, -T.infinity(accum_dtype))
+T.set_flag("v", "mte2", SV_S_EV)
+T.wait_flag("v", "mte2", SV_S_EV)
+T.copy(
+    workspace_s[
+        cid, buf, vid * G2 : (vid + 1) * G2, 0:winm
+    ],
+    s_ub[:, 0:winm],
+)</code></pre>
+<p>SWA 的滑窗每个 query 行块只吃一个 KV tile（<code>BI = 128</code> 列），有效窗口长度 <code>winm = s_global + 1 - ori_left</code>（对应 Ascend C 的 <code>actualSingleProcessSInnerSize</code>）逐 token 变化，是典型的运行期宽度。这里把 <code>[vid*G2, (vid+1)*G2)</code> 这 32 行分数从 <code>workspace_s</code> 搬进 <code>s_ub</code>，只搬前 <code>winm</code> 列。</p>
+<p>需要这个能力的是<strong>撤掉 007 之后</strong>的这版实现，不是一开始就需要：改动前 vector 侧只能满宽搬（<code>workspace_s[cid, buf, vid * G2 : (vid + 1) * G2, :]</code> → <code>s_ub</code>，整整 128 列），窗口对齐由 007 原语 <code>T.tile.softmax_flash_v2</code> 的 <code>columnCount = win_align</code> / <code>actualColumnCount = winm</code> 两个参数承担，库自己只归约有效列。把 007 换成手拼的定长满宽 <code>reduce_max</code> / <code>exp</code> / <code>reduce_sum</code> 之后，窗口外那段就没人替内核挡了 —— 必须靠运行期 inner-extent copy 把搬运停在 <code>winm</code>，让 <code>[winm:BI]</code> 落一个可控的值，而不是上一轮遗留在 <code>workspace_s</code> 里的 stale QK。<code>win_align</code> 本身也是运行期表达式（<code>(win + 15) // 16 * 16</code>），今天仍然活着，只是退到了 cube 侧：<code>kernel.py:3586</code> 定义、喂给 QK mma 的 <code>n_actual</code> 和 <code>kernel.py:3752</code> 的 L0C→GM copy 宽度；第 3977 行注释里的「不再需要 win_align 对齐」只对 vector 侧这条 copy 成立。</p>
+<div class="warn"><strong>这段代码有个待修点。</strong>注释说 <code>[winm:BI]</code> 保持前面 <code>T.tile.fill</code> 打的 -inf，但以当前编译器树的语义（<code>common.h:233-241</code>，早在 PR #648 就随 <code>maskShapeN</code> / <code>padValue</code> 一起引入）这不成立：<code>copy_gm_to_ub</code> 在 <code>maskShapeN != dstN</code>（正是运行期窄搬的情形）时会先 <code>AscendC::Duplicate(dstTensor, padValue, dstM * dstN)</code> 把整个 tile 刷一遍，<code>padValue</code> 来自 <code>T.copy</code> 的 <code>pad_value</code> 参数、默认 0，而 kernel.py 全文没有一处传过它。也就是说空档里现在是 0，不是 -inf，前面那次 fill 白做。要拿回 -inf mask 得显式写 <code>pad_value=-T.infinity(accum_dtype)</code>；同理，满宽 <code>reduce_max</code> 必须排在 <code>exp</code> <em>之前</em>（<code>exp(-inf) = 0</code> 之后 <code>max(·, 0)</code> 就不再中性了），当前 SWA 的顺序（<code>kernel.py:4016</code> reduce_max → <code>4021</code> exp → <code>4035</code> reduce_sum）本身是对的。</div>
+
+<h3>3.6　kernel.py 里的真实用法（二）：CFA 概率 P copy-out（UB→GM）</h3>
+<div class="srcref">kernel.py:1131-1140 · CFA · 运行期窗口宽度的来历</div>
+<pre><code>ori_left = T.max(s_global - ori_win_left, 0)
+win = s_global + 1 - ori_left
+rel = tile - 1
+# inline ternaries (T.min + tir.Select), see QK.
+tw = tir.Select(
+    is_first,
+    win,
+    T.min(S2_BASE, act_cmp - rel * S2_BASE),
+)
+tw_a = (tw + 15) // 16 * 16</code></pre>
+<div class="srcref">kernel.py:1378-1389 · CFA · 在线 softmax 的概率 P 写回</div>
+<pre><code># copy out only the tw_a valid P columns
+# (the cube PV reads exactly the window) --
+# = ref width, saves MTE3 (needs 014).
+T.copy(
+    out_ub[:, 0:tw_a],
+    workspace_p[
+        cid,
+        buf,
+        r0 : r0 + M_CHUNK,
+        0:tw_a,
+    ],
+)</code></pre>
+<p>softmax 算完、cast 成 fp16 的概率 P 要写回 <code>workspace_p</code>，交给 cube 做 PV。cube 那边的 mma 只吃 <code>tw_a</code> 列（K 就是窗口宽），多写的列纯属浪费。两个分支的宽度都要等 <code>seqused_kv</code> / <code>act_q_lens</code> 从 GM 读出来才知道：第一个 tile 走 ori 窗 <code>tw = win</code>，之后的 cmp tile 走 <code>tw = min(S2_BASE, act_cmp - rel * S2_BASE)</code>；<code>tw_a</code> 再向上 16 对齐 —— 16 是为了迁就 mma 的 K 分形，顺带在 fp16 下正好凑成 32B，满足 DataCopyPad 行间 stride 的块粒度。改动前这一行编不过，只能按定宽 <code>S2_BASE = 512</code> 写回，等于每个 m-chunk 白写 <code>512 - tw_a</code> 列废数据（ori 窗那一支 <code>tw_a</code> ≤ 128，即至少 384 列）；注释里的「= ref width, saves MTE3」就是说这行把宽度对齐到了 Ascend C 参考实现只处理 <code>columnCount</code> 列的行为。</p>
+
+<h3>3.7　兼容性与坑</h3>
+<p><strong>兼容性：</strong>走的是「常量原路 / 运行期新路」的默认值机制 —— 模板列维先看 <code>dst_extents[last]</code>（或 ub2gm 的 <code>src_extents[last]</code>）是不是 <code>IntImmNode</code>，是就照用，<code>ss &lt;&lt;</code> 出来的模板字符串<strong>逐字节不变</strong>。而现存所有调用的 inner extent 全是编译期常量：满维 copy 时 extent == shape，常量 slice 时是个常数宽度，所以老代码一行都不会走进新分支。更强的一条论证是反过来的：现有算子全都能编译，这本身就证明它们从没用过运行期 inner-extent（用了就会当场崩），因此回归验证的目标是「确认它们确实没用过」，而不是「验证行为变化是否符合预期」。</p>
+<ul>
+  <li><strong>回退用的是 buffer 的编译期 shape</strong>，也就是模板列维 = UB 的行距。所以 UB buffer 自己的最内维必须是编译期常量；把 buffer 声明成动态宽度仍然会撞 ICHECK（<code>copy_gm_to_ub: the inner (column) dimension of the destination buffer shape must be a compile-time constant, but got ...</code>，ub2gm / atomic_add 各有对应措辞的一条）—— 只是从「生成非法 C++、编译器报一句莫名其妙的 undeclared identifier」变成了「lowering 早失败、报一句人能看懂的话」。</li>
+  <li><strong>空档里的值由 <code>pad_value</code> 决定，不是 UB 里原有的内容。</strong><code>copy_gm_to_ub</code> 在 <code>maskShapeN != dstN</code>（或 <code>maskShapeM != dstM</code>）时先 <code>AscendC::Duplicate(dstTensor, padValue, dstM * dstN)</code> 刷整个 tile，<code>padValue</code> 默认 0。想要 -inf mask 就<strong>显式传</strong> <code>pad_value=-T.infinity(dtype)</code>，别指望 copy 之前自己 <code>T.tile.fill(-inf)</code> 的内容能活下来。这段 Duplicate 还自带 MTE2_V / MTE3_V / V_MTE2 三组 SetFlag·WaitFlag，是笔隐藏开销。</li>
+  <li><strong>Duplicate 还有 dtype 白名单。</strong><code>common.h:41-45</code> 的 <code>IsDuplicateSupported_v</code> 只含 <code>int16_t</code> / <code>uint16_t</code> / <code>half</code> / <code>bfloat16_t</code> / <code>int32_t</code> / <code>uint32_t</code> / <code>float</code>。<code>int8</code>、<code>int64</code>、fp8 这些同样合法的 copy 元素类型走的是「完全不填空档」的路径 —— 空档里既不是 <code>pad_value</code> 也不保证是原内容，满宽计算前必须自己保证它。</li>
+  <li><strong>只修了列维（最内维）。</strong>行维模板参 <code>dstM</code> / <code>srcM</code> 走 <code>compute_blocklen</code>，本来就有 <code>IntImm</code> 守卫；再往外的维度不是模板实参，不受影响。</li>
+  <li><strong>常量窄 slice 的行为没变（刻意的）。</strong><code>[:, 0:64]</code> 这种编译期常量宽度仍然用 extent 当模板列维，于是模板 <code>dstN == maskShapeN</code>，行间 stride 被算成 0 —— 等于把 UB 当成按 64 紧密排列。只有运行期 extent 才会回退成 buffer shape（真实行距）。同一个 buffer 上混用两种写法时，两者的行布局语义<strong>不一样</strong>，要留神。</li>
+  <li><strong>32B 粒度：两个方向用的是同一个 floor 公式。</strong>写侧 <code>copy_ub_to_gm</code> 的 src stride 是 <code>(srcN - maskShapeN) * sizeof(T) / 32</code>（<code>common.h:257</code>），读侧 <code>copy_gm_to_ub</code> 的 dst 行间 gap 是 <code>(dstN - maskShapeN) * sizeof(T) / 32</code>（<code>common.h:246</code>），同型、同样截断。安全前提是 <strong>buffer 最内维的字节数本身是 32 的整数倍</strong>（512 个 fp32 = 2048B，成立）—— 此时 blockLen 向上取整补的那点正好等于 gap 被截掉的那点，行距还原成整行。<code>DataCopyPadExtParams</code> 里的 <code>isPad</code> / <code>rightPadding</code> 只管 GM 侧不足一整块时的补齐，跟 UB 行距的截断无关。kernel.py 的 copy-out 用 <code>tw_a = (tw + 15) // 16 * 16</code>（fp16 → 32B）是迁就 mma 分形顺带满足这条，上游单测也只取 64 / 128 / 256 这种 32B 对齐的 <code>n</code>。</li>
+  <li><strong>只覆盖 gm2ub / ub2gm / atomic_add 这三条路径，剩下的分支没有逐条穷举。</strong>同一个 <code>AscendCopy::Lower</code> 里的 UB→L1（<code>ascend.cc:291</code>，模板列维仍是 <code>ss &lt;&lt; src_extents[last]</code>）和 UB→UB（<code>ascend.cc:310</code>，模板长度是 <code>dst_extents</code> 直接连乘）都还是老写法，运行期 inner-slice 一样会崩成同样的 undeclared-identifier。<code>copy_gm_to_l1</code> / <code>copy_l0c_to_gm</code> / <code>copy_l0c_to_ub</code> 那几条本来就用 <code>shape</code> 填模板，不受影响 —— SWA cube 侧 <code>kernel.py:3752</code> 那句 <code>workspace_s[cid, buf, :, 0:win_align]</code> 就是靠这一点，早在本 PR 之前就能用运行期宽度。</li>
+  <li><strong>修的是非-PTO（ascendc）codegen。</strong>PTO 后端另有一套 <code>copy_gm_to_ub_dynamic</code>（<code>src/tl_templates/pto/common.h:304</code>），不在这次改动范围内，单测 docstring 也写明只针对 ascendc 后端。</li>
+</ul>
+
+
+  <!-- ===================== 4 ===================== -->
+<h2 id="s4"><span class="num">4</span>gemm_v0 / mma 的运行期输出列数 n_actual —— 让 QK 只算真实窗口那几列</h2>
+
+<div class="prhead">
+  <span class="badge feat">Feat</span>
+  <span class="badge merged">已合入 2026-07-17</span>
+  <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1352">PR #1352</a>
+</div>
+
+<blockquote><p><strong>一句话：</strong>原来 gemm 的输出列数只能是编译期模板 N（只能整块 N 列算完，再在下游把尾巴掩掉），现在可以传一个运行期 <code>n_actual</code>，cube 只计算前 n_actual 列。</p></blockquote>
+
+<h3>4.1　这块机制是什么</h3>
+<p>昇腾 cube 的一次矩阵乘由 <code>MmadParams{m, n, k}</code> 描述。TileLang 的 <code>gemm_v0</code> 把 M/N/K 全做成 C++ 模板参数 —— <code>template&lt;T1, T2, M, N, K, transpose_A, transpose_B, kL0Size&gt;</code>。其中 K 早就在调用时被拆成了运行期实参：模板内部按 kL0Size 把 K 切成若干 kL0 tile，每个 tile 把真实的 <code>kSize</code> 传给 <code>mma</code>。唯独 N 一直是编译期常量 —— <code>copy_l1_to_l0b</code> 按模板 N 列搬 L1→L0B，<code>mma</code> 里写死 <code>mmadParams.n = N</code>。</p>
+<p>稀疏 attention 里，每个 query 块真正要打分的 KV 窗口长度是运行期算出来的：SWA 的滑窗长 <code>win</code> 依赖 seqused_kv / act_q_lens，CFA/SCFA 的压缩 tile 按 BI=128 切列块、末块列宽也是运行期值。这一节讲的就是把 N 也变成运行期值：改动前是「M/N 编译期、K 运行期」，改动后 N 跟 K 一样能接一个运行期实参。</p>
+
+<h3>4.2　原来写不出来的东西</h3>
+<p>内核作者想表达的是「这一轮 QK 只算真实窗口那几列」：SWA 里 <code>ori_left = T.max(s_global - ori_win_left, 0)</code>、<code>win = s_global + 1 - ori_left</code>，16 对齐成 <code>win_align</code>；CFA 里 <code>ncols = T.min(BI, tw - cb * BI)</code>、<code>ncols_a = (ncols + 15) // 16 * 16</code>。剩下的 <code>[n_actual:N]</code> 列根本不该进 cube。</p>
+
+<div class="srcref">改动前会这么写</div>
+<pre><code># 改动前 T.gemm_v0 的签名里没有任何表达"只算 n 列"的参数：
+#   def gemm_v0(A, B, C, transpose_A=False, transpose_B=False, init=False, kL0Size=128)
+# 想这么写 ——
+win_align = (win + 15) // 16 * 16          # 运行期窗口宽度，16 对齐
+T.gemm_v0(
+    q_l1[0, :, :],
+    kv_ring[s0, :, :],
+    cL0[cs, :, :],
+    transpose_B=True,
+    init=True,
+    n_actual=win_align,                    # &lt;-- 改动前不存在这个参数
+)
+
+# 只能退而求其次，整 N=128 列全算完：
+T.gemm_v0(q_l1[0, :, :], kv_ring[s0, :, :], cL0[cs, :, :],
+          transpose_B=True, init=True)
+# 然后在 vector 侧把 [win_align:128] 这段掩掉/回避</code></pre>
+
+<div class="sym"><span class="t">会发生什么</span>两种形态。① 直接传列数 → 前端签名里根本没有这个关键字，构造 prim_func 时就崩：<code>TypeError: gemm_v0() got an unexpected keyword argument 'n_actual'</code>。② 退回整 N 写法 → 编译能过、跑得动，但 cube 必然算满 128 列，而 <code>[win_align:128]</code> 那段 L0B 装的是这一轮压根没搬进来的内容（SWA 的分页窗口加载带 <code>if pa_done &lt; win</code> 守卫，只填 win 行，其余是上一个 task 遗留在 ring slot 里的 KV），算出来的分数是垃圾值，必须在 softmax 之前额外掩一遍。更硬的一层：<code>mmadParams.n</code> 恒等于 N，就没有任何办法让配套的 0b11 融合 fixpipe 只搬窄带 —— fixpipe 的 nSize 一旦和 mma 的 n 不一致，fixpipe 会去等一批从来没有被任何 mma 标记 ready 的 cL0 列，cube 直接挂死。</div>
+
+<p><strong>为什么在内核侧绕不过去：</strong>列数是 C++ 模板参数。内核侧唯一的「变通」是按每个可能的窗口宽度实例化一套模板 —— 但窗口宽度是运行期值，做不到。剩下就只有整 N 算完再掩：多一轮 vector mask，窗口只有 32 列的极端行（序列最开头）白算 4 倍 cube、L1→L0B 白搬 4 倍数据。而 unitFlag 那条路是死的：0b11 的 mma↔fixpipe 融合要求 fixpipe 的 nSize == mma 的 n，n 被钉死成 N 时「窄带 fixpipe」整个封死，只能退回加屏障的串行写法。</p>
+
+<div class="note"><strong>省算力是次要收益。</strong>本仓 <code>ori_win_left</code> 取 api.py 的默认值 127，这也是它能取到的最大值（kernel.py 直接拒绝 <code>ori_win_left + 1 &gt; BI</code>），于是 <code>win = min(s_global + 1, 128)</code>：只有序列最前面 127 个因果位置的 win 小于编译期 N=128，8K 序列下约 1.5% 的行才真正收窄。CFA/SCFA 那边 512 宽的 cmp tile 切成 4 个 128 列块，也只有末块可能不满。真正让 n_actual 成为必需品的是 0b11 融合 fixpipe 那条硬约束（见 4.7）。</div>
+
+<h3>4.3　编译器改了什么</h3>
+<ul>
+  <li><code>src/tl_templates/ascend/common.h</code>：<code>mma&lt;T1,T2,M,N&gt;</code> 增加第 6 个形参 <code>uint32_t n_actual = N</code>，<code>mmadParams.n</code> 从编译期 <code>N</code> 改成读这个实参 —— 这是整条能力的 C++ 底座。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：<code>gemm_v0&lt;...&gt;</code> 增加末位形参 <code>uint32_t n_actual = N</code>；transpose_B 分支的 <code>copy_l1_to_l0b&lt;T1,N,K,true&gt;(l0b, B[...], kSize, N)</code> 改成传 <code>n_actual</code>（L0B 只搬真实列），mma 调用传 <code>transpose_B ? n_actual : nTile</code>（非转置路径保持整 nTile，逐字节不变）。</li>
+  <li><code>tilelang/language/ascend.py</code>：<code>gemm_v0(A, B, C, transpose_A, transpose_B, init, kL0Size=128, n_actual=None)</code>；<code>None</code> → 取编译期 N。编译期常量会被前端 assert 校验 <code>0 &lt; n_actual &lt;= N</code> 且 <code>n_actual % 16 == 0</code>（分形列粒度），运行期 tir 表达式不检查。</li>
+  <li><code>src/op/ascend.cc</code>：<code>ascend_gemm_v0</code> builtin 的 <code>set_num_inputs(5)</code> 改成 <code>set_num_inputs(6)</code>，多出来的那一位就是 n_actual。</li>
+  <li><code>src/target/codegen_ascend.cc</code>：<code>GemmOpCodegen</code> 在 <code>clear</code>（args[4]）之后无条件多打印一个 <code>PrintExpr(op-&gt;args[5])</code>，把 n_actual 落到生成的 C++ 调用尾巴上。</li>
+  <li><code>testing/python/language/test_tilelang_ascend_language_gemm_v0_n_actual.py</code>：新增真机单测。</li>
+</ul>
+
+<p><strong>与 #1422 的关系：</strong>#1352 把 <code>mmadParams.n</code> 变成 C++ 层的运行期形参（底座），但只经由 <code>gemm_v0</code> 暴露；#1422 才把同一个形参接到前端的 <code>T.mma</code>（<code>tilelang/language/customize.py</code> 的 <code>npu_gemm(A, B, C, init=False, n_actual=None, unit_flag=None, k_actual=None)</code>），并把 <code>ascend_mma</code> builtin 改成变参 <code>set_num_inputs(-1)</code>、codegen 按需追加尾参。本仓生产路径用的是 <code>T.mma(..., n_actual=...)</code> 这条，底下调的正是 #1352 加出来的那个形参。</p>
+
+<h3>4.4　现在可以这么写</h3>
+<div class="srcref">最小例子</div>
+<pre><code>from tilelang.intrinsics import make_zn_layout, make_nz_layout
+
+@T.prim_func
+def qk(Q: T.Tensor([1, 64, 128], "float16"),
+       K: T.Tensor([1, 128, 128], "float16"),
+       S: T.Tensor([1, 64, 128], "float")):
+    with T.Kernel(1, is_npu=True) as (cid, vid):
+        q_l1 = T.alloc_L1([64, 128], "float16")
+        k_l1 = T.alloc_L1([128, 128], "float16")
+        l0c = T.alloc_L0C([64, 128], "float")
+        T.annotate_layout({
+            q_l1: make_zn_layout(q_l1),
+            k_l1: make_nz_layout(k_l1),
+        })
+        T.copy(Q[0, :, :], q_l1[:, :])
+        T.copy(K[0, :, :], k_l1[:, :])
+        # 模板 N 仍然是 l0c 的 128 列，但这一轮只算前 112 列
+        T.gemm_v0(q_l1, k_l1, l0c, transpose_B=True, init=True, n_actual=112)
+        T.copy(l0c, S[0, :, :])</code></pre>
+<p class="cap">关键只在 <code>n_actual=112</code> 这一行：模板 N 依旧是 l0c 的 128 列（buffer、L0C 排布都不变），但 <code>copy_l1_to_l0b</code> 只搬 112 列、<code>mmadParams.n</code> 也是 112，<code>S[:, :, 112:128]</code> 停留在 L0C 的初值，由调用方自行 mask。把 <code>n_actual=112</code> 删掉就退回整 128 列的老行为 —— 前端把 <code>None</code> 补成编译期 N，生成的 C++ 只是调用尾部多一个 <code>, 128</code> 实参，展开后与改动前完全等价。112 = 7×16 必须是 16 的倍数（分形列粒度）；这里写的是编译期常量所以会被前端 assert 校验，实际算子里传的是 <code>(win + 15) // 16 * 16</code> 这种运行期表达式。</p>
+
+<h3>4.5　kernel.py 里的真实用法（一）：SWA QK 打分</h3>
+<div class="srcref">kernel.py:3644-3669 · SWA · QK 打分（ComputeMm1 解构成 4 个内核驱动的 mma）</div>
+<pre><code>T.wait_flag("mte2", "mte1", KV_EV0)
+T.wait_flag("m", "mte1", L0AB_EV0)
+T.copy(q_l1_0[:, 0:KL0], p_l0a[0, :, :])
+T.copy(
+    kv_ring[0, :, 0:KL0],
+    v_l0b[0, :, :],
+    transpose=True,
+    real_k=KL0,
+    real_n=win_align,
+)
+T.set_flag("mte1", "m", L0AB_EV0)
+T.wait_flag("mte1", "m", L0AB_EV0)
+T.mma(
+    p_l0a[0, :, :],
+    v_l0b[0, :, :],
+    cL0[cs, :, :],
+    init=True,
+    k_actual=KL0,
+    n_actual=win_align,
+    unit_flag=0b10,
+)
+# tiny-tile hazard barrier, gated on the RUNTIME
+# mma n exactly as the template: (M/16)*(n/16) &lt;
+# 10 with M=G=64 means win_align &lt;= 32.
+if win_align &lt; 40:
+    T.pipe_barrier("m")</code></pre>
+<p>n_actual 在生产路径上的主战场。SWA 的滑窗左端 <code>ori_left = T.max(s_global - ori_win_left, 0)</code>、窗口长 <code>win = s_global + 1 - ori_left</code>（kernel.py:3511-3512）全是运行期值，第 3586 行 <code>win_align = (win + 15) // 16 * 16</code> 把它抬到 16 的分形列粒度。cL0 一块是 [G=64, BI=128]，序列开头的行真实窗口可能只有 32 或 48 列。这段把 ComputeMm1 拆成 4 个内核驱动的 mma（2 个 256 宽的 D-half × 每 half 2 个 KL0=128 的 K-tile，K 累加进同一个 cL0 slot），4 个都带 <code>n_actual=win_align</code>。配套的 <code>T.copy(..., transpose=True, real_k=KL0, real_n=win_align)</code> 让 L0B 的 nZ 分形按同一个列数推 K-block stride，两者必须一致 —— 只改 mma 的 n 而不改搬运，连算出来的那几列都是错的。连第 3668 行 <code>if win_align &lt; 40</code> 这条 tiny-tile 冒险屏障的判据，用的也是这个运行期的 n。</p>
+
+<h3>4.6　kernel.py 里的真实用法（二）：CFA/SCFA 的对拍路径</h3>
+<div class="srcref">kernel.py:652-661 · CFA · QK 打分的 DEBUG_SERIAL 对拍分支</div>
+<pre><code>T.wait_flag("mte2", "mte1", ev0)
+if DEBUG_SERIAL:
+    T.gemm_v0(
+        q_l1[0, :, :],
+        kv_ring[s0, :, :],
+        cL0[cs, :, :],
+        transpose_B=True,
+        init=True,
+        n_actual=ncols_a,
+    )</code></pre>
+<p>#1352 的前端参数 <code>T.gemm_v0(..., n_actual=...)</code> 在本仓的直接用户。CFA 把一个 cmp tile 的 512 列切成 <code>MAX_COLBLK = 4</code> 个 BI = 128 的列块（第 503 行 <code>for cb in range(MAX_COLBLK)</code>），每块的真实列数是第 505–506 行的 <code>ncols = T.min(BI, tw - cb * BI)</code> 和 <code>ncols_a = (ncols + 15) // 16 * 16</code>；<code>tw</code> 是这个 tile 的运行期列宽（ori tile 取滑窗长 win，cmp tile 取 <code>T.min(S2_BASE, act_cmp - rel * S2_BASE)</code>，第 477 行的 <code>tir.Select</code>），所以最后一个列块几乎总是不满 128 列。<code>DEBUG_SERIAL</code> 是编译期 Python 常量（生产为 False），True 时走这条加满 <code>T.barrier_all</code> 的原封 gemm_v0 模板路径，用来和 else 分支解构出来的 4 个 <code>T.mma(n_actual=ncols_a)</code> 对拍。它必须能表达同样的「只算 ncols_a 列」语义 —— 否则调试路径算满 128 列、生产路径只算窄带，两边结果天然对不上，对拍就失去意义。SCFA 第 2128–2137 行是逐字节相同的一份（<code>ncols_a</code> 定义在第 2011 行）。</p>
+
+<h3>4.7　kernel.py 里的真实用法（三）：0b11 融合 fixpipe 的硬约束</h3>
+<div class="srcref">kernel.py:825-840 · CFA · QK 分数落盘（融合 fixpipe）</div>
+<pre><code>else:
+    # 0b11 fixpipe nSize MUST equal the
+    # mma's n_actual=ncols_a (else it waits
+    # cL0 cols [ncols_a:BI] no mma marked -&gt;
+    # hang). So the band is ncols_a wide
+    # (row stride still 512 = ws_s width).
+    T.copy(
+        cL0[cs, :, 0:ncols_a],
+        workspace_s[
+            cid,
+            buf,
+            :,
+            cb * BI : cb * BI + ncols_a,
+        ],
+        unit_flag=0b11,
+    )</code></pre>
+<p>这段说明为什么 n_actual 不只是「省点算力」，而是这条流水必须存在的前提。生产路径每个列块的最后一个 mma 带 <code>unit_flag=0b11</code>，硬件把它和紧随其后的 fixpipe 配成一对流水（让 fixpipe(cb) 与 mma(cb+1) 在 cL0 ping-pong 上重叠）；配对的前提是 fixpipe 的 nSize 等于那个 mma 的 n。所以这里的 fixpipe 只能搬 <code>cL0[cs, :, 0:ncols_a]</code> 这条窄带到 <code>workspace_s[cid, buf, :, cb*BI : cb*BI + ncols_a]</code>（行 stride 仍是 512 = ws_s 宽度）。如果 mma 的 n 只能是编译期 128（#1352 之前），要么 fixpipe 也搬满 128 列 —— <code>[ncols_a:128]</code> 是垃圾分数，下游还得多一轮 mask；要么按窄带搬 —— 那 fixpipe 会去等 <code>[ncols_a:128]</code> 这些从没被任何 mma 标记 ready 的 cL0 列，cube 直接挂死。代码里第 826–830 行的注释记的就是这件事。SWA 侧对应的是第 3750–3754 行的 <code>T.copy(cL0[cs, :, :], workspace_s[cid, buf, :, 0:win_align], unit_flag=0b11)</code>。</p>
+
+<h3>4.8　兼容性与坑</h3>
+<p><strong>兼容性：</strong><code>n_actual</code> 在 C++ 侧是带默认值 <code>= N</code> 的<strong>尾参数</strong>，在 <code>tilelang/language/ascend.py</code> 的前端是 <code>n_actual=None → N</code>。老的 <code>mma(A, B, C, init, K)</code>、<code>gemm_v0(A, B, C, l0a, l0b, clear)</code>、<code>T.gemm_v0(A, B, C, transpose_B=True, init=True)</code> 一个字符都不用改，行为完全等价：<code>mmadParams.n</code> 仍然是编译期 N、<code>copy_l1_to_l0b</code> 仍然搬 N 列。非 transpose_B 路径更是显式传 <code>nTile</code>（不是 n_actual），从机制上完全不受影响。</p>
+<p><strong>注意「逐字节不变」的边界：</strong>逐字节不变的是 C++ 模板层的既有调用方（默认实参补上，展开结果一致）。ascendc 后端<strong>生成的 C++ 文本会变</strong> —— <code>GemmOpCodegen</code> 无条件追加 args[5]，老调用现在发出的是 <code>tl::ascend::gemm_v0&lt;...&gt;(a[..], b[..], c[..], ascend_l0a, ascend_l0b, true, 128);</code>，尾部比改动前多一个值等于 N 的实参。本仓惯例是 dump codegen 做文本对拍，按「逐字节一致」去 diff 会被这个多出来的实参误导。</p>
+<div class="warn">补 N 的只有 <code>tilelang/language/ascend.py</code> 这一个前端。同名的 PTO 前端 <code>tilelang/language/pto.py</code> 的 <code>gemm_v0</code> 签名里没有 n_actual，仍然只发 5 个实参给同一个 <code>tl.ascend_gemm_v0</code>，与 <code>src/op/ascend.cc</code> 的 <code>set_num_inputs(6)</code> 对不上；目前没有运行期后果，仅仅因为 <code>codegen_ascend_pto.cc</code> 只读 <code>op-&gt;args[4]</code>。一旦 PTO 侧发出的调用被非-PTO codegen（读 args[5]）处理就会越界。</div>
+<ul>
+  <li>只在 transpose_B（QK）路径生效。非转置的 gemm_v0（PV 那条）传 n_actual 不会报错，但模板内部 mma 拿到的是 <code>nTile</code>、<code>copy_l1_to_l0b</code> 也照 N 搬 —— 想在非转置路径上收窄用的是另一套手段（PV 用 <code>real_k</code> / <code>k_actual</code> 限 K，N 保持编译期宽度）。</li>
+  <li>必须是 16 的倍数（分形列粒度）且 <code>0 &lt; n_actual &lt;= N</code>。编译期常量会在前端被 assert 拦下；运行期 tir 表达式不会被检查，是调用方的责任 —— 所以 kernel.py 里到处是 <code>(win + 15) // 16 * 16</code> / <code>(ncols + 15) // 16 * 16</code> 这种手工上取整。</li>
+  <li><code>[n_actual:N]</code> 那段 cL0 列永远不会被写，停在 L0C 的初值或上一轮残留。下游必须自己 mask / 回避，绝不能当成 0 来用。</li>
+  <li>配 <code>unit_flag=0b11</code> 用时，随后那个融合 fixpipe（<code>T.copy(cL0 -&gt; GM, unit_flag=0b11)</code>）的 nSize 必须等于 mma 的 n_actual。不一致的话 fixpipe 会去等一批从没被任何 mma 标记 ready 的 cL0 列，cube 挂死（不是算错，是卡住）。</li>
+  <li>单独改 mma 的 n 不够。L0B 的 nZ 分形从列数推 K-block stride，L1→L0B 的搬运必须同步带 <code>real_n=&lt;同一个值&gt;</code>（<code>T.copy(..., transpose=True, real_k=..., real_n=...)</code>），否则连算出来的那几列都是错的。<code>gemm_v0</code> 内部已经做了这一步；用解构的 <code>T.mma</code> 时要自己配对写。</li>
+  <li>C++ mma 的形参顺序是 <code>(..., init, K, n_actual, unitFlag)</code> —— n_actual 插在 unitFlag 前面。前端 <code>T.mma</code> 里 <code>n_actual</code> 和 <code>unit_flag</code> 只要有一个非 None，另一个就会被补成无害默认值（N / 0）一起以位置参数发出去。</li>
+  <li>别把 n_actual 写成 <code>T.if_then_else</code> 之类会 lower 成语句的表达式：mma 的 codegen 是边写调用边打印实参，临时变量声明会插进半写好的调用中间，生成非法 C++。kernel.py 因此把 4 个 mma 逐条展开而不是写成 kk 循环。</li>
+  <li>PTO 后端（<code>codegen_ascend_pto.cc</code>）有自己的 gemm_v0 codegen，会忽略这个尾参；本仓的 Ascend codegen 永远走非-PTO 的 <code>codegen_ascend.cc</code>。</li>
+</ul>
+<p><strong>上游单测：</strong><code>testing/python/language/test_tilelang_ascend_language_gemm_v0_n_actual.py</code>。真机（<code>.npu()</code>）跑 transpose_B 的 <code>S = Q @ K^T</code>，target 限定 <code>ascendc</code>，dtype 覆盖 float16 / bfloat16，参数化 4 组 <code>(block_M, block_N, dim, n_actual)</code>：<code>(64,128,128,None)</code> 是兼容基线、<code>(64,128,128,64)</code>、<code>(64,128,128,112)</code>（112 = 7×16，一个刁钻的非平凡部分宽）、<code>(64,256,128,128)</code>（N=256 时窗口 128）。断言只比对 <code>s[:, :, :win]</code>，因为 <code>[win:N]</code> 从没被 mma 写过 —— 这个「只比对窄带」的断言恰恰是 stride 一致性的探针：只要有人只改了 mma 的 n、忘了让 <code>copy_l1_to_l0b</code> 跟着传 n_actual，L0B 的 nZ 分形就会按 N 列去推 K-block stride，连被断言的前 win 列都会算错。把这个测试拿到改动前的仓上跑，四组（含 <code>n_actual=None</code> 的兼容基线，测试无条件以关键字传参）全部在构造 prim_func 时抛 <code>TypeError: gemm_v0() got an unexpected keyword argument 'n_actual'</code>，连带 fp16/bf16 共 8 个用例全崩 —— 关键字本身不存在，传 None 也不例外。默认路径的等价性由改动后 <code>n_actual=None</code> 这一组与旧仓上手工删掉该关键字的版本结果一致来体现。</p>
+
+
+  <!-- ===================== 5 ===================== -->
+<h2 id="s5"><span class="num">5</span>exp_experiment：带行 stride 的掩码 exp —— 在物理宽 512 的分数缓冲里，原地只 exp 窗口那 64 列</h2>
+
+<div class="prhead">
+  <span class="badge feat">Feat</span>
+  <span class="badge merged">已合入 2026-07-17</span>
+  <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1399">PR #1399</a>
+</div>
+
+<blockquote><p><strong>一句话：</strong>原来 <code>T.tile.exp</code> 只有「从切片起点连续数 N 个元素」这一种语义，要在 [16, 512] 的分数缓冲上只 exp 每行前 64 列，就得逐行发 16 条 Exp；现在一条 <code>T.tile.exp_experiment</code> 覆盖所有行，行与行之间按 buffer 声明里的物理列数自动 stride。</p></blockquote>
+
+<h3>5.1　这块机制是什么</h3>
+<p>在线 softmax 的分数缓冲在 kernel.py 里是 <code>in_ub = T.alloc_ub([2, M_CHUNK, S2_BASE], accum_dtype)</code>，物理宽度写死 <code>S2_BASE = 512</code>：宽 cmp tile 要用满这 512 列，而 cast、copy-out、p_l1 的行距也全按 512 算。但单个 tile 的真实有效列数 <code>tw</code> 常常只有滑窗那点宽度（<code>tw &lt;= BI = 128</code>），剩下几百列是 padding。</p>
+<p>昇腾的向量指令天生有 mask + repeat + repStride 三件套：一次 repeat 处理 64 个 fp32（= 8 个 32B block），repeat 之间按 repStride 个 block 往前跳。硬件本来就能表达「每行只算前 64 列、行间跳 512」，缺的只是把这套参数从 TileLang 前端发出去的通道。二元侧已经有 <code>row_expand_sub_experiment</code> / <code>row_expand_div_experiment</code> 这一族在这么干，一元的 exp 没有对应件 —— 这一节补的就是它。</p>
+
+<h3>5.2　原来写不出来的东西</h3>
+<p>内核作者想表达的是：在 [M_CHUNK, 512] 的分数缓冲上原地做 <code>P = exp(S - rowmax)</code>，但只碰前 <code>tw_64</code> 列（64 对齐后的有效窗口），既不整块算 512 列，也不把有效列压实到临时 tile。</p>
+
+<div class="srcref">改动前会这么写</div>
+<pre><code># 写法 A：整块 exp —— 编得过、算得也对（padding 是 -inf，exp 后为 0），但纯浪费
+T.tile.exp(in_ub[ps, :, :], in_ub[ps, :, :])
+
+# 写法 B：直接切窄窗口 —— 也编得过，但答案是错的
+for kc in range(BI // 64):
+    if kc * 64 &lt; tw_64:
+        T.tile.exp(
+            in_ub[ps, :, kc * 64 : kc * 64 + 64],
+            in_ub[ps, :, kc * 64 : kc * 64 + 64],
+        )
+
+# 写法 C：压实到窄 tile 再 exp 再搬回 —— 多一块 UB + 两次搬运，in-place 拆成三步
+T.copy(in_ub[ps, :, 0:tw_64], narrow_ub)
+T.tile.exp(narrow_ub, narrow_ub)
+T.copy(narrow_ub, in_ub[ps, :, 0:tw_64])
+
+# 写法 D：逐行发 —— 语义正确，但一个 64 列 chunk 就是 M_CHUNK 条 Exp
+for i in range(M_CHUNK):
+    T.tile.exp(
+        in_ub[ps, i, kc * 64 : kc * 64 + 64],
+        in_ub[ps, i, kc * 64 : kc * 64 + 64],
+    )</code></pre>
+
+<div class="sym"><span class="t">会发生什么</span>写法 B 是<strong>静默算错</strong>：不报错、不挂、编译产物看起来完全正常。前端 <code>unary_op</code>（<code>tilelang/language/ascend_tile.py:944-967</code>）把 BufferRegion 的 extent 拍平成 <code>size_0 = math.prod(dst_extent)</code>，<code>in_ub[ps, :, kc*64 : kc*64+64]</code> 的 extent 是 [1, 16, 64]，<code>size_0 = 1024</code>；codegen 走 <code>UnaryVecOpCodegen(op, "AscendC::Exp")</code>，发出 <code>AscendC::Exp(dst, src, 1024)</code> —— 这是<strong>连续 count</strong> 语义，从切片起点一路往后数 1024 个 fp32。in_ub 的物理行距是 512，1024 / 512 恰好是整整两行：<code>kc = 0</code> 那次把第 0、1 行<strong>整行</strong>（窗口连同 padding）exp 掉，第 2~15 行一个元素都没碰。<code>tw_64 = 128</code> 要发第二块时（起点偏移 64、同样 1024 个元素），第 0、1 行已经 exp 过的部分被再 exp 一次成 <code>exp(exp(x))</code>，还溢进第 2 行的前 64 列。净效果是第 2 行起的「P」停在 <code>score - rowmax</code> 这个负数上，紧接着的 <code>T.reduce_sum</code> 把负数累进 denom —— denom 和 P 同时错，vs golden 的 mismatch 既不像 race 也不像 QK 的锅。覆盖到的行数随 dtype / chunk 变（= 切片 extent / 物理列数），fp16 的 128 列 chunk 是前 4 行。</div>
+
+<p><strong>为什么在内核侧绕不过去：</strong>分数缓冲的物理宽度不能改窄 —— 同一块 in_ub 还要给宽 cmp 路径用（<code>tw</code> 最大就是 512），cast、copy-out、p_l1 的行距也全按 512 算，声明成 [M, 64] 整条链都得跟着改。于是内核侧<strong>能写对</strong>的只剩三条：整块算 512 列（窄窗时白算 8 倍的超越函数）；压实到临时 tile（多一块 UB、两次搬运，还把原地操作拆成三步、要补跨 pipe 握手，V 流水更长）；或者写法 D 逐行发 —— 每行一条 <code>AscendC::Exp(dst, src, 64)</code>，语义完全正确，代价是<strong>一个 64 列 chunk 要发 M_CHUNK = 16 条 Exp</strong>，再乘上 NMC 个 m-chunk、每个 tile、每个 task，而且 Python 层的行循环会被展开，生成的 C++ 也跟着膨胀 16 倍。exp_experiment 把同一件事压成 1 条指令：16 个 repeat，跨行的偏移交给硬件的 repStride。</p>
+
+<h3>5.3　编译器改了什么</h3>
+<ul>
+  <li><code>tilelang/language/ascend_tile.py</code>：新增前端 <code>exp_experiment(dst, src)</code>，用 <code>_handle_buffer_region_2d</code> 把 ND 切片折成 [rows, cols]，校验 dst/src 形状相等、dtype 是 fp16/fp32、最后一维正好是 64（fp32）/ 128（fp16），发 <code>tl.ascend_exp_experiment</code> intrin。</li>
+  <li><code>src/op/ascend.cc</code> + <code>src/op/ascend.h</code>：注册 <code>ascend_exp_experiment</code> builtin（<code>set_num_inputs(-1)</code>、<code>kOpaque</code>），与 <code>row_expand_*_experiment</code> 一族并列。</li>
+  <li><code>src/target/codegen_ascend.cc</code>：新增 <code>ExpExperimentCodegen</code> —— 从 <code>buffer_shapes_</code> 里读出 dst buffer <strong>声明</strong>的最后一维（物理列数 <code>cols</code>）算 <code>rep_stride = cols / elems_per_block</code>，从 access_ptr 的 extent 算 <code>repeat_time = extent / (8 * elems_per_block)</code>（对 [rows, 64] 切片正好等于 rows），并对 extent、cols 的整除性下 ICHECK。</li>
+  <li><code>src/target/codegen_ascend.cc</code>（dispatch）：<code>VisitExpr_(CallNode*)</code> 里加一条 <code>else if (op-&gt;op.same_as(tl::ascend_exp_experiment())) ExpExperimentCodegen(op);</code>。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：新增 <code>exp_mask&lt;T&gt;(dst, src, mask0, mask1, repeatTime, dstBlkStride, srcBlkStride, dstRepStride, srcRepStride)</code>，内部拼 <code>AscendC::UnaryRepeatParams</code> 后调 <code>AscendC::Exp&lt;T, false&gt;</code> —— 就是 <code>sub_mask</code> / <code>div_mask</code> 的一元镜像。</li>
+  <li><code>src/transform/common/operation_config.h</code>：登记 <code>{"tl.ascend_exp_experiment", {{{1, "write"}, {2, "read"}}, "PIPE_V"}}</code>，让同步插入 pass 知道它跑在 PIPE_V、arg1 写 arg2 读。</li>
+  <li><code>src/target/codegen_ascend.h</code>：声明 <code>void ExpExperimentCodegen(const CallNode *op);</code>。</li>
+</ul>
+
+<p><strong>生成的 C++：</strong><code>tl::ascend::exp_mask&lt;T&gt;(dst, src, 0xFFFFFFFFFFFFFFFF, mask1, repeat_time, 1, 1, rep_stride, rep_stride);</code>。其中 fp32 的 <code>mask1 = 0</code>、fp16 的 <code>mask1 = 0xFFFFFFFFFFFFFFFF</code>；<code>elems_per_block = 256 / bits</code>（fp32 8、fp16 16）；in_ub 的 512 列 fp32 → <code>rep_stride = 64</code>；[16, 64] 的切片 → <code>repeat_time = 16</code>，一行一个 repeat。前端只有两个位置参数，count / mask / stride 全部由 codegen 从 buffer 声明推。</p>
+
+<h3>5.4　现在可以这么写</h3>
+<div class="srcref">最小例子</div>
+<pre><code>M, N = 16, 512   # 分数缓冲的物理宽度写死 512
+CH = 64          # fp32 一次调用正好 64 列(fp16 是 128)
+VALID = 40       # 本 tile 真实有效列数,故意不是 64 的整数倍
+
+@T.prim_func
+def main(A: T.Tensor((M, N), "float"), C: T.Tensor((M, N), "float")):
+    with T.Kernel(1, is_npu=True) as (cid, vid):
+        a_ub = T.alloc_ub([M, N], "float")
+        row_max = T.alloc_ub([M, 1], "float")
+        brcb = T.alloc_ub([M, 8], "float")
+        # 满宽铺 -inf,再只搬有效的 40 列:[40:64] 这段对齐 slop 留 -inf
+        T.tile.fill(a_ub, -T.infinity("float"))
+        T.copy(A[:, 0:VALID], a_ub[:, 0:VALID])
+        # rowmax 走满宽:padding 是 -inf,不影响 max
+        T.reduce_max(a_ub, row_max, dim=-1)
+        T.tile.brcb_experiment(brcb, row_max, M // 8, 1, 8)
+        # 只有这两行是窄的:原地只碰 [0:64],行间按声明的 512 列 stride
+        T.tile.row_expand_sub_experiment(a_ub[:, 0:CH], a_ub[:, 0:CH], brcb)
+        T.tile.exp_experiment(a_ub[:, 0:CH], a_ub[:, 0:CH])
+        T.copy(a_ub, C)   # [64:512] 仍是 fill 写下的 -inf</code></pre>
+<p class="cap">一段手拼的窄窗口 softmax：缓冲物理宽 512，真实有效只有 40 列。关键在最后那行 <code>T.tile.exp_experiment</code> —— 它对 16 行各发一个 repeat（每 repeat 64 个 fp32），行间按 buffer 声明的 512 列 stride 跳，一次调用就把 16 行的窗口全 exp 了，[64:512] 那 448 列一个字节不动。同一行换成 <code>T.tile.exp(a_ub[:, 0:CH], a_ub[:, 0:CH])</code> 编译照样过，发出的却是 <code>AscendC::Exp(dst, src, 1024)</code> 连续 count，只覆盖前 2 行、其余 14 行原封不动。<code>VALID = 40</code> 是刻意的：exp_experiment 的 mask 传的是全 1（窄化靠 repeat 次数 × repStride，不是列掩码），所以 [40:64] 这段对齐 slop 一定会被 exp —— 开头「满宽 fill(-inf) → 只搬有效列」的顺序就是为了让 slop 保持 -inf，exp 后是 0，无害。反过来写成先 copy 满宽再 fill，fill 就成了死语句。</p>
+<div class="note"><code>T.reduce_max</code> 这里走的是<strong>满宽</strong>。窄列切片上的行归约（<code>T.reduce_max(a_ub[:, 0:CH], ...)</code> 按物理行宽 512 跨行）是另一件事，要 reduce codegen 认识物理行宽，那是 #1422 里的改动；只有 #1399 的树上那么写会拿第 0 行的若干块当成 16 行的 rowmax，静默算错。exp_experiment 本身不依赖它。上游单测里没有 fill / reduce，只有 <code>T.copy</code> + 分块 exp_experiment + <code>T.copy</code>，pass_configs 打开了 <code>TL_ASCEND_AUTO_SYNC</code>，fill(PIPE_V) → copy(MTE2) 之间的握手由 pass 插；手写同步的 kernel 要自己补 <code>T.set_flag("v", "mte2", ev)</code> / <code>T.wait_flag(...)</code>（kernel.py:1168-1169 那对）。</div>
+
+<h3>5.5　kernel.py 里的真实用法（一）：CFA / SCFA 在线 softmax 的窄窗路</h3>
+<div class="srcref">kernel.py:1271-1306 · CFA · 在线 softmax 窄窗路（SCFA:2886-2921 逐字节同构）</div>
+<pre><code>T.tile.brcb_experiment(
+    brcb_s,
+    m_i[buf, mc, :, :],
+    M_CHUNK // 8,
+    1,
+    8,
+)
+# ... 1278-1292：第一个 for kc 循环用 row_expand_sub_experiment
+#     按完全相同的 64 列分块原地做 score - rowmax
+for kc in range(BI // 64):
+    if kc * 64 &lt; tw_64:
+        T.tile.exp_experiment(
+            in_ub[
+                ps,
+                :,
+                kc * 64 : kc * 64 + 64,
+            ],
+            in_ub[
+                ps,
+                :,
+                kc * 64 : kc * 64 + 64,
+            ],
+        )</code></pre>
+<p>每个 KV tile 在线 softmax 的主体，跑在 vector 核上。<code>in_ub</code> 是 <code>[2, M_CHUNK, S2_BASE]</code> = [2, 16, 512] 的 fp32 分数 ping-pong 缓冲（<code>ps</code> 是 m-chunk 的 ping-pong 槽），物理宽 512 固定不变；本 tile 真实有效的只有前 <code>tw</code> 列，<code>tw_64</code> 是它 64 对齐后的宽度，<code>BI // 64 = 2</code> 所以最多两块。<code>brcb_experiment</code> 先把 [M, 1] 的行最大值扇出成 [M, 8]，第一个循环逐 64 列块原地做 <code>score - rowmax</code>，第二个循环就是这里的 <code>exp_experiment</code>，用同一套分块把它 exp 成 P。三步连起来是一条<strong>全程只碰 [0:tw_64]、不压实、不搬运</strong>的手拼在线 softmax：数据一直待在原来那块 [16, 512] 缓冲里，跨行的偏移由 codegen 从 buffer 声明推出来的 64 个 32B block 承担。<code>if kc * 64 &lt; tw_64</code> 是运行时守卫（<code>tw</code> 依赖 <code>s_global</code>，编译期定不了），保证只对真正落进窗口的块发指令。SCFA 段（2886-2921）与这里逐字节相同，差别只在 <code>tw</code> 的来源：CFA 是 <code>tw = tir.Select(is_first, win, T.min(S2_BASE, act_cmp - rel * S2_BASE))</code>（kernel.py:1135-1139），SCFA 多一层 topk 截断 <code>tw = tir.Select(is_first, win, T.min(S2_BASE, T.min(act_cmp, topk_cmp) - rel * S2_BASE))</code>（kernel.py:2746-2754，<code>cmp_tiles</code> 同样按截断后的长度算，kernel.py:2736-2738）。</p>
+
+<h3>5.6　kernel.py 里的真实用法（二）：窄窗口的前置约定</h3>
+<div class="srcref">kernel.py:1140-1149 · CFA · 每个 tile 的宽度对齐与窄/宽分路</div>
+<pre><code>tw_a = (tw + 15) // 16 * 16
+# 64-align for strided masked ops (每 chunk = 64 fp32/
+# repeat 上限)。[tw:tw_64] 留 fill(-inf) -&gt; reduce 忽略、
+# exp-&gt;0;tw_a&lt;=tw_64 故 copy-out [0:tw_a] 全在算过的范围内。
+tw_64 = (tw + 63) // 64 * 64
+# softmax reduce/sub/exp 按**实际宽度**分路(不是 ori/cmp):
+# 窄窗(tw&lt;=BI:ori 窗 + cfa 的窄 cmp)走 strided-in-place 省
+# padding;宽窗(tw&gt;BI,只 scfa 的宽 cmp,最多 512)走满宽——
+# 无 padding 可省时一条宽 op 胜过 tw_64/64 个 strided chunk。
+is_narrow = tw &lt;= BI</code></pre>
+<p>这十行是整段 strided softmax 的「合同」，直接决定 exp_experiment 用得对不对。<code>tw</code> 是本 tile 的真实有效列数；<code>tw_a</code> 是 16 对齐（cube 侧 PV 读 P 的宽度）；<code>tw_64</code> 是 64 对齐 —— 因为 exp_experiment / row_expand_sub_experiment 每次调用<strong>正好</strong>吃 64 列（fp32 一次 repeat 的上限），窗口必须先补到 64 的整数倍才能整块喂。mask 传的是全 1，窄化完全来自 repeat 次数 × repStride，所以 <code>[tw, tw_64)</code> 这段对齐 slop 一定会被算进去；kernel.py 的办法是整块先 <code>T.tile.fill(in_ub[ps, :, :], -T.infinity(accum_dtype))</code>、再只 copy 有效的 <code>[0:tw]</code> 列（kernel.py:1164-1181），slop 保持 -inf —— reduce_max 忽略它、exp 把它变成 0、reduce_sum 加 0，全链无害。<code>tw_a &lt;= tw_64</code> 保证 copy-out 的那 <code>tw_a</code> 列全落在算过的范围内。最后一行 <code>is_narrow = tw &lt;= BI</code> 是分路开关：按<strong>实际宽度</strong>而不是按 ori/cmp 语义分，窄的走 strided（省 padding），宽的走 <code>T.tile.broadcast</code> + <code>T.tile.sub</code> + <code>T.tile.exp</code> 满宽（kernel.py:1307-1318，没 padding 可省时一条宽 op 更划算）。</p>
+<div class="warn">同文件 1267-1269 还有一句「ori: strided …；cmp: wide broadcast+sub+exp(满 512)」，与第 8 行那句「宽窗(tw&gt;BI,只 scfa 的宽 cmp)」看起来矛盾 —— 两句都是简写，真正的分路条件只有 <code>tw &lt;= BI</code> 这一个运行时比较，跟 ori / cmp 的语义无关，同一段 cmp 走哪条完全由 <code>cmp_ratio</code> 和 topk 决定。本仓的两组配置正好各占一边：CFA 用 <code>cmp_ratio = 128</code>（test_sparse_attn_sharedkv.py:191、214），8K 下 <code>act_cmp = 8192 // 128 = 64</code>、<code>cmp_tiles = 1</code>，那唯一一个 cmp tile 宽 64 ≤ BI，走的是窄路；SCFA 用 <code>cmp_ratio = 4</code> 加 <code>topk_cmp = K = 512</code> 截断（test_sparse_attn_sharedkv.py:114、122），cmp tile 满 512 宽，才是宽路的实际来源。所以 exp_experiment 这条窄路上跑的不只是 ori 滑窗，还有 CFA 的整段 cmp。</div>
+
+<h3>5.7　兼容性与坑</h3>
+<p><strong>兼容性：</strong>纯新增，老代码逐字节不变。exp_experiment 全套都是新东西：新 builtin <code>ascend_exp_experiment</code>、新前端函数、新 codegen 分支 <code>ExpExperimentCodegen</code>、新模板函数 <code>exp_mask</code>。老路径 <code>tl.ascend_exp</code> → <code>UnaryVecOpCodegen(op, "AscendC::Exp")</code> → <code>AscendC::Exp(d, s, n)</code> 一行没动，内核里原来的 <code>T.tile.exp</code> 生成的 C++ 与合入前完全相同。<code>operation_config.h</code> 的改动是往表里加一行新 key，既有 key 的 pipe / 读写标注没碰。也没有任何 pass 会把 <code>T.tile.exp</code> 自动改写成 exp_experiment —— 要用必须显式改调用点，不会有「升级编译器后行为悄悄变了」这种事。</p>
+<ul>
+  <li>最后一维必须<strong>正好</strong>是 64（fp32）/ 128（fp16），不是「不超过」。96 列的窗口不能一次调完，要么向上对齐到 128 分两块，要么自己处理尾巴。kernel.py 的做法是先 <code>tw_64 = (tw + 63) // 64 * 64</code> 再按 64 分块。</li>
+  <li>mask 传的是<strong>全 1</strong>（fp32：mask0 全 1、mask1 = 0；fp16：两个都全 1），每次 repeat 的 64 / 128 个 lane 全算。<strong>窄化来自 repeat 次数 × repStride，不是列掩码</strong>。<code>[tw, tw_64)</code> 这段 slop 必然被 exp，调用方要自己保证那里的值无害；若 slop 里是垃圾数，exp 会炸成 inf/NaN 再被 reduce_sum 吃进分母。</li>
+  <li><strong>dst 与 src 的声明物理列数必须相同。</strong><code>rep_stride</code> 只从 <strong>dst</strong> 的 buffer 声明推（<code>src/target/codegen_ascend.cc:2321-2331</code>），然后同一个值被打到 <code>dstRepStride</code> 和 <code>srcRepStride</code>（同文件 2354-2357）；前端只比切片形状，不看物理宽度。所以 <code>T.tile.exp_experiment(narrow[:, 0:64], wide[ps, :, 0:64])</code>（narrow 声明 [16, 64]、wide 声明 [2, 16, 512]）前端全过、codegen 无 ICHECK，src 却会按 8 个 block 而不是 64 个 block 跨行读 —— 静默读错行。kernel.py 里 dst 就是 src（原地），所以安全。</li>
+  <li>行 stride 读的是静态声明，buffer 必须静态形状；extent 非 IntImm 直接 <code>ICHECK(false) &lt;&lt; "ExpExperimentCodegen: dynamic extent not supported"</code>。反过来说，同一段窗口逻辑换一个物理宽度不同的 buffer，stride 会自动跟着变，调用点不用改。</li>
+  <li><code>exp_mask</code> 的 <code>repeatTime</code> 与 <code>dstRepStride</code> / <code>srcRepStride</code> 都是 <code>uint8_t</code>：<strong>行数 ≤ 255</strong>，物理列数 ≤ 255 × (256/bits)（fp32 ≤ 2040、fp16 ≤ 4080）。codegen 不检查这两条，超了是静默截断。kernel.py 的 M_CHUNK = 16、512 列（rep_stride = 64）远在范围内。</li>
+  <li>整除性是硬约束：物理列数必须被 <code>elems_per_block</code>（fp32 8 / fp16 16）整除，切片 extent 必须是 <code>8 * elems_per_block</code>（fp32 64 / fp16 128）的整数倍，否则 codegen 期 ICHECK 直接挂，错误里会打出 extent 和 cols 的实际值。</li>
+  <li><strong>窗口宽了就别用</strong>：每 64 列一次调用，<code>tw</code> 接近 512 时是 8 次 strided 调用 vs 1 次宽 exp，反而亏。kernel.py 用 <code>is_narrow = tw &lt;= BI</code>（BI = 128）分路，宽 cmp tile 走满宽写法。</li>
+  <li>只有 ascendc target 有，PTO 后端没有对应件（上游单测也不做 target 参数化）。按本仓惯例 SWA/CFA/SCFA 的 codegen 永远走非-PTO，所以不影响，但别指望它在 PTO 路径上能编出来。</li>
+  <li>依赖跟踪靠 <code>operation_config.h</code> 里那条 <code>{{{1, "write"}, {2, "read"}}, "PIPE_V"}</code>。它和串在一起的 <code>row_expand_sub_experiment</code>、<code>reduce_max</code> / <code>reduce_sum</code> 同在 V 流水，V 内顺序由 pipe 语义保证；但跟 MTE2（copy-in）/ MTE3（copy-out）之间的 <code>T.set_flag</code> / <code>T.wait_flag</code> 握手仍然要自己写 —— 加这个原语不会替调用方补跨 pipe 的围栏。</li>
+</ul>
+<p><strong>上游单测：</strong><code>testing/python/language/test_tilelang_ascend_language_elementwise.py::test_exp_experiment</code>，参数化 <code>("float", 64 / 128 / 256)</code> 与 <code>("float16", 128 / 256)</code>。固定 <code>M, N = 16, 512</code>，kernel 里按 <code>for k in range(col // chunk)</code> 循环调用 exp_experiment，参考值是 <code>ref = a.clone(); ref[:, :col] = torch.exp(a[:, :col])</code> —— 也就是<strong>尾部 <code>[col:N]</code> 必须逐字节不变</strong>。这一条把两种旧写法都判死：整块 <code>T.tile.exp</code> 会把尾部一起 exp（尾部对不上 ref）；切片写法走连续 count，fp32 col=64 时把前 2 行整行 exp（尾部一起动）、第 2~15 行的窗口一个都没算，fp16 chunk=128 时是前 4 行，头尾同时对不上 ref。<code>col = 256</code> 那两档（fp32 要 4 次调用、fp16 要 2 次）专门覆盖调用方自己分块循环这个用法，顺带验多次调用的偏移推导。测试只跑 ascendc target。</p>
+
+
+  <!-- ===================== 6 ===================== -->
+<h2 id="s6"><span class="num">6</span>让内核自己驱动 L1→L0→mma→fixpipe：real_k / real_n / k_actual / n_actual / unit_flag 五件套</h2>
+
+<div class="prhead">
+  <span class="badge both">Feat + Bugfix</span>
+  <span class="badge open">待合入</span>
+  <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1422">PR #1422</a>
+</div>
+
+<blockquote><p><strong>一句话：</strong>原来 L1→L0→mma 这三步只能整个交给 <code>T.gemm_v0</code> 一条辅助函数，内核自己发的 <code>T.mma</code> 里 K 和 N 都只能是编译期值，调用方另发的那条 fixpipe 跟 mma 之间只有软件握手；现在内核可以自己逐块载 L0、自己发累加型 mma，K 和 N 都可以是运行期值，最后一块到齐时用 unitFlag 与那条 fixpipe 做硬件配对。</p></blockquote>
+
+<h3>6.1　这块机制是什么</h3>
+
+<p>昇腾 cube 的一次矩阵乘走四步：L1→L0A/L0B 按分形载入操作数、Mmad 计算、结果落在 L0C 累加器、再由 fixpipe 把 L0C 搬到 GM。TileLang 把前三步封在 <code>T.gemm_v0</code> 里（<code>src/tl_templates/ascend/common.h:1103-1252</code>）。第四步不在里面：模板签名上 C 那一行的注释原文就是 <code>// this must be located in l0c</code>，函数体只做 L1→L0 载入加 mma，结果留在调用方的 L0C，fixpipe 一直是调用方自己另发的一条 <code>T.copy(L0C→GM)</code>。</p>
+
+<p>硬件另有一个 <code>unitFlag</code> 字段，可以把 mma 和它后面那条 fixpipe 串成硬件流水：0b10 表示结果留在 L0C，0b11 表示释放给配对的 fixpipe。它在 mma 模板里一直是被注释掉的死钩子。</p>
+
+<p>当内核需要自己维护 KV 环形缓冲、或者把 contraction 拆成不同时刻才到齐的若干块时，L1→L0→mma 这三步必须由内核自己走完，并且要能和那条 fixpipe 配上对——否则每一块都得回到模板里跑一遍完整序列。</p>
+
+<h3>6.2　原来写不出来的东西</h3>
+
+<p>以 SWA 的 PV 阶段为例：内核自己维护一个 3 槽 KV 环，V 的每个 D-tile 是逐页 gather 进来的，到齐一块就想立刻发一条 mma 把它算掉，算完直接用配对的 fixpipe 把 L0C 冲进 workspace。而且 contraction 长度 <code>winm</code>（真实窗口行数）是运行期值，不是 L0 缓冲的编译期宽度 BI=128。</p>
+
+<div class="srcref">改动前会这么写</div>
+<pre><code># 意图（SWA PV）：P[G, winm] @ V[winm, 128]，winm 是运行期窗口行数
+
+# 尝试 1：整块载入 L0 再发 mma —— 当时唯一写得出来的形式
+T.copy(p_l1[:, :], p_l0a[pp, :, :])                 # 只能按 p_l0a 的 [G, BI] 全宽载入
+T.copy(kv_ring[slot, :, 0:PV_NW], v_l0b[pp, :, :])  # 同上，全宽
+T.mma(p_l0a[pp, :, :], v_l0b[pp, :, :], cL0[cs, :, :], init=True)
+#     ↑ K 恒等于 A 最后一维 BI=128，没有任何参数能把它改成 winm
+T.copy(cL0[cs, :, :], workspace_o[cid, bufm, :, 0:PV_NW])
+#     ↑ 只能是一条独立 fixpipe，跟上一条 mma 之间没有硬件配对
+
+# 尝试 2：用符号切片表达「只 contract winm 列」
+T.mma(p_l0a[pp, :, 0:winm], v_l0b[pp, 0:winm, :], cL0[cs, :, :], init=True)
+
+# 尝试 3：退回模板，让它包掉 L1→L0→mma
+T.gemm_v0(p_l1, kv_ring[slot, :, :], cL0[cs, :, :], init=True)
+T.copy(cL0[cs, :, :], workspace_o[cid, bufm, :, 0:PV_NW])   # fixpipe 仍然自己发</code></pre>
+
+<div class="sym"><span class="t">会发生什么</span>尝试 1 编译过、跑得动、答案静默错。K 恒等于 A 最后一维，也就是 L0 缓冲的编译期宽度 BI=128：窗口只有 <code>winm &lt; 128</code> 行时，P 的 <code>[:, winm:128]</code> 列和 V 的 <code>[winm:128, :]</code> 行——两块都是上一轮留下的陈旧内容——一并被 contract 进去。输出的每一行都被污染，没有任何告警。</div>
+
+<div class="sym"><span class="t">会发生什么</span>尝试 2 走不通。<code>npu_gemm</code> 的 <code>retrieve_ptr</code> 用 <code>buffer.access_ptr(offset=..., extent=...)</code> 取指针，符号 extent 拿不到具体值（<code>customize.py</code> 的 docstring 原话：<code>Passing a symbolic slice instead (a_l0[pp, :, 0:k]) is not an option, since access_ptr would need a concrete extent</code>）。就算这一层放行，<code>tl.ascend_mma</code> 当时在 <code>src/op/ascend.cc</code> 里注册成 <code>.set_num_inputs(6)</code>，前端根本没有第 7、第 8 个位置可以放 n_actual / unit_flag。</div>
+
+<div class="sym"><span class="t">会发生什么</span>尝试 3 能算对，但整条 L1→L0→mma 被关进模板，内核插不进自己的环形缓冲 flag；而且每次调用都带一层 pipe drain（见下）。</div>
+
+<p><strong>为什么在内核侧绕不过去：</strong>退回 <code>T.gemm_v0</code> 是唯一能算对的写法，但它有两个内核侧绕不过去的代价。</p>
+
+<p>第一，模板每次调用首尾各有两对「SetFlag(e) 紧跟 WaitFlag(e)」的同一 event 自配对围栏：开头是 <code>MTE2_MTE1</code> 和 <code>FIX_M</code>（<code>common.h:1187-1190</code>），结尾是 <code>MTE1_MTE2</code> 和 <code>M_FIX</code>（<code>common.h:1248-1251</code>），四对都用 <code>L0AB_EVENT = 0</code>。自配对不是在给某个 buffer 排序，而是 drain 整条 pipe：每次 gemm 都强迫 MTE2 全部做完 MTE1 才能开始，并把下一页 KV 的搬运卡到当前 L1→L0 结束之后。这恰好就是内核那个 3 槽 KV 环存在的意义，等于把 overlap 全废掉。</p>
+
+<p>第二，contraction 长度 <code>winm</code> 是运行期值，模板的 K 只能来自编译期模板参数或 A 的最后一维，切窗口这件事在内核侧无法表达。</p>
+
+<p>实测把这条序列解构到内核之后（算子仓 commit <code>ca8e81e</code> 的 msprof 两轮取中位数，数值为 tilelang 相对 Ascend C 参考实现的比值）：</p>
+
+<div class="tablewrap">
+<table>
+<tr><td>场景</td><td>解构前</td><td>解构后</td></tr>
+<tr><td>swa_prefill</td><td>112.1%</td><td>124.0%</td></tr>
+<tr><td>scfa_prefill</td><td>104.2%</td><td>115.4%</td></tr>
+<tr><td>cfa_prefill</td><td>95.6%</td><td>96.3%（co-bound，cube 本来就不是瓶颈）</td></tr>
+</table>
+</div>
+
+<div class="warn"><strong>还有一个挂死：</strong>一旦真的把 unitFlag 接通，会撞上 <code>MmadParams</code> 不默认初始化 <code>cmatrixSource</code> 的问题。<code>cmatrixInitVal == false</code>（累加型 mma）时硬件会去读这个字段——单发 mma 的调用方永远察觉不到，但一个带 unitFlag 的 K-累加序列会读到未初始化的字段，把 cube 挂死。这是本 PR 里 Bugfix 的那一半。</div>
+
+<h3>6.3　编译器改了什么</h3>
+
+<ul>
+  <li><code>src/op/ascend.cc</code> / <code>ascend.h</code>：<code>AscendCopy</code> 接受三个可选尾参 <code>args[6]=unitFlag</code>、<code>args[7]=realK</code>、<code>args[8]=realN</code>，全部默认 <code>Integer(0)</code>，0 就是「照旧」。</li>
+  <li><code>src/op/ascend.cc</code>：<code>l0_dst_split</code> 分支原来无条件 push <code>dst-&gt;shape</code> 的最后两维，现在 realK 非 0 时按 <code>dst.scope()</code> 覆写——<code>wmma.matrix_a</code> 是 [M, K]，覆写末维；<code>wmma.matrix_b</code> 是 [K, N]，覆写首维；realN 非 0 时再覆写 matrix_b 的 N。</li>
+  <li><code>src/op/ascend.cc</code>：<code>l0c2gm</code> 分支在参数列表<strong>末尾</strong>追加 unitFlag，不是按调用顺序插在中间——这条列表与 PTO codegen 共用，PTO 按固定下标读其中的 pad enum 和 relu flag。</li>
+  <li><code>src/op/ascend.cc</code>：<code>TIR_DEFINE_TL_BUILTIN(ascend_mma)</code> 的 <code>.set_num_inputs(6)</code> 改成 <code>-1</code>（变参），才放得下尾部的 n_actual / unit_flag。</li>
+  <li><code>src/target/codegen_ascend.cc</code>：<code>MmaCodegen</code> 把 <code>args[6]</code> 起的实参原样透传给 C++ mma；<code>CopyCodegen</code> 在 <code>kCopyOpExtraArgs</code> 查表得到的个数上加了一层 clamp（见 6.6），并在 <code>copy_l0c_to_gm</code> 且实参数 ≥ 10 时从末尾（下标 9）取出 unitFlag，发到 C++ helper 期望的位置。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：mma 模板补上 <code>mmadParams.cmatrixSource = false;</code>（Bugfix），并把原本注释掉的 <code>// mmadParams.unitFlag = unitFlag;</code> 接通。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：<code>copy_l0c_to_gm</code> 增加 <code>uint8_t unitFlag = 0</code> 形参，原来写死的 <code>tileCopier(dst, src, 0)</code> 改成 <code>tileCopier(dst, src, unitFlag)</code>——<code>CopyL0CToGmTla</code> 本来就把它接到 <code>FixpipeParams</code> 了。</li>
+  <li><code>tilelang/language/copy_op.py</code>：<code>npu_copy_v2</code>（即 <code>T.copy</code>）新增 <code>unit_flag</code> / <code>real_k</code> / <code>real_n</code> 三个关键字参数，只有真的被设置时才往 intrin 里追加尾参。</li>
+  <li><code>tilelang/language/customize.py</code>：<code>npu_gemm</code>（即 <code>T.mma</code>）新增 <code>n_actual</code> / <code>unit_flag</code> / <code>k_actual</code>；<code>k_actual</code> 直接顶替由 A 最后一维推出来的 K，<code>&lt;M, N&gt;</code> 模板参数不受影响。</li>
+</ul>
+
+<p>C++ 侧对应的两个签名：</p>
+
+<pre><code>template &lt;typename T1, typename T2, uint32_t M, uint32_t N&gt;
+CATLASS_DEVICE void mma(LocalTensor&lt;T1&gt; const A, LocalTensor&lt;T1&gt; const B,
+                        LocalTensor&lt;T2&gt; const C, bool init, uint32_t K,
+                        uint32_t n_actual = N, uint8_t unitFlag = 0);
+
+template &lt;typename T1, typename T2, typename LayoutGM, uint32_t srcM,
+          uint32_t srcN, bool enRelu = false&gt;
+CATLASS_DEVICE void
+copy_l0c_to_gm(GlobalTensor&lt;T2&gt; dstTensor, LocalTensor&lt;T1&gt; srcTensor,
+               uint32_t realDstN = 1, uint32_t realTailM = 0,
+               uint32_t realTailN = 0, uint8_t unitFlag = 0);</code></pre>
+
+<h3>6.4　现在可以这么写</h3>
+
+<div class="srcref">最小例子（对应上游单测 testing/python/language/test_tilelang_ascend_language_kernel_driven_mma.py，注释译为中文）</div>
+<pre><code>M, N, K = 64, 128, 256
+KL0 = 128  # kL0 tile 宽度：K 拆成 2 块
+
+@T.prim_func
+def main(A: T.Tensor([M, K], "float16"),
+         B: T.Tensor([N, K], "float16"),   # K^T 布局，算的是 A @ B^T
+         nact: T.Tensor([1], "int32"),     # 运行期输出列数
+         C: T.Tensor([M, N], "float")):
+    with T.Kernel(1, is_npu=True) as (cid, _):
+        a_l1 = T.alloc_L1([M, K], "float16")
+        b_l1 = T.alloc_L1([N, K], "float16")
+        a_l0 = T.alloc_L0A([2, M, KL0], "float16")   # 两个 ping-pong 槽
+        b_l0 = T.alloc_L0B([2, N, KL0], "float16")
+        c_l0 = T.alloc_L0C([1, M, N], "float")
+        with T.Scope("C"):
+            n_act = nact[0]
+            T.barrier_all()
+            T.copy(A, a_l1)
+            T.copy(B, b_l1)
+            T.barrier_all()
+            # K 块 0：初始化 L0C 槽，结果留在 L0C（0b10）
+            T.copy(a_l1[:, 0:KL0], a_l0[0, :, :])
+            T.copy(b_l1[:, 0:KL0], b_l0[0, :, :],
+                   transpose=True, real_k=KL0, real_n=n_act)
+            T.barrier_all()
+            T.mma(a_l0[0, :, :], b_l0[0, :, :], c_l0[0, :, :],
+                  init=True, k_actual=KL0, n_actual=n_act, unit_flag=0b10)
+            T.barrier_all()
+            # K 块 1：累加进同一个槽；最后一块释放给配对的 fixpipe（0b11）
+            T.copy(a_l1[:, KL0 : 2 * KL0], a_l0[1, :, :])
+            T.copy(b_l1[:, KL0 : 2 * KL0], b_l0[1, :, :],
+                   transpose=True, real_k=KL0, real_n=n_act)
+            T.barrier_all()
+            T.mma(a_l0[1, :, :], b_l0[1, :, :], c_l0[0, :, :],
+                  init=False, k_actual=KL0, n_actual=n_act, unit_flag=0b11)
+            T.barrier_all()
+            # 配对的那条 fixpipe：列数必须 == mma 的 n_actual，
+            # 且这里刻意不加同步——被顶掉的正是软件 M_FIX 握手
+            T.copy(c_l0[0, :, :], C[:, 0:n_act], unit_flag=0b11)
+            T.barrier_all()</code></pre>
+
+<p class="cap">真正「删掉就错」的是三处：B 侧两条 <code>real_n=n_act</code> 让 L0B 按 mma 真正会读的形状载入分形（少了它，nZ 分形的 K-block stride 会按缓冲全宽算，第二块 K 就寻址到错误的 K-block）；两条 mma 的 <code>init=True/False</code> 把 K 累加进同一个 L0C 槽；<code>unit_flag</code> 从 0b10 变成 0b11 标出「最后一块到齐了」，最后那条 <code>T.copy(..., unit_flag=0b11)</code> 就是与它配对的 fixpipe。<code>n_act</code> 从一个 int32 输入张量取，是运行期值——单测参数化跑 128 / 96 / 32 三档，编译期常量蒙不过去。两块 K 也是必须的：只跑一块的话它的 K-block 偏移恰好是 0，real_n 写错也照样算对。</p>
+
+<div class="note"><strong>这个例子里的 real_k / k_actual 是恒等写法。</strong>A 侧 K 本来就是 <code>a_l0</code> 的末维 KL0；B 侧 realK 覆写的是 <code>dst-&gt;shape[-2]</code>，而在这个 A @ B^T 的布局里那一维就是 N=128=KL0。删掉这两个参数，发出的 TIR 和 C++ 逐字节不变。运行期 K 的真实用例见 6.5（三）。另外这个布局有个隐含约束：<code>npu_gemm</code> 会断言 <code>K == K_B</code>，而 A 侧 K 取 <code>A_shape[-1]</code>、B 侧取 <code>B_shape[-2]</code>，所以 <code>b_l0</code> 声明成 <code>[2, N, KL0]</code> 时必须 <code>N == KL0</code>，非方形要改 L0B 的声明顺序。</div>
+
+<div class="warn">例子里每个流水边界的 <code>T.barrier_all()</code> 都是显式写出来的。L1→L0 的 copy 在 PIPE_MTE1 上、mma 在 PIPE_M 上（<code>src/transform/common/operation_config.h</code>），两条流水之间没有同步就是 L0A/L0B 的 RAW 竞态。自动同步 pass <code>tl.ascend_auto_sync</code> 默认关闭（<code>src/transform/ascend_sync_insert.cc</code> 不开就直接 return），kernel.py 走的正是默认关闭这条路，同步全由内核自己发。要保住 overlap 就把全屏障换成定向 flag（<code>T.set_flag("mte1", "m", EV)</code> / <code>T.wait_flag("mte1", "m", EV)</code>），也就是 6.5–6.7 里 kernel.py 的写法。唯独最后那条 mma 与配对 fixpipe 之间不要加同步——那正是 0b11 要顶掉的握手。</div>
+
+<h3>6.5　kernel.py 里的真实用法（一）：QK 打分的第一个 kL0 tile</h3>
+
+<div class="srcref">kernel.py:3641-3664 · SWA · QK 打分（ComputeMm1）</div>
+<pre><code>cs = cl0_iter % 2
+# D-half 0 (KV ring slot 0), tiles 0 and 1: tile 0
+# inits the cL0 slot, both hold it (0b10).
+T.wait_flag(&quot;mte2&quot;, &quot;mte1&quot;, KV_EV0)
+T.wait_flag(&quot;m&quot;, &quot;mte1&quot;, L0AB_EV0)
+T.copy(q_l1_0[:, 0:KL0], p_l0a[0, :, :])
+T.copy(
+    kv_ring[0, :, 0:KL0],
+    v_l0b[0, :, :],
+    transpose=True,
+    real_k=KL0,
+    real_n=win_align,
+)
+T.set_flag(&quot;mte1&quot;, &quot;m&quot;, L0AB_EV0)
+T.wait_flag(&quot;mte1&quot;, &quot;m&quot;, L0AB_EV0)
+T.mma(
+    p_l0a[0, :, :],
+    v_l0b[0, :, :],
+    cL0[cs, :, :],
+    init=True,
+    k_actual=KL0,
+    n_actual=win_align,
+    unit_flag=0b10,
+)</code></pre>
+
+<p>SWA 的 QK 打分：Q[G=64, D=512] 乘上滑动窗口内那 win 行 K 的转置。D 被切成两个 256 宽的 D-half，每个 D-half 又是 <code>D2/KL0 = 2</code> 个 128 宽的 kL0 tile，四块全部 K-累加进同一个 cL0 槽。这里是第一块：<code>init=True</code> 把槽清掉，<code>unit_flag=0b10</code> 表示「结果先留在 L0C，别动」。</p>
+
+<p>B 侧（K 的转置）必须给 <code>real_n=win_align</code>，因为窗口宽度 <code>win_align</code> 是运行期算出来的（win 向上取整到 16），而 <code>v_l0b</code> 缓冲是编译期的 BI=128 全宽——L0B 的 nZ 分形从列数推它的 K-block stride，全宽载入配一条 <code>n=win_align</code> 的 mma 会寻址到错误的 K-block。A 侧连 <code>real_k</code> 都不用给：<code>p_l0a</code> 的 K 维本来就等于 KL0，kernel.py 3617-3618 行的注释原话是 <code>real_k is unnecessary on the A side (p_l0a's K dim already IS kL0Size)</code>。</p>
+
+<p>整段外面包着 <code>KV_EV0</code> / <code>L0AB_EV0</code> 这些内核自己的定向 flag：<code>wait_flag("mte2", "mte1")</code> 等这一槽 KV 页搬完才允许 L1→L0，用完再 <code>set_flag("mte1", "mte2")</code> 把槽还回环里。这正是 <code>gemm_v0</code> 模板的 event-0 自配对围栏会全部废掉的那层 overlap。</p>
+
+<h3>6.6　kernel.py 里的真实用法（二）：QK 收尾的 0b11 与配对 fixpipe</h3>
+
+<div class="srcref">kernel.py:3733-3754 · SWA · QK 打分收尾</div>
+<pre><code>T.wait_flag(&quot;mte1&quot;, &quot;m&quot;, L0AB_EV1)
+T.mma(
+    p_l0a[1, :, :],
+    v_l0b[1, :, :],
+    cL0[cs, :, :],
+    init=False,
+    k_actual=KL0,
+    n_actual=win_align,
+    unit_flag=0b11,
+)
+if win_align &lt; 40:
+    T.pipe_barrier(&quot;m&quot;)
+T.set_flag(&quot;m&quot;, &quot;mte1&quot;, L0AB_EV1)
+T.set_flag(&quot;mte1&quot;, &quot;mte2&quot;, KV_EV1)
+# The single Fixpipe after both D-halves, fused
+# with the last mma&#x27;s 0b11 (= the template&#x27;s
+# do_fixpipe on the final chunk).
+T.copy(
+    cL0[cs, :, :],
+    workspace_s[cid, buf, :, 0:win_align],
+    unit_flag=0b11,
+)</code></pre>
+
+<p>四块 kL0 tile 里的最后一块。前三块是 (T,0b10)(F,0b10)(F,0b10)，这块是 (F,0b11)：<code>init=False</code> 继续往同一个 cL0 槽累加，<code>unit_flag=0b11</code> 告诉硬件「这个槽算完了，放给配对的 fixpipe」。紧接着那条 <code>T.copy(cL0 → workspace_s, unit_flag=0b11)</code> 就是被配对的 fixpipe，对应 Ascend C 参考实现里两个 D-half 之后的那一条 Fixpipe。</p>
+
+<p>它的列数 <code>0:win_align</code> 必须和 mma 的 <code>n_actual</code> 严格相等，否则这条带 unitFlag 的 fixpipe 会去等一批没有任何 mma 标记就绪的 L0C 列。这一对 0b11 就是 mma→fixpipe 硬件流水的入口：不需要软件的 M_FIX / FIX_M 握手，tile i 的 fixpipe 就能和 tile i+1 的 mma 在两槽 cL0 上乒乓重叠。</p>
+
+<p>中间那条 <code>if win_align &lt; 40: T.pipe_barrier("m")</code> 复现的是 <strong>Ascend C 参考实现</strong>按运行期 <code>mmadParams.n</code> 门控的 <code>PipeBarrier&lt;PIPE_M&gt;</code>（<code>(m/16)*(n/16) &lt; 10</code>，M=G=64 时即 <code>win_align &lt;= 32</code>）。TileLang 这边没有等价物：<code>gemm_v0</code> 里那条 <code>PipeBarrier&lt;PIPE_M&gt;</code>（<code>common.h:1235</code>）是每个 tile 无条件发的，而 mma 模板里的阈值版本（<code>common.h:161-165</code>）是注释掉的死钩子，且写的是编译期模板参数 N。解构到内核之后这个门得内核自己复现。</p>
+
+<p>另外这四块是逐条展开写的，而不是 <code>kk</code> 循环——因为最后一块的 <code>unit_flag</code> 不一样，而 mma 的实参里放运行期条件会把 codegen 写坏（<code>MmaCodegen</code> 边写调用边把实参 <code>PrintExpr</code> 进同一个 stream，<code>if_then_else</code> 的临时变量声明会落在半截调用中间）。</p>
+
+<h3>6.7　kernel.py 里的真实用法（三）：PV 在分页 KV 环上逐 D-tile 消费</h3>
+
+<div class="srcref">kernel.py:3861-3889 · SWA · PV 输出（ComputeMm2）</div>
+<pre><code>T.copy(p_l1[:, :], p_l0a[pp, :, :], real_k=winm)
+T.copy(
+    kv_ring[slot, :, 0:PV_NW],
+    v_l0b[pp, :, :],
+    real_k=winm,
+)
+T.set_flag(&quot;mte1&quot;, &quot;m&quot;, L0AB_EV0 + pp)
+T.wait_flag(&quot;mte1&quot;, &quot;m&quot;, L0AB_EV0 + pp)
+T.mma(
+    p_l0a[pp, :, :],
+    v_l0b[pp, :, :],
+    cL0[cs, :, :],
+    init=True,
+    k_actual=winm,
+    unit_flag=0b11,
+)
+T.set_flag(&quot;m&quot;, &quot;mte1&quot;, L0AB_EV0 + pp)
+# release ring slot for its next user (reverse)
+T.set_flag(&quot;mte1&quot;, &quot;mte2&quot;, ev)
+T.copy(
+    cL0[cs, :, :],
+    workspace_o[
+        # ...
+    ],
+    unit_flag=0b11,
+)</code></pre>
+
+<p>PV：softmax 之后的 P[G=64, winm] 乘窗口内那 winm 行 V，输出 D=512 被切成 <code>PV_NT = D // BI = 4</code> 个 128 宽的 D-tile，每个 tile 一条独立的 mma，fixpipe 的目标是 <code>workspace_o</code> 里第 nl 个 128 宽的 D 带（上面省略的就是那段下标）。</p>
+
+<p>这里和 QK 正好反过来：N 是编译期常量 <code>PV_NW = 128</code>（所以不用 real_n、也不用 n_actual），只有 K = <code>winm</code>（真实窗口行数，运行期）需要顶替掉 L0 缓冲的编译期宽度 BI=128。A、B 两侧都要给 <code>real_k=winm</code>，让 L0 分形的 K 和 mma 的 <code>k_actual</code> 严格相等。不等不会报错，会静默算错：kernel.py 3806-3807 行的注释原话是 <code>L0 fractal K and mma K MUST match, else M-block/head 16-63 wrong for winm&lt;128</code>——第一个 M-block（第 0..15 行）因为偏移恰好是 0 而正确，16 行往后全错。</p>
+
+<p>每个 D-tile 只有一块 K，所以 <code>unit_flag</code> 直接就是 0b11，mma→fixpipe 一步配对，省掉一次软件 M_FIX 握手。整个循环体是「先 gather 一个 V 的 D-tile 进 3 槽 KV 环的某个槽，立刻消费掉」交错进行的：load 和 consume 交错，靠每槽的 MTE1_MTE2 反向 flag 排序槽的复用（槽 2 会被 tile 0 和 tile 3 各用一次）。这种「到齐一块算一块」正是 <code>gemm_v0</code> 那种一次调用包干三步的形态表达不出来的。</p>
+
+<h3>6.8　兼容性与坑</h3>
+
+<p><strong>兼容性：</strong>这一节所有新能力都是「不给参数就等于没这回事」。前端 <code>T.copy</code> 的 unit_flag / real_k / real_n 和 <code>T.mma</code> 的 n_actual / unit_flag / k_actual 全部默认 <code>None</code>，只有真的被设置时 <code>copy_op.py</code> / <code>customize.py</code> 才往 intrin 的实参列表尾部追加，所以旧调用发出的 TIR 逐字节不变（<code>T.mma</code> 仍是 6 参）。C++ 侧 <code>AscendCopy</code> 把 unitFlag / realK / realN 一律初始化成 <code>Integer(0)</code>：realK==0 时 <code>l0_dst_split</code> 仍旧 push <code>dst-&gt;shape</code> 的最后两维，unitFlag==0 就是一条独立 fixpipe。模板层 mma 的 n_actual 默认 N、unitFlag 默认 0，<code>copy_l0c_to_gm</code> 的 unitFlag 默认 0。<code>ascend_mma</code> 的 <code>set_num_inputs</code> 从 6 改成 -1 只是把定长放宽成变参，不拒绝任何旧调用。唯一一处无条件改变行为的是 Bugfix 那条 <code>mmadParams.cmatrixSource = false;</code>——但它原本是未初始化字段，等于把一处未定义行为钉死成所有累加型调用方本来就想要的语义（「C 从 L0C 取源」）。</p>
+
+<ul>
+  <li>L0 分形的 K 必须和 mma 的 K 严格相等（<code>real_k == k_actual</code>）。不等不会报错，会静默算错：第一个 M-block（第 0..15 行）因为偏移是 0 恰好正确，16 行往后全错。调试时很容易误判成竞态。</li>
+  <li>real_k 和 real_n 的失败签名不一样，别混：real_k 不匹配对应「寻址到错误的 M-block」，real_n 不匹配对应「寻址到错误的 K-block」（<code>copy_op.py</code> 的 docstring 里就是这么分的）。</li>
+  <li>配对的那条 fixpipe 的列数必须等于 mma 的 <code>n_actual</code>。否则带 unitFlag 的 fixpipe 会去等一批没有任何 mma 标记就绪的 L0C 列，表现为挂死而不是错数。</li>
+  <li>real_n 只对 <code>wmma.matrix_b</code> 生效——matrix_a 是 [M, K]，没有 N 这根轴，给了也会被忽略。反过来 real_k 对 A / B 都生效，但覆写的维不同（matrix_a 覆写末维，matrix_b 覆写首维）。</li>
+  <li>unit_flag 不同的那几条 mma 必须逐条展开写，不能写成 <code>kk</code> 循环加 <code>if_then_else</code>。<code>MmaCodegen</code> 是边写调用边把实参 <code>PrintExpr</code> 进同一个 stream 的，<code>if_then_else</code> 产生的临时变量声明会落在半截调用中间，直接写坏 codegen。</li>
+  <li>前端的尾参是位置参数：<code>real_n</code> 非空但 <code>real_k</code> 为空时，realK 会被物化成 0（=「从 dst 取」）；<code>unit_flag</code> 非空但 <code>n_actual</code> 为空时，n_actual 会被物化成模板 N。想只改外层那个，也得清楚内层被填了什么默认值。</li>
+  <li>解构掉 gemm 模板换来的是 pipe overlap，但也把 L0AB 的 flag 生命周期整个交给了内核：<code>("mte1", "m")</code> 那对（载入完成→允许 mma）、<code>("m", "mte1")</code> 那对（mma 用完→允许下一轮覆写这个 L0AB 槽），以及参考实现按运行期 n 门控的那条 <code>PipeBarrier&lt;PIPE_M&gt;</code>，都得自己复现，漏一条就是竞态。</li>
+</ul>
+
+<div class="note"><strong>改这块编译器代码的人要注意两处工程约束。</strong>其一，unitFlag 在 <code>AscendCopy::Lower</code> 的 <code>new_args</code> 里必须追加到<strong>末尾</strong>，因为这条参数列表是与 PTO codegen 共用的、PTO 按固定下标读其中的 pad enum 和 relu flag。其二，<code>CopyCodegen</code> 里按 <code>kCopyOpExtraArgs</code> 查表读出的个数被 clamp 到 <code>args.size() - 3</code>：查表值是「一条调用最多能带多少参数」，而任何自建参数列表的生产者（例如 <code>ascend_workspace_reduction</code> 把 <code>copy_l0c_to_ub</code> 就地改写成 <code>copy_l0c_to_gm</code>）都可能只带它关心的那几个。这条 clamp 是防御性上限，不是被现有某条改写路径逼出来的——那条路径恰好凑齐 6 个实参，正好等于 <code>extra_args = 3</code> 需要的数量。</div>
+
+<div class="note"><strong>上游单测：</strong><code>testing/python/language/test_tilelang_ascend_language_kernel_driven_mma.py</code>，即 6.4 那段代码。它设计成「旧代码必挂」有三处：① <code>n_act</code> 通过 int32 输入张量传进来，是运行期值（参数化跑 128 / 96 / 32 三档），real_n / n_actual 必须走运行期路径；② 必须用两块 K——单独一块的 K-block 偏移恰好是 0，就算 real_n 写错也照样算对，只有第二块才会暴露寻址到错误 K-block；③ 第二条 mma 是 <code>init=False</code> 的累加路径，正是硬件会去读 <code>cmatrixSource</code> 的那条路径，所以只要 unitFlag 接通而 cmatrixSource 没修，这个测试直接把 cube 挂死而不是报数值不符。</div>
+
+
+  <!-- ===================== 7 ===================== -->
+<h2 id="s7"><span class="num">7</span>多维 buffer 的标量下标要跨维展平 —— <code>block_table[b, lg]</code> 不再别名到第 0 行</h2>
+
+<div class="prhead">
+  <span class="badge fix">Bugfix</span>
+  <span class="badge open">待合入</span>
+  <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1422">PR #1422</a>
+</div>
+
+<blockquote><p><strong>一句话：</strong>原来对多维 buffer 做标量读写只发最内层下标、前导维被整个丢掉（<code>table[b, i]</code> 恒等于 <code>table[0, i]</code>，静默算错且 B=1 时完全正常），现在按 buffer 形状跨全维展平成一个线性偏移，<code>ori_block_table[b, pa_lg]</code> 这类「按批次取物理页号」才真正取到第 b 行。</p></blockquote>
+
+<div class="note"><p>PR #1422 本身的标题是 <code>[Feat] Ascend: let the kernel drive the L1-&gt;L0-&gt;mma-&gt;fixpipe sequence</code>（fork 分支 <code>feat/ascend-kernel-driven-cube</code> @ <code>3a546966</code>，改 11 个文件），主体是 <code>real_k</code> / <code>real_n</code> / <code>n_actual</code> / <code>k_actual</code> / <code>unit_flag</code> 这几个可选运行期参数。本节只讲这条 feat 顺带修掉的一个缺陷 —— 标量索引展平，落在 <code>codegen_ascend.cc</code> 的两个 hunk 上。</p></div>
+
+<h3>7.1　这块机制是什么</h3>
+<p>昇腾侧生成出来的 Ascend C 里，UB / GM 上的 buffer 分别是 <code>LocalTensor&lt;T&gt;</code> 和 <code>GlobalTensor&lt;T&gt;</code>，这两个类型只提供线性下标的标量接口 <code>GetValue(i)</code> 和 <code>SetValue(i, v)</code> —— 没有多维下标的重载。所以 TileLang 里写 <code>buf[i, j]</code> 这种「取一个标量进标量寄存器」的访问，codegen 必须自己把多维下标折算成一个线性偏移再发下去。</p>
+<p>这跟整块搬运是两条完全不同的路：<code>T.copy</code> 走 CopyCodegen，把 dstM / dstN / stride 当参数显式发给搬运指令，多维信息不经过下标；只有标量访问依赖 codegen 自己做展平。TVM 侧现成的工具是 <code>Buffer::OffsetOf(indices)</code>，它按 buffer 的 shape / strides 把一组下标折成物理偏移，对一维 buffer 是恒等映射。</p>
+
+<h3>7.2　原来写不出来的东西</h3>
+<p>分页 KV（PagedAttention）的页表是二维的 <code>[batch, num_logical_blocks]</code> —— 第 b 行是第 b 个 batch 的逻辑块号到物理块号的映射。内核里要按当前 batch 取物理页号：先算逻辑块号 <code>pa_lg = pa_cur // ori_block_size</code>，再 <code>pa_ph = ori_block_table[b, pa_lg]</code>，然后拿 <code>pa_ph</code> 去 <code>ori_kv[pa_ph, ...]</code> 做真正的 GM→L1 搬运。这是分页 KV 最基本的一步，当前 main（<code>692edac</code>）上三个 kernel 合计 9 处页表查表，外加 SCFA 一处三维的 <code>cmp_indices</code> 标量读，共 10 处多维标量访问。</p>
+
+<div class="srcref">改动前会这么写</div>
+<pre><code># 页表按 vLLM/FlashAttention 的约定就是二维 [B, max_blocks]
+ori_block_table: T.Tensor([batch, ori_table_len], idx_dtype)
+
+...
+    b = T.cast(pid // max_seq, "int32")       # 当前 batch
+    pa_lg = pa_cur // ori_block_size          # 逻辑块号
+    pa_ph = ori_block_table[b, pa_lg]         # 二维标量读
+    T.copy(ori_kv[pa_ph, ...], kv_ring[...])  # 用物理块号搬运
+
+# 改动前 codegen（src/target/codegen_ascend.cc）:
+#   os &lt;&lt; var_name &lt;&lt; ".GetValue(" &lt;&lt; PrintExpr(op-&gt;indices.back()) &lt;&lt; ")";
+# 发出来的 Ascend C 是：
+#   ori_block_table.GetValue(pa_lg);          // b 不见了
+# 应该是：
+#   ori_block_table.GetValue(b * ori_table_len + pa_lg);</code></pre>
+
+<div class="sym"><span class="t">会发生什么</span>编译不报错、运行不挂，纯静默错。<code>op-&gt;indices.back()</code> 只打印最内层下标，前导的 <code>b</code> 被整条丢掉，于是 <code>ori_block_table[b, pa_lg]</code> 发成 <code>ori_block_table.GetValue(pa_lg)</code> —— 不管 b 是几，读回来的都是页表第 0 行的物理页号。B=1 时 b 恒为 0，<code>block_table[0, lg]</code> 与 <code>block_table[lg]</code> 读的就是同一处内存，完全正常；B=2 时 batch 1 的每一次 KV 搬运都去搬 batch 0 的物理页，Output / LSE 整批对不上 golden（不是个别 token 偏差，是这个 batch 全错）。BufferStore 侧同理：<code>buf[b, i] = v</code> 只把 v 写进 <code>buf.SetValue(i, v)</code>，B 行互相覆盖到第 0 行。</div>
+
+<p><strong>为什么在内核侧绕不过去：</strong>第一层是「根本不知道要绕」—— 错得完全静默，而算子仓两套测试（<code>test_sparse_attn_sharedkv.py</code> / <code>test_sparse_attn_sharedkv_fast.py</code>）当时所有场景都是 B=1，b 恒为 0，写对写错逐字节等价，全绿。第二层是「知道了也别扭」：TileLang 的 layout 推断硬性要求下标个数跟 buffer 维度一致（<code>src/transform/layout_inference.cc:97</code> 的 <code>ICHECK(indices.size() == buffer-&gt;shape.size())</code>），不能在内核里直接写 <code>ori_block_table[b * ori_table_len + pa_lg]</code>；要手工展平只能把内核签名从 <code>T.Tensor([batch, ori_table_len])</code> 改成一维，再让 api.py 把外部传进来的 <code>[B, max_blocks]</code> 页表 <code>.view(-1)</code> —— 而 <code>[B, max_blocks]</code> 是 vLLM/FA 那套 block_table 的公开约定，api.py 的入参就是它，改成一维等于把展平责任推给调用方；9 处调用点都要手写 stride 乘法，SCFA 的 <code>cmp_indices</code> 还是三维 <code>[total_tokens, N2, topk_cmp]</code>（kernel.py:1811），手写展平后基本不可读。UB 上的临时 buffer 更没有 host 侧 view 可用。</p>
+
+<div class="note"><p><strong>这条 bug 一直可达，只是没人看得见。</strong>首个 SWA kernel <code>a4f2f72</code> 的 kernel.py:234 就是 <code>page = ori_block_table[b, pos // ori_block_size]</code>；<code>45c6a32</code>（SCFA 场景 3）引入了 vector 侧的 <code>cmp_indices</code> / <code>cmp_block_table</code> 两处并一直存活到今天。<code>5ecdbc4</code>（把页表查表从 copy_pa 的 C++ helper 挪到内核前端）不是「让 bug 变得可达」，而是把站点数从 5 处放大到 10 处。真正让它暴露的是 <code>b2f06ee</code> —— 补上 B=2 场景。</p></div>
+
+<h3>7.3　编译器改了什么</h3>
+<ul>
+  <li><code>src/target/codegen_ascend.cc:481-482</code>：<code>VisitExpr_(const BufferLoadNode *)</code> 里 <code>.GetValue()</code> 的下标从 <code>PrintExpr(op-&gt;indices.back())</code> 改成 <code>PrintExpr(op-&gt;buffer.OffsetOf(op-&gt;indices).back())</code>，按 buffer 的 shape / strides 跨全维折成一个线性偏移。</li>
+  <li><code>src/target/codegen_ascend.cc:495</code>：<code>VisitStmt_(const BufferStoreNode *)</code> 里 <code>.SetValue(index, value)</code> 的 index 做同样替换，读写两侧对齐（否则会出现读对了写还错的半修）。</li>
+  <li>两处都留了 WHY 注释，点明「OffsetOf 对一维 buffer 是恒等，所以既有一维访问逐字节不变」，避免以后被当成冗余改动删掉。</li>
+  <li><code>testing/python/language/test_tilelang_ascend_language_scalar_index.py</code>：新增多 batch 标量读写回环单测，B 全部 ≥ 2。</li>
+  <li><code>src/target/codegen_ascend_pto.cc:780 / 798</code> 的同名缺陷本次刻意不动：PTO 的全局 buffer 寻址要另外看，单测 docstring 明确写了只覆盖 ascendc、pto 侧单开 issue 跟踪。</li>
+</ul>
+
+<h3>7.4　现在可以这么写</h3>
+<p>没有新原语、没有新参数、签名不变 —— 本条是纯语义修复（同 PR 里的 <code>real_k</code> / <code>real_n</code> / <code>k_actual</code> / <code>unit_flag</code> 属另一条目）。写法就是原来那个写法：对任意维度的 GM / UB buffer，<code>x = buf[i0, i1, ..., ik]</code>（标量读，发 <code>GetValue</code>）和 <code>buf[i0, i1, ..., ik] = v</code>（标量写，发 <code>SetValue</code>）现在按 <code>OffsetOf(indices).back()</code> 展平，等价于 <code>i0 * s0 + i1 * s1 + ... + ik</code>（si 由 buffer 形状推出）。</p>
+
+<div class="srcref">最小例子</div>
+<pre><code>B, L, P, BLK, D = 2, 8, 32, 128, 128
+
+@T.prim_func
+def paged_copy(
+    table: T.Tensor([B, L], "int32"),         # 页表:每个 batch 一行
+    pages: T.Tensor([P, BLK, D], "float16"),  # 物理页池
+    out: T.Tensor([B, L * BLK, D], "float16"),
+):
+    with T.Kernel(B, is_npu=True) as (cid, vid):
+        ub = T.alloc_ub([BLK, D], "float16")
+        for lg in range(L):
+            # 关键行:二维标量读。改动前只发最内层的 lg,
+            # 前导的 cid 被整个丢掉 -> 每个 batch 都按页表第 0 行搬页
+            ph = table[cid, lg]
+            T.copy(pages[ph, :, :], ub)
+            T.copy(ub, out[cid, lg * BLK : lg * BLK + BLK, :])</code></pre>
+<p class="cap">关键只有 <code>ph = table[cid, lg]</code> 这一行：改动前它发成 <code>table.GetValue(lg)</code>，cid 蒸发，B 个核搬的是同一批物理页；改动后发成 <code>table.GetValue(cid * 8 + lg)</code>。把 B 改成 1 跑，两种行为的结果完全一样 —— 这正是这个 bug 能长期潜伏的原因。下面两条 <code>T.copy</code> 不受影响：块搬运走的是另一条 codegen 路径，多维信息是当参数显式传的。</p>
+
+<h3>7.5　kernel.py 里的真实用法：三处多维标量索引</h3>
+<div class="srcref">（一）kernel.py:3553-3575 · SWA · QK 侧 GM→L1 分页加载</div>
+<pre><code>pa_done = pa_cur - pa_start
+if pa_done &lt; win:
+    pa_lg = pa_cur // ori_block_size
+    pa_ph = ori_block_table[b, pa_lg]
+    pa_rem = pa_cur % ori_block_size
+    pa_run = T.min(
+        ori_block_size - pa_rem,
+        win - pa_done,
+    )
+    T.copy(
+        ori_kv[
+            pa_ph,
+            pa_rem : pa_rem + pa_run,
+            0,
+            h * D2 : h * D2 + D2,
+        ],
+        kv_ring[
+            h,
+            pa_done : pa_done + pa_run,
+            :,
+        ],
+    )
+    pa_cur += pa_run</code></pre>
+<p>SWA 把滑窗内的 K 从分页 KV cache 搬进 L1 的循环。窗口 <code>[ori_left, ori_left + win)</code> 是一段连续 token，但它们在物理内存里被切成了若干页，所以要一页一页走：<code>pa_lg</code> 是逻辑块号，<code>pa_ph = ori_block_table[b, pa_lg]</code> 查出物理块号，<code>pa_rem</code> 是页内偏移，<code>pa_run</code> 是这一页还能贡献多少行，然后一次 <code>T.copy</code> 把 <code>ori_kv[pa_ph, ...]</code> 搬进 KV 环的 slot。<code>b = T.cast(pid // max_seq, "int32")</code>（kernel.py:3504）是当前核处理的 batch。整个循环的正确性完全挂在 <code>ori_block_table[b, pa_lg]</code> 这一次二维标量读上：前导 <code>b</code> 一丢，batch 1 就按 batch 0 的页表去取页，搬回来的 K 完全是别人的数据，QK 打分从第一步就错。这里绕不过去 —— 页表在 GM 上，物理块号只能在核内按 batch 现查。</p>
+
+<div class="srcref">（二）kernel.py:3833-3841 · SWA · 同一 kernel 的 PV 侧 V 分页搬运</div>
+<pre><code>pv_done = pv_cur - pv_start
+if pv_done &lt; winm:
+    pv_lg = pv_cur // ori_block_size
+    pv_ph = ori_block_table[bm, pv_lg]
+    pv_rem = pv_cur % ori_block_size
+    pv_run = T.min(
+        ori_block_size - pv_rem,
+        winm - pv_done,
+    )</code></pre>
+<p>PV 阶段的对称一份：同一张 <code>ori_block_table</code>，换成 PV 侧自己的 batch 变量 <code>bm = T.cast(pidm // max_seq, "int32")</code>（kernel.py:3773 —— PV 走的是另一条任务流水，pid 与 QK 侧不同步，所以 batch 变量也是独立算的）。它按 V 的 D-tile 逐块搬，每个 D-tile 只取 slot 的 PV_NW 列；列这一维是切片、由 <code>T.copy</code> 显式传，不受影响，受影响的只有 <code>ori_block_table[bm, pv_lg]</code> 这一次二维标量读。单列出来是因为它说明这条 bug 在一个 kernel 里会同时污染 QK 和 PV 两条独立的搬运路径 —— 修一处不够，必须是 codegen 层的统一行为。</p>
+
+<div class="srcref">（三）kernel.py:2655-2664, 2673-2681 · SCFA · vector 侧 topk V0 gather 的三维索引</div>
+<pre><code>if jtok &lt; v0lim:
+    r2 = cmp_indices[
+        v0tok,
+        0,
+        v0rel * S2_BASE + jtok,
+    ]
+    blkid = cmp_block_table[
+        v0b,
+        r2 // cmp_block_size,
+    ]
+    # ...
+    T.copy(
+        cmp_kv[
+            blkid,
+            r2 % cmp_block_size,
+            0,
+            :,
+        ],
+        merge_ub[pp, jj, :],
+    )</code></pre>
+<p>SCFA 的稀疏路径：topk 选出来的压缩 token 号存在 <code>cmp_indices</code> 里，vector 侧要按这些 token 号去分页的 <code>cmp_kv</code> 里逐行 gather。这里连着两次多维标量读 —— 先从三维的 <code>cmp_indices</code>（<code>[total_tokens, N2, topk_cmp]</code>）取出 token 号 <code>r2</code>，再从二维的 <code>cmp_block_table</code> 取出该 token 所在的物理页号 <code>blkid</code>，最后 <code>cmp_kv[blkid, r2 % cmp_block_size, 0, :]</code> 搬一行进 UB。<code>v0b</code> 是这条 vector 任务流的 batch（kernel.py:2592），<code>v0tok = q_prefix[v0b] + v0s</code>（kernel.py:2598）是 flat token 号。三维那次尤其能说明问题：一旦只保留最内层下标，<code>v0tok</code> 和中间的 head 维一起蒸发，所有 query token 都会读回 token 0 的 topk 列表 —— 这已经不只是多 batch 的事了。</p>
+
+<h3>7.6　兼容性与坑</h3>
+<p><strong>兼容性：</strong>老代码逐字节不变，靠的是 <code>OffsetOf</code> 在一维 buffer 上是恒等映射，和原来的 <code>op-&gt;indices.back()</code> 输出同一个表达式。算子仓里的一维标量取值全部落在这一类 —— <code>act_q_lens[b]</code>（kernel.py:456）、<code>seqused_kv[b]</code>（458）、<code>q_prefix[b]</code>（485）、<code>act_q_lens[bm]</code>（858）、<code>seqused_kv[bm]</code>（859）、<code>q_prefix[v0b]</code>（2598），生成的 Ascend C 一个字符都不变。真正变了的只有原本就写错的多维标量访问 —— 而这些访问在前导维恒为 0 的场景（B=1）下新旧数值也一样，只是表达式从 <code>GetValue(lg)</code> 变成 <code>GetValue(0 * L + lg)</code> 再被编译器折掉。换句话说：升级编译器后，要么行为不变，要么把一个原本就错的结果改对，不存在「老代码被改坏」的第三种情况。</p>
+<div class="warn"><p><strong>只修了 ascendc codegen。</strong><code>src/target/codegen_ascend_pto.cc:780 / 798</code> 里的同名缺陷本次没动（单测 docstring 明确说明），所以 target 走 pto 的路径上多维标量下标仍然只发最内层。本算子的 Ascend codegen 恒走 <code>tilelang_ascend</code>（非 pto），不受影响；但切到 pto 的 kernel 别以为这条已经好了。</p></div>
+<ul>
+  <li><strong>展平用的是 buffer 的逻辑形状。</strong>UB buffer 的行宽会被 <code>ascend_collect_buffer_shape.cc</code> 的 <code>AlignInnerDim</code> 按 32B 向上对齐，而对齐后的形状是挂在 <code>kLogicBufferShapes</code> 属性上给分配和声明用的，BufferLoad 手里的 <code>op-&gt;buffer</code> 仍是逻辑形状。逻辑行宽不是 32B 整数倍时，<code>buf[i, j]</code> 展平出来的 <code>i * N + j</code> 与实际分配的对齐行宽未必一致。上游单测挑的 N 是 int32 的 8 / 16 / 32（正好 32 / 64 / 128 字节）全是 32B 整数倍，越出这个范围的 UB 多维标量下标要自己核一遍生成的 C。GM buffer 没有这层对齐，不受影响。</li>
+  <li><code>T.alloc_var(dtype, init=...)</code> 拿到的是 <code>local.var</code> 标量寄存器，codegen 直接打印变量名、压根没有下标（<code>if (scope == "local.var") { os &lt;&lt; var_name; }</code>），既不受这条影响也享受不到它 —— 要做多维标量索引，必须是真 buffer（GM 参数或 <code>T.alloc_ub</code> / <code>T.alloc_L1</code> 之类）。</li>
+  <li>展平后每次标量访问多出一次 <code>i0 * s0 + ...</code> 的标量乘加，落在标量流水上。本算子每搬一页才查一次表，可以忽略；但在最内层循环里高频取表的话，注意这条开销是新增的（原来那份「便宜」是错的）。</li>
+  <li><strong>这是纯静默错的修复。</strong>升级前后只跑 B=1 的 kernel 数值一个字节都不会变，别拿 B=1 的回归当作「这条改动对我没影响」的证据。要验证请像 <code>b2f06ee</code> 那样构造前导维非 0 的场景，且让不同前导维的数据真正不同（页号做全局 permutation 再按 batch 切片，而不是每个 batch 用同一套页）。</li>
+</ul>
+<p><strong>测试：</strong>上游单测是 <code>testing/python/language/test_tilelang_ascend_language_scalar_index.py</code>，参数化 <code>(B, N) = (4, 8) / (3, 16) / (2, 32)</code>，target 只跑 ascendc。kernel 体是 <code>buf[b, i] = table[b, i] * 2</code> 的双重循环，一句话同时踩到二维标量读和二维标量写，末尾 <code>T.copy(buf, out)</code> 整块导出，比对 <code>out == table * 2</code>。它被设计成旧代码必挂：<code>table = torch.arange(B * N).reshape(B, N)</code> 每行数值互不相同，丢掉前导 <code>b</code> 之后第 1..B-1 行全部读回第 0 行的值，<code>assert_close</code> 立刻炸；B 全部取 ≥ 2，因为单 batch 下两种实现完全等价。算子仓这边补的是 <code>b2f06ee</code>：<code>test_sparse_attn_sharedkv_fast.py</code> 里用 <code>_shrink_multibatch("swa_prefill" / "cfa_prefill" / "scfa_prefill")</code> 派生出三个 B=2 场景，两条序列长度取 (768, 512)（顺带把 ragged 路径 act_q / act_kv / q_prefix / <code>s &lt; act_q</code> 任务守卫也带上）；<code>golden.py</code> 的 <code>gen_ori_kv_paged</code> 先对物理页号做 <code>rng.permutation(block_num)</code> 再按 batch 顺序切片，两个 batch 拿到的物理页集合不相交，B=2 一跑就分得开。分工是：swa 只碰 ori 页表（kernel.py:3556 / 3836）；cfa 在 cube 侧碰 ori + cmp 两张表（560 / 607 / 928 / 975）；scfa 在 cube 侧碰 ori 表（2065 / 2410），cmp 表则只从 vector 侧的 topk gather 碰一次（2661），并在那里多踩一次三维的 <code>cmp_indices</code>（2656）。</p>
+
+
+  <!-- ===================== 8 ===================== -->
+<h2 id="s8"><span class="num">8</span>窄行归约按物理行宽 stride —— 只归约宽 tile 里的一段列</h2>
+
+<div class="prhead">
+  <span class="badge fix">Bugfix</span>
+  <span class="badge open">待合入</span>
+  <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1422">PR #1422</a>
+</div>
+
+<blockquote><p><strong>一句话：</strong>原来对一块 [M, 512] 的 UB tile 做「每行只归约其中 64 列」会静默算错（只有第 0 行是对的），现在直接写切片 <code>ub[:, a:b]</code> 或 <code>real_shape=[M, 64]</code> 就是对的。</p></blockquote>
+
+<h3>8.1　这块机制是什么</h3>
+<p>昇腾 vector 单元的行归约有两族指令。<code>tl::ascend::reduce_*</code> 落到的是 <code>AscendC::Reduce*</code> 的 <code>{M, N}</code> shape 重载：它把 src 当成一块<strong>连续的 M×N 数据</strong>顺序读完，这个重载的语义里没有「行间步长」。<code>AscendC::WholeReduce*</code> 则按 repeat 组织 —— 每个 repeat 处理一段（最多 256 字节），带一个显式的 <code>srcRepStride</code>（以 32 字节 block 计）说明相邻两个 repeat 之间跳多远。</p>
+<p>TileLang 的 <code>T.reduce_max/min/sum</code> 在 ascendc target 上一直只落到前者。只要归约的逻辑宽度<strong>就是</strong> buffer 的整行宽，两者完全等价；一旦逻辑宽度只是宽行里的一段，前者就无法表达 —— 而它不会报错。</p>
+
+<h3>8.2　原来写不出来的东西</h3>
+<p>内核作者想表达的是：对一块 [16, 512] 的 fp32 UB tile，只归约每行的一段列（<code>[0:64]</code> 或 <code>[64:128]</code>），拿到 [16] 的每行结果。在线 softmax 的 rowmax / rowsum 只对窗口内的有效列有意义，宽 tile 里剩下的是 padding。</p>
+
+<div class="srcref">改动前会这么写</div>
+<pre><code>ub = T.alloc_ub([16, 512], "float")   # 物理行宽 512
+acc = T.alloc_ub([16], "float")
+
+# 写法 A: 用切片说明列范围
+T.reduce_max(ub[:, 64:128], acc, dim=-1)
+
+# 写法 B: 整块进, 用 real_shape 说明逻辑宽度
+T.reduce_max(ub, acc, dim=-1, real_shape=[16, 64])
+
+# 唯一能跑对的绕法: deprecated 的 wholereduce, srcRepStride 手算
+# (512 fp32 = 2048B = 64 个 32B block)
+T.tile.wholereducemax(
+    acc, ub[:, 64:128], 64, 16, 1, 1, 64,
+    ReduceOrder="ORDER_ONLY_VALUE",
+)</code></pre>
+
+<div class="sym"><span class="t">会发生什么</span>编译通过、运行不报错、结果<strong>静默错</strong>。写法 A 和 B 都落到 <code>tl::ascend::reduce_max&lt;float, 16, 64, -1&gt;(...)</code> → <code>AscendC::ReduceMax&lt;float, AscendC::Pattern::Reduce::AR&gt;(dst, src, tmp, shape={16, 64}, true)</code>。该重载把 src 当<strong>连续的 M×N 块</strong>读：写法 B 读的是 flat 元素 <code>[0, 16*64)</code>，也就是第 0 行整行 512 个 + 第 1 行整行 512 个，然后把这 16 个 64 列 chunk 当成 16 行的结果吐出来 —— <code>out[0]</code> 是第 0 行的第一个 chunk（恰好对），<code>out[1..7]</code> 是<strong>第 0 行其余 7 个 chunk</strong>，<code>out[8..15]</code> 是<strong>第 1 行的 8 个 chunk</strong>。写法 A 同理，只是起点挪到 flat 偏移 64。第 0 行永远是对的（它的起点就是切片起点），其余行全错；没有编译错误、没有 warning、没有 runtime 报错。接在在线 softmax 里的表现是「除第一行外整片输出偏掉」，非常容易被误判成同步 race 或者 QK 本身算错。</div>
+
+<p><strong>为什么在内核侧绕不过去：</strong>现成能用的<strong>逐行</strong>归约里，能表达行间步长的只有 <code>T.tile.wholereducemax / wholereducemin / wholereducesum</code>（<code>tilelang/language/ascend_tile.py:1351/1368/1385</code>）。这三个都带 <code>@deprecated()</code> 装饰器，docstring 明写 <code>Currently, this implementation does not support pto target</code>，而且要内核作者自己把物理行宽换算成 32 字节 block 数（512 fp32 → 64）手填进 7 个位置参数里 —— 一个纯硬件层面的量泄漏进算子代码，还把这段代码钉死在非-pto 后端上。kernel.py 在 692edac 之前正是这么写的。另一条绕法是先把窄列段 <code>T.copy</code> 成一块紧凑的 [16, 64] UB 再归约，但这是在 online softmax 的最内层，每个 KV tile × 每个 m-chunk 都要多付一次搬运和一块额外 UB，纯粹是为编译器缺陷买单。</p>
+
+<div class="note">同族里还有一个非 deprecated 的 <code>T.tile.reduce_sum_mask_experiment(dst, src, mask, repeatTime, srcRepStride)</code>（<code>ascend_tile.py:2558</code>），它确实带 <code>srcRepStride</code> 并发到 <code>AscendC::ReduceSum</code> 的 mask/repeat 重载。但它的语义是把全部元素求成一个总和，不是逐行归约，当不了这个场景的绕法。</div>
+
+<h3>8.3　编译器改了什么</h3>
+<ul>
+  <li><code>tilelang/language/reduce_ascend.py</code>：<code>reduce()</code> 在逻辑宽 N 与源 buffer 的物理行宽（<code>src_buffer.shape[-1]</code>）不一致时，往 <code>tl.ascend_reduce</code> 调用的<strong>尾部</strong>追加一个 int32 物理行宽。</li>
+  <li><code>tilelang/language/reduce_ascend.py</code>：这个尾参只在 M、逻辑 N、物理行宽三者<strong>全是编译期常量且行宽 != N</strong> 时才追加（<code>if None not in (m_const, n_const, row_const) and row_const != n_const</code>），因为 codegen 要把 M/N 从模板参数里读回来算 stride。</li>
+  <li><code>src/target/codegen_ascend.cc</code>：<code>ReduceOpCodegen</code> 先从参数尾部剥掉这个「非 bool 的 IntImm」，值 &gt; 0 就走新分支，改发 <code>tl::ascend::reduce_{max,min,sum}_narrow&lt;T&gt;(dst, src, mask=N, repeatTime=M, srcRepStride=物理行宽*elem_bytes/32)</code>。</li>
+  <li><code>src/target/codegen_ascend.cc</code>：新分支带一圈 ICHECK 守卫 —— dim 必须是 -1、N*elem_bytes ≤ 256、clear 必须为 true、物理行宽*elem_bytes 必须是 32 的整数倍；元素字节按 dtype 名逐个枚举，认不出的类型直接 ICHECK 失败而不是默认成 4 字节把 stride 悄悄缩放错。</li>
+  <li><code>src/tl_templates/ascend/common.h</code>：新增 <code>reduce_max_narrow</code> / <code>reduce_min_narrow</code> / <code>reduce_sum_narrow</code> 三个模板，转发到 <code>AscendC::WholeReduceMax/Min/Sum</code>（dstRepStride=1、srcBlkStride=1、显式 srcRepStride；max/min 用 <code>ReduceOrder::ORDER_ONLY_VALUE</code>）。老的 <code>reduce_max</code> / <code>reduce_min</code> / <code>reduce_sum</code> 模板一行没动。</li>
+  <li><code>src/target/codegen_ascend_pto.cc</code>：PTO 的 tile 本来就带物理 stride 视图、结果是对的，所以只在找 <code>clear</code> 时把下标往前跳过这个可能存在的尾参（<code>clear_idx--</code>）。</li>
+  <li><code>testing/python/language/test_tilelang_ascend_language_narrow_reduce.py</code>：新增 128 行真机单测。</li>
+</ul>
+
+<h3>8.4　现在可以这么写</h3>
+<div class="srcref">最小例子</div>
+<pre><code>M, BUF_N, W = 16, 512, 64
+
+@T.prim_func
+def main(
+    src: T.Tensor([M, BUF_N], "float"),
+    out_slice: T.Tensor([M], "float"),
+    out_real: T.Tensor([M], "float"),
+):
+    with T.Kernel(1, is_npu=True) as (_, vid):
+        ub = T.alloc_ub([M, BUF_N], "float")
+        acc_slice = T.alloc_ub([M], "float")
+        acc_real = T.alloc_ub([M], "float")
+        if vid == 0:
+            T.copy(src, ub)
+            # 写法 A: 切片直接说明列范围(起点可以是任意合法列)
+            T.reduce_max(ub[:, 0:W], acc_slice, dim=-1)
+            # 写法 B: 整块进, real_shape 说明逻辑宽度(只能从第 0 列起)
+            T.reduce_max(ub, acc_real, dim=-1, real_shape=[M, W])
+            T.copy(acc_slice, out_slice)
+            T.copy(acc_real, out_real)</code></pre>
+<p class="cap">关键在 <code>T.reduce_max</code> 的第一个参数：逻辑宽 64 与 <code>ub</code> 的物理行宽 512 不一致，前端就把 512 补在归约调用尾部，codegen 据此改发带 <code>srcRepStride</code> 的 <code>WholeReduceMax(mask=64, repeat=16, srcRepStride=512*4/32=64)</code> —— 一行一个 repeat，跨行跳 64 个 32B block。签名里没有任何新参数，两种写法都会被识别；这里让它们归约同一段 <code>[0:W]</code>，所以 <code>out_slice</code> 与 <code>out_real</code> 应当逐位相同（两条写法各自一个 dst 和一个输出，写成同一个 dst 会让先写的那条变成死代码，退回连续块走法也验证不出来）。把 <code>W</code> 改成 128 会被 ICHECK 挡下：128×4 &gt; 一个 repeat 的 256 字节上限。<code>M, BUF_N, W</code> 定义在 <code>prim_func</code> 外层，是为了避开体内常量会变成符号 Var 的老坑。</p>
+
+<h3>8.5　kernel.py 里的真实用法（一）：CFA 在线 softmax 的 rowmax</h3>
+<div class="srcref">kernel.py:1211-1231 · CFA · 在线 softmax 的 rowmax（窄窗分支）</div>
+<pre><code>if is_narrow:
+    T.tile.fill(
+        m_i[buf, mc, :, :],
+        -T.infinity(accum_dtype),
+    )
+    for kc in range(BI // 64):
+        if kc * 64 &lt; tw_64:
+            T.reduce_max(
+                in_ub[
+                    ps,
+                    :,
+                    kc * 64 : kc * 64 + 64,
+                ],
+                part,
+                dim=-1,
+            )
+            T.tile.max(
+                m_i[buf, mc, :, :],
+                m_i[buf, mc, :, :],
+                part,
+            )</code></pre>
+<p>CFA 每个 KV tile 在线 softmax 的第一步：对刚算出的 QK 打分 <code>in_ub[ps]</code>（一块 [16, 512] 的 fp32 tile）求每行最大值 <code>m_i</code>。真正有效的列只有运行时的 <code>tw</code> 列（滑窗宽度或 compressed tile 的实际宽度）—— 第 1164 行先对整块 <code>in_ub[ps, :, :]</code> 满宽 <code>fill(-inf)</code>，再只把 <code>[0:tw]</code> 搬进来，所以 <code>[tw:512]</code> 全是 -inf padding；归约宽度按 64 对齐到 <code>tw_64</code>，多出来的 <code>[tw:tw_64]</code> 正是靠这段 -inf 才允许被算进来（reduce_max 忽略、exp 后为 0）。窄窗分支（<code>is_narrow = tw &lt;= BI</code>，BI=128）不愿为 512 列全宽付代价，于是先把 <code>m_i</code> 填成 -inf，再按 64 列一块对 <code>in_ub[ps, :, kc*64 : kc*64+64]</code> 做 <code>T.reduce_max</code>，用 <code>T.tile.max</code> 把每块结果无条件合并进 <code>m_i</code> —— 每一次 <code>T.reduce_max</code> 都是一次窄归约：逻辑宽 64、物理行宽 512、M=16。为什么必须切成 64 列块而不是一次归约 <code>tw_64</code> 列：一个 repeat 上限 256 字节，fp32 就是 64 个元素，这正是 <code>for kc in range(BI // 64)</code> 和 <code>tw_64 = (tw + 63) // 64 * 64</code> 的由来。改动之前这条只能写成 deprecated 的 <code>T.tile.wholereducemax(part, ..., 64, M_CHUNK, 1, 1, 64, ReduceOrder="ORDER_ONLY_VALUE")</code>，把 srcRepStride 手算成 64 个 32B block 填进去（见 692edac 的 diff）；换成 <code>T.reduce_max</code> 后实参从 8 个（7 个位置参数 + <code>ReduceOrder</code>）降到 3 个，硬件量不再泄漏进算子。紧跟其后的 <code>else</code> 一路（宽 cmp tile，512 列全有效、无 padding 可省）反而走普通全宽 <code>T.reduce_max</code>，因为 8 块的标量合并比一条宽指令贵。</p>
+
+<h3>8.6　kernel.py 里的真实用法（二）：CFA 在线 softmax 的分母</h3>
+<div class="srcref">kernel.py:1350-1367 · CFA · 在线 softmax 的 denom += sum(P)</div>
+<pre><code>if is_narrow:
+    T.tile.fill(sumP, T.float32(0.0))
+    for kc in range(BI // 64):
+        if kc * 64 &lt; tw_64:
+            T.reduce_sum(
+                in_ub[
+                    ps,
+                    :,
+                    kc * 64 : kc * 64 + 64,
+                ],
+                part,
+                dim=-1,
+            )
+            T.tile.add(sumP, sumP, part)
+else:
+    T.reduce_sum(
+        in_ub[ps, :, :], sumP, dim=-1
+    )</code></pre>
+<p>同一块 <code>in_ub[ps]</code> 此时装的已经是减完 rowmax、取过 exp 的概率 P，在线 softmax 的分母要把这一 tile 的行和累加进 <code>denom</code>。结构与 rowmax 完全同构，只是算子换成 <code>T.reduce_sum</code>、合并算子换成 <code>T.tile.add</code>、初值 fill 成 0 而不是 -inf。它被放在 cast 之后，是因为 <code>reduce_sum</code> 会破坏 src，必须等 cast 先把 P 读完（中间隔了一个 <code>T.pipe_barrier("v")</code>）。这里窄归约的价值和 rowmax 略有不同：padding 经过 exp 之后是 0，求和其实不怕读到它 —— 真正怕的是<strong>读错行</strong>。改动之前照直写 <code>T.reduce_sum(in_ub[ps, :, kc*64 : kc*64+64], part, dim=-1)</code>，第 0 行之外全错（<code>out[1..7]</code> 是第 0 行其余 chunk 的和、<code>out[8..15]</code> 是第 1 行的 8 个 chunk），denom 一错整条 softmax 的输出就全错，而且不报任何错。SCFA 侧第 2826-2846 / 2965-2982 行是逐字节相同的两份；SCFA 的 tile 宽度还额外被 topk 压缩过，宽窄两条路在同一次运行里都会真的走到。</p>
+
+<h3>8.7　兼容性与坑</h3>
+<p><strong>兼容性：</strong>尾参只在<strong>逻辑宽 != 物理行宽</strong>且 M / 逻辑 N / 物理行宽三者都是编译期常量时才追加。整块归约（N 就等于物理行宽，也就是绝大多数既有调用）走的参数列表和改动前逐字节一致，codegen 剥参数时看到尾部是 bool（<code>clear</code>）就直接落进老分支。<code>common.h</code> 里老的 <code>reduce_max</code> / <code>reduce_min</code> / <code>reduce_sum</code> / <code>reduce_sum_half</code> 模板一个字符没动，新增的是三个独立的 <code>*_narrow</code> 模板。</p>
+<p><strong>但窄路径本身不是纯增量：</strong>一批「改动前能编过、只是答案静默错」的写法（列归约 <code>dim=0</code> 的窄切片、<code>clear=False</code> 的窄归约、逻辑宽超过一个 repeat 的窄归约）现在会变成硬 ICHECK 失败。从静默错答案换成编译报错是好事，但升级编译器后原本「能跑」的代码可能编不过。</p>
+
+<div class="warn">PTO 侧只在<strong>不追加尾参</strong>时逐字节不变。追加尾参后 <code>codegen_ascend_pto.cc</code> 已经会跳过它，但 <code>src/transform/allocate_tmp_buffer.cc:276-280</code>（<code>NeedReduceOutputTmp</code>）和 <code>:371-374</code> 仍按 <code>args.back()</code> 是不是 const-false bool 来找 <code>clear</code>，尾参一加就失配 → reduce_out tmp buffer 既不分配也不注入 → 走到 <code>codegen_ascend_pto.cc:3553</code> 的 <code>ICHECK(op-&gt;args.size() &gt;= 6 &amp;&amp; op-&gt;args[4].as&lt;CallNode&gt;())</code> 编译失败，报 <code>PTO reduce(clear=False) expects an injected temporary output buffer.</code>。也就是说 <strong>PTO + 窄归约 + clear=False</strong> 是一条改动前可用、改动后编译失败的路。最小复现：把 <code>examples/reduce/example_row_reduce_max_slice_buffer.py</code>（target="pto"、[4,8] buffer、<code>real_shape=[4,4]</code>）那句 reduce 加上 <code>clear=False</code>。仓内现有的 clear=False 单测用的是满宽 (64,64) 归约、不追加尾参，CI 碰不到这条路。</div>
+
+<ul>
+  <li>一个 vector repeat 最多 256 字节 → <strong>逻辑宽度 × 元素字节 ≤ 256</strong>（fp32 只能 64 列，fp16 128 列）。超了 ICHECK 直接报错并提示自己切段合并 —— kernel.py 里那圈 <code>for kc in range(BI // 64)</code> 加 <code>T.tile.max</code> / <code>T.tile.add</code> 就是这么被逼出来的。</li>
+  <li>只支持 <code>dim == -1</code>（行归约）。<code>dim == 0</code> 的列归约走不到这条路，会撞 ICHECK <code>narrow reduce is only implemented for a row reduce</code>。</li>
+  <li>不支持 <code>clear == False</code>：不能把窄归约的结果并进目标，必须归约到 scratch 再自己合并（kernel.py 用的就是 <code>part</code> + <code>T.tile.max</code> / <code>T.tile.add</code>）。</li>
+  <li>物理行宽 × 元素字节必须是 <strong>32 的整数倍</strong>（srcRepStride 以 32B block 计），否则整除会截断、stride 走短甚至变 0。ICHECK 守着这一条。</li>
+  <li>只有 M / 逻辑宽 / 物理行宽<strong>三者全是编译期常量</strong>时才会走窄路径。任何一个是符号量，前端就不追加尾参，直接退回老的连续块走法且<strong>不报任何错</strong> —— 也就是又变回静默错答案。所以窄归约的宽度千万别写成运行时变量；kernel.py 的做法是宽度定死 64、用运行时的 <code>tw_64</code> 去 guard 哪些 chunk 参与。</li>
+  <li>切片起点 <code>a</code> 没有任何一层校验：它会原样变成 <code>WholeReduce*</code> 源操作数的元素偏移，而向量指令要求操作数起始地址 32 字节对齐（fp32 → <code>a</code> 是 8 的倍数，fp16 → 16 的倍数）。<code>ub[:, 4 : 68]</code> 这种偏移前端和 codegen 都会照单全收、不报错。上游单测的 offset 只覆盖 0 / 64 / 448，kernel.py 用的是 64 的倍数，未对齐的起点没有被验证过。</li>
+  <li>元素字节是按 <strong>codegen 侧的 dtype 名</strong>枚举的：<code>float</code> / <code>int32_t</code> / <code>uint32_t</code> = 4，<code>half</code> / <code>bfloat16_t</code> / <code>int16_t</code> / <code>uint16_t</code> = 2，<code>int8_t</code> / <code>uint8_t</code> / <code>float8_e4m3_t</code> / <code>float8_e5m2_t</code> = 1。<strong>int32 用不了</strong>：前端 <code>tilelang/language/ascend.py::_dtype</code> 的 type_map 把 <code>int32</code> 发成 <code>int</code>，而枚举表里写的是 <code>int32_t</code>，对不上 —— int32 buffer 做窄归约会撞 <code>ICHECK(elem_bytes &gt; 0)</code>，报 <code>narrow reduce does not know the element size of 'int'</code> 直接编译失败（<code>int32_t</code> 那一支是死代码）。<code>int64</code> / <code>uint64</code> / <code>int4</code> 同样不在表里。至少这是硬报错而不是默认 4 字节把 stride 悄悄缩放错。</li>
+  <li>窄路每个 chunk 要一次 reduce 加一次标量合并。当整行都有效时（比如 512 列全参与）走普通宽 reduce 更快 —— kernel.py 用 <code>is_narrow = tw &lt;= BI</code> 分路，注释里写明「8-chunk 的标量开销太贵」。</li>
+  <li>归约 dst 留在 UB 里用 <code>[M, 1]</code> 没问题（kernel.py 的 <code>part</code> / <code>sumP</code> 就是）。但要把每行标量直接 UB→GM 导出时得用一维 <code>[M]</code>，否则会撞上 32B block 对齐重排的老坑 —— 上游单测的输出就是特意写成 <code>[M]</code> 的。</li>
+</ul>
+
+<p><strong>上游单测：</strong><code>testing/python/language/test_tilelang_ascend_language_narrow_reduce.py</code>（PR 新增，128 行）。M=16、buf_n=512，两种写法各一组 parametrize：<code>test_narrow_reduce_real_shape</code>（op ∈ {sum, max, min} × valid ∈ {64, 32, 16}）和 <code>test_narrow_reduce_column_slice</code>（op ∈ {sum, max, min} × offset ∈ {0, 64, 448}），后者顺便覆盖了切片起点贴近 buffer 尾部的情况。测试是<strong>设计成旧代码必挂</strong>的：<code>_data()</code> 把归约窗口之外的列灌成 poison（sum → 7.0、max → 100.0、min → -100.0），一旦按连续 M×N 块乱走就一定会读进 poison，靠运气蒙对不可能。更关键的一手是 poison 只灌到 <code>data[1:, ...]</code>，<strong>第 0 行故意留干净</strong> —— 因为第 0 行在错误走法下也恰好是对的，如果连它也灌 poison，就分不清到底是哪些行真的走错了；docstring 里把这一点写明了。</p>
+
+
+  <!-- ===================== 9 ===================== -->
+  <h2 id="s9"><span class="num">9</span>合起来看 · 速查表</h2>
+
+  <h3>9.1　15 处需求，最后只剩 8 处</h3>
+
+  <p>下表是全部 15 处原始需求的去向。<strong>「撤回」不是妥协 —— 是核实之后发现现有基础原语拼得出来，「表达不了」的论据不成立。</strong></p>
+
+  <div class="tablewrap">
+  <table>
+    <tr><th>原始需求</th><th>去向</th><th>怎么消失的</th></tr>
+    <tr><td>整数 max/min 三元表达式</td><td>✅ PR #1309</td><td>—</td></tr>
+    <tr><td><code>gemm_v0</code> N 切分</td><td>✅ PR #1312</td><td>—</td></tr>
+    <tr><td><code>copy_pa</code>（分页 KV 直读进 L1）</td><td>❌ 撤回</td><td>前端用 <code>T.copy</code> 的运行期行切片 + <code>alloc_var</code> 计数器 + 页表间接寻址拼出来了，零新原语</td></tr>
+    <tr><td><code>gemm_v0_fixp</code>（L0C 即时 fixpipe）</td><td>❌ 解构</td><td rowspan="5">整条 12 参链被拆成 <code>T.mma</code> + 显式 L0 载入 + 融合 fixpipe。6 处调用全是 <code>transpose_B=True</code>，模板的 N-tile 循环退化成单轮，13 个参数里有 5 个存在的唯一目的是把模板自己关掉</td></tr>
+    <tr><td><code>gemm_v0_fixp</code> L0C ping-pong</td><td>❌ 解构</td></tr>
+    <tr><td><code>gemm_v0_fixp</code> K 累加</td><td>❌ 解构（<code>cmatrixSource</code> 残片进了 #1422）</td></tr>
+    <tr><td><code>gemm_v0_fixp</code> prime-once</td><td>❌ 解构</td></tr>
+    <tr><td><code>gemm_v0_fixp</code> per-K-chunk</td><td>❌ 解构</td></tr>
+    <tr><td><code>row_expand_sub</code>/<code>div</code></td><td>❌ 撤回</td><td rowspan="2">上游已有 <code>row_expand_*_experiment</code>，改成 kernel.py 适配它的契约（caller 自己切列段）</td></tr>
+    <tr><td><code>row_expand_mul_nd</code></td><td>❌ 撤回</td></tr>
+    <tr><td><code>gemm_v0</code>/<code>mma</code> 运行期 <code>n_actual</code></td><td>✅ PR #1352</td><td>—</td></tr>
+    <tr><td><code>softmax_flash_v2</code></td><td>❌ 撤回</td><td>在线 softmax 在前端手拼（<code>reduce_max</code> → <code>row_expand_sub</code> → <code>exp</code> → <code>reduce_sum</code>），顺带催生了第 5 节的 <code>exp_experiment</code></td></tr>
+    <tr><td><code>T.mma</code>/<code>T.copy</code> 接 <code>unit_flag</code>/<code>k_actual</code>/<code>real_k</code></td><td>🟡 PR #1422</td><td>—</td></tr>
+    <tr><td>GM↔UB copy 运行期内层 extent</td><td>✅ PR #1337</td><td>—</td></tr>
+    <tr><td><code>copy_gather</code></td><td>❌ 撤回</td><td>kernel.py 只用 <code>block_count=1</code> 的单块拷贝，<code>T.copy</code> 完全等价</td></tr>
+  </table>
+  </div>
+
+  <p>另外三处是解构过程中新撞出来的，不在原始 15 处里：<code>exp_experiment</code>（PR #1399）、多维标量下标展平、窄行归约按物理行宽 stride（后两者在 PR #1422）。</p>
+
+  <h3>9.2　结果：kernel.py 里私有原语归零</h3>
+
+  <p>这 8 处能力凑齐之后，<code>kernel.py</code>（SWA / CFA / SCFA 三个完整算子，4146 行）<strong>只使用上游标准原语</strong>。以下调用点全部为 0：</p>
+
+  <div class="tablewrap">
+  <table>
+    <tr><th>曾经的私有依赖</th><th>现在的写法</th><th>调用点</th></tr>
+    <tr><td><code>T.copy_pa</code></td><td>前端分页 load（运行期行切片 <code>T.copy</code> + 页表间接寻址）</td><td class="zero">0</td></tr>
+    <tr><td><code>T.gemm_v0_fixp</code></td><td><code>T.mma</code> + 显式 L0 载入 + 融合 fixpipe（第 6 节）</td><td class="zero">0</td></tr>
+    <tr><td><code>T.tile.softmax_flash_v2</code></td><td>前端手拼在线 softmax（第 5、8 节）</td><td class="zero">0</td></tr>
+    <tr><td><code>T.copy_gather</code></td><td><code>T.copy</code></td><td class="zero">0</td></tr>
+    <tr><td><code>wholereduce</code>（已废弃形态）</td><td><code>T.reduce_max</code> / <code>T.reduce_sum</code>（第 8 节）</td><td class="zero">0</td></tr>
+  </table>
+  </div>
+
+  <h3>9.3　解构之后反而更快</h3>
+
+  <p>把 QK 从 <code>gemm_v0_fixp</code> 模板解构成内核驱动的 <code>T.mma</code> 序列（第 6 节），性能不是持平，是<strong>直接快了约 12 个百分点</strong>。原因藏在模板内部：</p>
+
+  <div class="srcref">src/tl_templates/ascend/common.h · gemm_v0 首尾</div>
+<pre><code>SetFlag&lt;HardEvent::MTE2_MTE1&gt;(L0AB_EVENT);    // 1187
+WaitFlag&lt;HardEvent::MTE2_MTE1&gt;(L0AB_EVENT);   // 1188  &lt;-- set 紧跟 wait，同一个 event
+...
+SetFlag&lt;HardEvent::MTE1_MTE2&gt;(L0AB_EVENT);    // 1248
+WaitFlag&lt;HardEvent::MTE1_MTE2&gt;(L0AB_EVENT);   // 1249  &lt;-- 同样</code></pre>
+
+  <div class="warn">
+    <p><strong>判据：<code>SetFlag(e)</code> 紧跟 <code>WaitFlag(e)</code>（同一 event）不是给某个 buffer 定序，而是 drain 整条 pipe。</strong>效果等同一条 pipe barrier。</p>
+  </div>
+
+  <p>于是模板每被调用一次，就强制「所有 MTE2 完成才能开始 MTE1」，并且挡住<strong>下一次 KV 页加载</strong>在当前这次 gemm 的 L1→L0 结束之前发出 —— 正好把内核精心搭的 3 槽 KV 环存在的全部意义废掉。解构之后这两对围栏自然消失（内核自己的 per-slot <code>MTE2_MTE1</code> / <code>MTE1_MTE2</code> 是<strong>定向的</strong>，守同样的 hazard 但不 drain 整条 pipe）。</p>
+
+  <p>msprof 实测（8K prefill，同机同跑，两次取中位；数字是 <em>Ascend C 耗时 / TileLang 耗时</em>，大于 100% 表示 TileLang 更快）：</p>
+
+  <div class="tablewrap">
+  <table>
+    <tr><th>场景</th><th>解构前</th><th>解构后</th></tr>
+    <tr><td>swa_prefill</td><td class="num-cell">112.1%</td><td class="num-cell"><strong>124.0%</strong></td></tr>
+    <tr><td>scfa_prefill</td><td class="num-cell">104.2%</td><td class="num-cell"><strong>115.4%</strong></td></tr>
+    <tr><td>cfa_prefill</td><td class="num-cell">95.6%</td><td class="num-cell">96.3%</td></tr>
+    <tr><td>swa_decode / cfa_decode / scfa_decode</td><td class="num-cell">—</td><td class="num-cell">163% / 127% / 126%</td></tr>
+  </table>
+  </div>
+
+  <p><code>cfa_prefill</code> 不涨是预期内：CFA 是 co-bound（aic ≈ aiv），cube 侧的提速被 vector 侧的瓶颈吃掉，要再往上只能从 vector 侧想办法。</p>
+
+  <h3>9.4　速查：想干什么 → 用什么</h3>
+
+  <div class="tablewrap">
+  <table>
+    <tr><th>想干的事</th><th>写法</th><th>节</th></tr>
+    <tr><td>运行期整数夹取（窗口边界、一次搬多少行）</td><td><code>T.max(a, b)</code> / <code>T.min(a, b)</code>，照常写</td><td><a href="#s1">1</a></td></tr>
+    <tr><td>N 大到塞不进 L0B 的矩阵乘</td><td><code>T.gemm_v0(...)</code>，模板内部自己切</td><td><a href="#s2">2</a></td></tr>
+    <tr><td>按运行期宽度搬 GM↔UB</td><td><code>T.copy(A[..., 0:n], ub[:, 0:n])</code></td><td><a href="#s3">3</a></td></tr>
+    <tr><td>矩阵乘只算真实窗口那几列</td><td><code>n_actual=</code>（<code>T.gemm_v0</code> / <code>T.mma</code>）</td><td><a href="#s4">4</a>、<a href="#s6">6</a></td></tr>
+    <tr><td>在宽缓冲里原地只 exp 窗口那几列</td><td><code>T.tile.exp_experiment(dst, src)</code></td><td><a href="#s5">5</a></td></tr>
+    <tr><td>内核自己驱动 L1→L0→mma→fixpipe</td><td><code>real_k=</code> / <code>real_n=</code> / <code>k_actual=</code> / <code>unit_flag=</code></td><td><a href="#s6">6</a></td></tr>
+    <tr><td>fixpipe 与下一个 mma 重叠（L0C 乒乓）</td><td><code>T.mma(unit_flag=0b11)</code> + <code>T.copy(L0C→GM, unit_flag=0b11)</code></td><td><a href="#s6">6</a></td></tr>
+    <tr><td>多维 buffer 的标量取值（页表查表）</td><td><code>table[b, i]</code>，照常写</td><td><a href="#s7">7</a></td></tr>
+    <tr><td>只归约宽 tile 里的一段列</td><td><code>T.reduce_max(ub[:, a:b], out, dim=-1)</code></td><td><a href="#s8">8</a></td></tr>
+  </table>
+  </div>
+
+  <h3>9.5　还没做的</h3>
+
+  <ul>
+    <li><strong>PR #1422 尚未合入。</strong>合入之前，本仓 <code>kernel.py</code> 需要 fork 分支才能编译。</li>
+    <li><strong>PTO 后端有两处同类缺口没补</strong>：多维标量下标展平（第 7 节）在 <code>codegen_ascend_pto.cc</code> 里是同样的写法，但那边全局 buffer 的寻址方式不同，要单独看；窄行归约（第 8 节）PTO 侧本来就是对的（它有物理 stride 视图），不需要改。</li>
+    <li><code>cfa_prefill</code> 是六个场景里唯一没超过 Ascend C 的（96.3%），瓶颈在 vector 侧。</li>
+  </ul>
+
+</div>
+
+<a class="totop" href="#top" aria-label="回到顶部">↑</a>
+</body>
+</html>
