@@ -260,7 +260,7 @@
   <p class="snav-title">目录</p>
   <ol>
     <li><a href="#s0"><span class="n">0</span><span>导读 · 一页总览</span></a></li>
-    <li><a href="#s1"><span class="n">1</span><span>运行期整数夹取编得过</span></a></li>
+    <li><a href="#s1"><span class="n">1</span><span>运行期 max/min 编得过</span></a></li>
     <li><a href="#s2"><span class="n">2</span><span>大 N 的 PV 矩阵乘一句写完</span></a></li>
     <li><a href="#s3"><span class="n">3</span><span>copy 最内维可用运行期宽度</span></a></li>
     <li><a href="#s4"><span class="n">4</span><span>gemm 输出列数可用运行期值</span></a></li>
@@ -290,7 +290,7 @@
     <h2>目录</h2>
     <ol start="0">
       <li><span class="ix">0.</span> <a href="#s0">导读 · 一页总览</a></li>
-      <li><span class="ix">1.</span> <a href="#s1">整数标量 max/min 发成三元表达式 —— 让运行期夹取在昇腾后端编得过</a></li>
+      <li><span class="ix">1.</span> <a href="#s1">整数标量 max/min 发成三元表达式 —— 让运行期的 max/min 在昇腾后端编得过</a></li>
       <li><span class="ix">2.</span> <a href="#s2">gemm_v0 在模板内部按列切 N，让 headDim=512 的 PV 矩阵乘能一句写完</a></li>
       <li><span class="ix">3.</span> <a href="#s3">GM↔UB copy / atomic_add 的最内（列）维可以是运行期表达式了 —— 按真实窗口宽度搬，而不是按 buffer 定宽搬</a></li>
       <li><span class="ix">4.</span> <a href="#s4">gemm_v0 / mma 的运行期输出列数 n_actual —— 让 QK 只算真实窗口那几列</a></li>
@@ -314,7 +314,7 @@
     <tr>
       <th>PR</th><th>性质</th><th>能力</th><th>原来</th><th>现在</th>
     </tr>
-    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1309">#1309</a></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s1">运行期整数标量夹取</a></td><td>运行期整数夹取只要混宽就报 ambiguous、整个 kernel 编不出来</td><td>T.max / T.min 照写，夹取结果能直接当切片边界和搬运行数用</td></tr>
+    <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1309">#1309</a></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s1">运行期整数标量 max/min</a></td><td>两边整数宽度不同就报 ambiguous，整个 kernel 编不出来</td><td>T.max / T.min 照写，结果能直接当切片边界和搬运行数用</td></tr>
     <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1312">#1312</a></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s2">gemm_v0 自动按列切 N</a></td><td>N=512 的 PV 一句写会把 128KB 的 B 片塞进 64KB 的 L0B，运行期 aicore 挂死</td><td>同一句 T.gemm_v0 不改一个字，B 自动按 128 列切 4 段，每段 32KB 正好装下</td></tr>
     <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1337">#1337</a></td><td><span class="badge fix">Bugfix</span></td><td><a href="#s3">GM↔UB copy 运行期列宽</a></td><td>最内维切成运行期宽度就编不过，只能按 buffer 定宽 512 满宽搬</td><td>T.copy 最内维直接写 0:tw，只搬真实有效的那几列</td></tr>
     <tr><td><a href="https://github.com/tile-ai/tilelang-ascend/pull/1352">#1352</a></td><td><span class="badge feat">Feat</span></td><td><a href="#s4">gemm/mma 运行期输出列数 n_actual</a></td><td>输出列数只能是编译期模板 N，整块 N 列算完再到下游把窗口外的尾巴掩掉</td><td>传一个运行期 n_actual，cube 只算真实窗口那几列，0b11 融合 fixpipe 才搬得了窄带</td></tr>
@@ -352,7 +352,7 @@
 
 
   <!-- ===================== 1 ===================== -->
-<h2 id="s1"><span class="num">1</span>整数标量 max/min 发成三元表达式 —— 让运行期夹取在昇腾后端编得过</h2>
+<h2 id="s1"><span class="num">1</span>整数标量 max/min 发成三元表达式 —— 让运行期的 max/min 在昇腾后端编得过</h2>
 
 <div class="prhead">
   <span class="badge fix">Bugfix</span>
@@ -360,15 +360,15 @@
   <a class="prlink" href="https://github.com/tile-ai/tilelang-ascend/pull/1309">PR #1309</a>
 </div>
 
-<blockquote><p><strong>一句话：</strong>原来 kernel 里只要出现一个运行期（编译期折不掉）、且两个操作数整数宽度不一致的 <code>T.max</code> / <code>T.min</code>，生成的 AscendC 就会被 bisheng 顶回来 <code>call to 'max' is ambiguous</code>，整个 kernel 编不出来；现在整数标量 max/min 一律打成 <code>(a &gt; b ? a : b)</code>，运行期夹取可以随便写。</p></blockquote>
+<blockquote><p><strong>一句话：</strong>原来 kernel 里只要出现一个运行期（编译期折不掉）、且两个操作数整数宽度不一致的 <code>T.max</code> / <code>T.min</code>，生成的 AscendC 就会被 bisheng 顶回来 <code>call to 'max' is ambiguous</code>，整个 kernel 编不出来；现在整数标量 max/min 一律打成 <code>(a &gt; b ? a : b)</code>，运行期的 max/min 可以随便写。</p></blockquote>
 
 <h3>1.1　原来写不出来的东西</h3>
 
 <p>昇腾后端最后交给 bisheng 的是一份 AscendC C++ 源码。改动前，<code>T.max(a, b)</code> / <code>T.min(a, b)</code> 在这份源码里就是一个不带命名空间的裸 <code>max(a, b)</code> / <code>min(a, b)</code> 函数调用，类型决议整个甩给 C++ 重载；而这份源码的 prelude 既没有 <code>&lt;algorithm&gt;</code>，也没有 <code>using namespace std</code>，裸 <code>max</code> 解析到哪个重载完全取决于 CANN 头文件链恰好拖进来了什么。</p>
 
-<p>还有一个前提决定了这个坑什么时候才现形：编译期能算出结果的夹取会被提前折成常量，根本不会出现在生成的源码里。只有依赖运行期值（张量取值、grid 变量、<code>T.alloc_var</code> 游标、<code>T.symbolic</code> 形状）的 max/min 才会真的被打印出来。</p>
+<p>还有一个前提决定了这个坑什么时候才现形：编译期能算出结果的 max/min 会被提前折成常量，根本不会出现在生成的源码里。只有依赖运行期值（张量取值、grid 变量、<code>T.alloc_var</code> 游标、<code>T.symbolic</code> 形状）的 max/min 才会真的被打印出来。</p>
 
-<p>内核作者想写的正是「运行期整数夹取」——滑动窗口的左边界要夹到序列开头 0、分页 KV 一次 DMA 能搬多少行要在「本物理页剩余行」和「窗口还差多少行」之间取小、tile 尾段的实际列宽要在 tile 宽和剩余 token 数之间取小。这些量依赖 <code>seqused_kv</code> / <code>act_q_lens</code> / <code>block_table</code> 或 grid 变量，编译期一个都定不下来。</p>
+<p>内核作者想写的正是「拿运行期的值取 max/min」——滑动窗口的左边界不能小于序列开头 0、分页 KV 一次 DMA 能搬多少行要在「本物理页剩余行」和「窗口还差多少行」之间取小、tile 尾段的实际列宽要在 tile 宽和剩余 token 数之间取小。这些量依赖 <code>seqused_kv</code> / <code>act_q_lens</code> / <code>block_table</code> 或 grid 变量，编译期一个都定不下来。</p>
 
 <div class="srcref">改动前会这么写</div>
 <pre><code>BI, ORI_WIN_LEFT = 128, 127        # 编译期常量放 prim_func 外层
@@ -378,19 +378,19 @@ def main(K: T.Tensor((S, D), "float16"), O: T.Tensor((S, D), "float16")):
     with T.Kernel(core_num, is_npu=True) as (cid, vid):
         k_ub = T.alloc_ub((BI, D), "float16")
         # cid 是 grid block 变量,生成的源码里是 auto cid = AscendC::GetBlockIdx(),
-        # auto 取的是 GetBlockIdx() 的 int64 返回类型。它对 int 字面量 0 做整数
-        # 夹取,两个操作数的宽度就不一致了。
+        # auto 取的是 GetBlockIdx() 的 int64 返回类型。它对 int 字面量 0 取整数
+        # max,两个操作数的宽度就不一致了。
         ori_left = T.max(cid * BI - ORI_WIN_LEFT, 0)   # &lt;-- 这一行就是雷
         T.copy(K[ori_left, 0], k_ub)
         T.copy(k_ub, O[cid * BI, 0])</code></pre>
 
-<div class="sym"><span class="t">会发生什么</span>不是算错，是<strong>根本编不出来</strong>。生成的源码把夹取内联成裸调用 <code>max((cid * 128 - 127), 0)</code>，直接塞进 DMA 的行偏移表达式里；bisheng 编这份源码时报 <code>error: call to 'max' is ambiguous</code> —— <code>max(int64_t, int)</code> 的多个重载同样可行，决议不出来。报错点落在生成的 C++ 临时文件上，回溯不到 Python 源码的那一行，第一次撞上只看得到一坨陌生的行号。</div>
+<div class="sym"><span class="t">会发生什么</span>不是算错，是<strong>根本编不出来</strong>。生成的源码把这个 max 内联成裸调用 <code>max((cid * 128 - 127), 0)</code>，直接塞进 DMA 的行偏移表达式里；bisheng 编这份源码时报 <code>error: call to 'max' is ambiguous</code> —— <code>max(int64_t, int)</code> 的多个重载同样可行，决议不出来。报错点落在生成的 C++ 临时文件上，回溯不到 Python 源码的那一行，第一次撞上只看得到一坨陌生的行号。</div>
 
-<div class="note"><p>触发条件比「任何运行期整数 max/min」窄：歧义来自两个操作数<strong>整数宽度不一致</strong>的组合，典型就是 <code>auto cid = AscendC::GetBlockIdx()</code> 拿到的 int64 对上 int 字面量。同宽的运行期夹取（两个 int32）在改动前也能编过，所以这个坑一直潜伏着，直到某处少了一个 <code>T.cast</code> 才炸。</p></div>
+<div class="note"><p>触发条件比「任何运行期整数 max/min」窄：歧义来自两个操作数<strong>整数宽度不一致</strong>的组合，典型就是 <code>auto cid = AscendC::GetBlockIdx()</code> 拿到的 int64 对上 int 字面量。同宽的运行期 max/min（两个 int32）在改动前也能编过，所以这个坑一直潜伏着，直到某处少了一个 <code>T.cast</code> 才炸。</p></div>
 
 <p><strong>为什么绕不过去：</strong></p>
 <ol>
-  <li>夹取结果紧接着就要当 <code>T.copy</code> / <code>copy_pa</code> 的切片上下界和搬运行数用（<code>ori_kv[pv_ph, pv_rem : pv_rem + pv_run, ...]</code>），必须是<strong>表达式</strong>。<code>T.if_then_else</code> 会 lower 成语句（<code>int32_t condval; if {...}</code>），塞不进 copy 的参数表 —— kernel.py 自己在 1961-1969 行把这条写进注释了。</li>
+  <li>max/min 的结果紧接着就要当 <code>T.copy</code> / <code>copy_pa</code> 的切片上下界和搬运行数用（<code>ori_kv[pv_ph, pv_rem : pv_rem + pv_run, ...]</code>），必须是<strong>表达式</strong>。<code>T.if_then_else</code> 会 lower 成语句（<code>int32_t condval; if {...}</code>），塞不进 copy 的参数表 —— kernel.py 自己在 1961-1969 行把这条写进注释了。</li>
   <li>唯一的表达式级替代是每处手写 <code>tir.Select(a &gt; b, a, b)</code>。kernel.py 里 <code>T.min(</code> / <code>T.max(</code> 合计 37 处（<code>T.min</code> 28 + <code>T.max</code> 9），人肉替换啰嗦，漏一个就炸。</li>
   <li>而且手写 <code>tir.Select</code> 只能覆盖内核里自己写的那些：内核侧一个 <code>T.max</code> 都不写，也不保证生成的源码里没有整数取大取小 —— UB 的分配与地址规划自己就会造出来，尺寸超 int32 时以 int64 出现，正好落在混宽那一类里。</li>
 </ol>
@@ -417,17 +417,17 @@ VEC_PASS_CONFIGS = {
 @T.prim_func
 def main(A: T.Tensor((M, N), "float"), C: T.Tensor((M, N), "float")):
     with T.Kernel(M_NUM, is_npu=True) as (cid, vid):
-        # cid 是 int64 的 grid block 变量,和 int 字面量 0 混宽做整数夹取。
+        # cid 是 int64 的 grid block 变量,和 int 字面量 0 混宽做整数 max。
         src = T.max(cid - 1, 0)
         a_ub = T.alloc_ub((ROWS, N), "float")
         voff = vid * ROWS
-        T.copy(A[src * BM + voff, 0], a_ub)     # 读「夹取后的邻居 tile」
+        T.copy(A[src * BM + voff, 0], a_ub)     # 读左邻 tile(首块读自己)
         T.copy(a_ub, C[cid * BM + voff, 0])     # 写自己这块 tile
 
 func = tilelang.compile(main, out_idx=[-1],
                         pass_configs=VEC_PASS_CONFIGS, target="ascendc")</code></pre>
 
-<p class="cap">重点只有 <code>src = T.max(cid - 1, 0)</code> 这一行：<code>cid</code> 是 int64 的 grid 变量，<code>0</code> 是 int 字面量，混宽标量整数 max。改动前这行打成裸的 <code>max(cid - 1, 0)</code>，bisheng 报 <code>call to 'max' is ambiguous</code>，整个 kernel 编译失败；改动后打成 <code>((cid - 1) &gt; 0 ? (cid - 1) : 0)</code>，结果就是「每块读它左边那块、第 0 块读自己」。另外三处不是凑数：把 <code>src</code> 用作 DMA 行偏移，是为了让夹取活到生成源码里（只算不用会被优化掉，问题就复现不出来）；<code>M_NUM</code> / <code>ROWS</code> 必须定义在 <code>@T.prim_func</code> 外层，否则会被绑成 Let-Var、把 <code>a_ub</code> 的 shape 变成符号量而不是常量；<code>pass_configs</code> 也不能省 —— <code>target="ascendc"</code> 默认不带任何 pass config，不显式开 <code>AUTO_SYNC</code> 的话 MTE2 和 MTE3 之间不插 flag，两条 DMA 无依赖就是数据竞争。</p>
+<p class="cap">重点只有 <code>src = T.max(cid - 1, 0)</code> 这一行：<code>cid</code> 是 int64 的 grid 变量，<code>0</code> 是 int 字面量，混宽标量整数 max。改动前这行打成裸的 <code>max(cid - 1, 0)</code>，bisheng 报 <code>call to 'max' is ambiguous</code>，整个 kernel 编译失败；改动后打成 <code>((cid - 1) &gt; 0 ? (cid - 1) : 0)</code>，结果就是「每块读它左边那块、第 0 块读自己」。另外三处不是凑数：把 <code>src</code> 用作 DMA 行偏移，是为了让这个 max 活到生成源码里（只算不用会被优化掉，问题就复现不出来）；<code>M_NUM</code> / <code>ROWS</code> 必须定义在 <code>@T.prim_func</code> 外层，否则会被绑成 Let-Var、把 <code>a_ub</code> 的 shape 变成符号量而不是常量；<code>pass_configs</code> 也不能省 —— <code>target="ascendc"</code> 默认不带任何 pass config，不显式开 <code>AUTO_SYNC</code> 的话 MTE2 和 MTE3 之间不插 flag，两条 DMA 无依赖就是数据竞争。</p>
 
 <h3>1.3　kernel.py 里的真实用法（一）：SWA 滑窗左边界</h3>
 
@@ -440,7 +440,7 @@ if s &lt; act_q:
     ori_left = T.max(s_global - ori_win_left, 0)
     win = s_global + 1 - ori_left</code></pre>
 
-<p>这是 SWA 每个 query token 进 QK 之前必须先算出来的两件事：它能看到的 KV 区间从哪开始、有多长。<code>s_global = act_kv - act_q + s</code> 是该 token 在<strong>整条 KV 序列</strong>上的全局位置，由 <code>seqused_kv[b]</code>（该 batch 真实 KV 长度）和 <code>act_q_lens[b]</code>（该 batch 真实 query 长度）算出，两者都是运行期从张量里读的。滑窗左边界本该是 <code>s_global - ori_win_left</code>（滑窗左半径，本仓断言 ≤127），但对序列<strong>开头</strong>那几个 token 这个值是负的，必须夹到 0，否则 <code>win</code> 会算成大于 128、后面 <code>T.copy</code> 的切片直接越界读到别的 batch 的 KV。夹完之后 <code>win = s_global + 1 - ori_left</code> 就是该 token 真实的窗口长度：序列开头短、往后稳定在 128。这两个值一路喂给 copy_pa 的搬运行数、gemm 的 <code>real_k</code> / <code>k_actual</code>、以及在线 softmax 的有效列数，是整个 SWA 的骨架尺寸。</p>
+<p>这是 SWA 每个 query token 进 QK 之前必须先算出来的两件事：它能看到的 KV 区间从哪开始、有多长。<code>s_global = act_kv - act_q + s</code> 是该 token 在<strong>整条 KV 序列</strong>上的全局位置，由 <code>seqused_kv[b]</code>（该 batch 真实 KV 长度）和 <code>act_q_lens[b]</code>（该 batch 真实 query 长度）算出，两者都是运行期从张量里读的。滑窗左边界本该是 <code>s_global - ori_win_left</code>（滑窗左半径，本仓断言 ≤127），但对序列<strong>开头</strong>那几个 token 这个值是负的，必须限制到不小于 0，否则 <code>win</code> 会算成大于 128、后面 <code>T.copy</code> 的切片直接越界读到别的 batch 的 KV。取完 max 之后 <code>win = s_global + 1 - ori_left</code> 就是该 token 真实的窗口长度：序列开头短、往后稳定在 128。这两个值一路喂给 copy_pa 的搬运行数、gemm 的 <code>real_k</code> / <code>k_actual</code>、以及在线 softmax 的有效列数，是整个 SWA 的骨架尺寸。</p>
 
 <p>这里的操作数目前都在 int32 域内（3504-3505 行 <code>b = T.cast(pid // max_seq, "int32")</code> / <code>s = T.cast(pid % max_seq, "int32")</code> 已经把 grid 变量降到 int32），所以这条具体的 <code>T.max</code> 在改动前也能编过。改动的价值在于把「能不能编过」从「有没有记得 cast」这个约定里解耦出来 —— 少写一个 cast，或者哪个中间环节自己造出一个 int64 操作数，都不再是编译失败。</p>
 
@@ -502,18 +502,18 @@ tw = tir.Select(
 
 <p>SCFA 的 KV 分两段：一段是原始滑窗（<code>is_ori</code>，tile 0），一段是被 topk 选中并合并过的压缩 KV（tile ≥1，每块 512 宽）。上面 1951-1954 行先算 <code>act_cmp = (s_global + 1) // cmp_ratio</code>（该 token 在压缩域上可见的 token 数）和 <code>cmp_tiles = (T.min(act_cmp, topk_cmp) + S2_BASE - 1) // S2_BASE</code>，<code>topk_cmp</code> 是 topk 只保留 K 个压缩块的上限，取小才是真正要算的压缩 token 数，直接决定这个 token 要跑几轮 tile 循环。这里的 <code>tw</code> 是当前 tile 的<strong>实际列宽</strong>：压缩分支里外层 <code>T.min(S2_BASE, ...)</code> 处理尾 tile 不足 512 的情况，<code>tw</code> 随后在 2010 行被切成 <code>ncols = T.min(BI, tw - cb * BI)</code> 的 128 宽列块喂给 gemm（CFA 的 505 行是同款代码，属于另一个 kernel）。</p>
 
-<p>代码里那段原生注释顺带解释了为什么只能用<strong>内联三元</strong>类的东西（<code>tir.Select</code> / <code>T.min</code>）而不能用 <code>T.if_then_else</code> —— 后者 lower 成语句，没法内联进 copy_pa 的参数表，生成的是编不过的 C++。同时这也是全仓嵌套最深的一处夹取，直接对应 1.6 里的三元膨胀问题。</p>
+<p>代码里那段原生注释顺带解释了为什么只能用<strong>内联三元</strong>类的东西（<code>tir.Select</code> / <code>T.min</code>）而不能用 <code>T.if_then_else</code> —— 后者 lower 成语句，没法内联进 copy_pa 的参数表，生成的是编不过的 C++。同时这也是全仓嵌套最深的一处 max/min，直接对应 1.6 里的三元膨胀问题。</p>
 
 <h3>1.6　用的时候要注意什么</h3>
 
 <ul>
-  <li><strong>只管标量整数。</strong>浮点标量的 <code>T.max</code> / <code>T.min</code> 仍然发裸 <code>max(a, b)</code>，同样的歧义风险原样还在，只是本仓还没撞到；<code>lanes() &gt; 1</code> 的向量 max/min 也走老路径，NaN 语义和向量语义一个字没碰。真要做运行期浮点夹取，优先用向量原语（ascend_max / clamp_max 一类），或自己写 <code>tir.Select(a &gt; b, a, b)</code>。</li>
-  <li><strong>三元把每个操作数各打印两遍，嵌套按 2 的幂膨胀。</strong>生成的源码里 <code>a</code> 和 <code>b</code> 各出现两次，所以每嵌一层，内层的文本翻一倍。上面 1973-1977 行的 <code>T.min(S2_BASE, T.min(act_cmp, topk_cmp) - rel * S2_BASE)</code>：外层把操作数 <code>b</code> 打两遍，内层 min 的三元文本出现 <strong>2</strong> 次，它的叶操作数 <code>act_cmp</code> / <code>topk_cmp</code> 各出现 <strong>4</strong> 次；再往里嵌一层，最内层的叶操作数就是 8 次。写多层夹取时留意生成源码的体积和可读性，必要时先把内层结果落到 <code>T.alloc_var</code> 标量上。（<code>tir.Select</code> 每个分支只印一次，不额外放大。）</li>
+  <li><strong>只管标量整数。</strong>浮点标量的 <code>T.max</code> / <code>T.min</code> 仍然发裸 <code>max(a, b)</code>，同样的歧义风险原样还在，只是本仓还没撞到；<code>lanes() &gt; 1</code> 的向量 max/min 也走老路径，NaN 语义和向量语义一个字没碰。真要对浮点做运行期 max/min，优先用向量原语（ascend_max / clamp_max 一类），或自己写 <code>tir.Select(a &gt; b, a, b)</code>。</li>
+  <li><strong>三元把每个操作数各打印两遍，嵌套按 2 的幂膨胀。</strong>生成的源码里 <code>a</code> 和 <code>b</code> 各出现两次，所以每嵌一层，内层的文本翻一倍。上面 1973-1977 行的 <code>T.min(S2_BASE, T.min(act_cmp, topk_cmp) - rel * S2_BASE)</code>：外层把操作数 <code>b</code> 打两遍，内层 min 的三元文本出现 <strong>2</strong> 次，它的叶操作数 <code>act_cmp</code> / <code>topk_cmp</code> 各出现 <strong>4</strong> 次；再往里嵌一层，最内层的叶操作数就是 8 次。写多层嵌套的 max/min 时留意生成源码的体积和可读性，必要时先把内层结果落到 <code>T.alloc_var</code> 标量上。（<code>tir.Select</code> 每个分支只印一次，不额外放大。）</li>
   <li><strong>dump 出来看不到三元 ≠ 改动没生效。</strong>编译期能折的 max/min 早就成了常量，压根到不了后端。要验证这条改动，操作数里必须至少有一个是真的运行期值（张量取值、grid 变量、alloc_var 游标）。</li>
   <li><strong>只对 <code>target="ascendc"</code>（非-PTO）生效。</strong>pto 编出来的是另一份源码，走的不是这条路径。本仓 SWA / CFA / SCFA 全部走非-PTO，所以这条是刚需；在 pto 上验证是验不出差别的。</li>
-  <li><strong>三元只解决重载决议，没解决整型提升。</strong><code>a</code> 和 <code>b</code> 的符号扩展 / 整型提升还是 C 的老规矩：int64 的 grid 变量对 int 字面量取 max，结果类型是 int64。夹完要当 int32 索引用的话，仍然建议显式 <code>T.cast(..., "int32")</code> —— kernel.py:3536-3537 的两个 <code>T.cast</code> 就是先把 grid 变量降到 int32、让后面所有夹取都留在 int32 域的写法，值得照抄。</li>
+  <li><strong>三元只解决重载决议，没解决整型提升。</strong><code>a</code> 和 <code>b</code> 的符号扩展 / 整型提升还是 C 的老规矩：int64 的 grid 变量对 int 字面量取 max，结果类型是 int64。取完 max 要当 int32 索引用的话，仍然建议显式 <code>T.cast(..., "int32")</code> —— kernel.py:3536-3537 的两个 <code>T.cast</code> 就是先把 grid 变量降到 int32、让后面所有 max/min 都留在 int32 域的写法，值得照抄。</li>
   <li><strong>生成的表达式外层已经带括号</strong>，可以直接嵌进更大的算式，不用自己再包一层。</li>
-  <li><strong>别指望它顺带修好整数除法。</strong>生成的源码里 <code>//</code> / <code>%</code> 发成 C 的 <code>/</code> 和 <code>%</code>（截断语义），负被除数下和 floor 语义差 1，那是另一个独立的坑。夹取用 max/min、取页号用 <code>//</code> 的组合里，如果操作数可能为负，先确认除法那一侧。</li>
+  <li><strong>别指望它顺带修好整数除法。</strong>生成的源码里 <code>//</code> / <code>%</code> 发成 C 的 <code>/</code> 和 <code>%</code>（截断语义），负被除数下和 floor 语义差 1，那是另一个独立的坑。用 max/min 限范围、用 <code>//</code> 取页号的组合里，如果操作数可能为负，先确认除法那一侧。</li>
 </ul>
 
 
@@ -1614,7 +1614,7 @@ else:
 
   <h3>9.2　结果：kernel.py 里私有原语归零</h3>
 
-  <p>这 8 处能力凑齐之后，<code>kernel.py</code>（SWA / CFA / SCFA 三个完整算子，4146 行）<strong>只使用上游标准原语</strong>。以下调用点全部为 0：</p>
+  <p>这 8 处能力凑齐之后，<code>kernel.py</code>（SWA / CFA / SCFA 三个完整算子，4180 行）<strong>只使用上游标准原语</strong>。以下调用点全部为 0：</p>
 
   <div class="tablewrap">
   <table>
@@ -1658,7 +1658,7 @@ else:
   <div class="tablewrap">
   <table>
     <tr><th>想干的事</th><th>写法</th><th>节</th></tr>
-    <tr><td>运行期整数夹取（窗口边界、一次搬多少行）</td><td><code>T.max(a, b)</code> / <code>T.min(a, b)</code>，照常写</td><td><a href="#s1">1</a></td></tr>
+    <tr><td>运行期整数取 max/min（窗口边界、一次搬多少行）</td><td><code>T.max(a, b)</code> / <code>T.min(a, b)</code>，照常写</td><td><a href="#s1">1</a></td></tr>
     <tr><td>N 大到塞不进 L0B 的矩阵乘</td><td><code>T.gemm_v0(...)</code>，模板内部自己切</td><td><a href="#s2">2</a></td></tr>
     <tr><td>按运行期宽度搬 GM↔UB</td><td><code>T.copy(A[..., 0:n], ub[:, 0:n])</code></td><td><a href="#s3">3</a></td></tr>
     <tr><td>矩阵乘只算真实窗口那几列</td><td><code>n_actual=</code>（<code>T.gemm_v0</code> / <code>T.mma</code>）</td><td><a href="#s4">4</a>、<a href="#s6">6</a></td></tr>
