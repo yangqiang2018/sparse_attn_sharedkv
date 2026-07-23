@@ -252,7 +252,7 @@ def sparse_flash_mla(
 
 if __name__ == "__main__":
     from sparse_flash_mla_golden import (
-        SWA_FAST_CFG,
+        FAST_SCENARIOS,
         build_case,
         run_case,
         check_lse,
@@ -260,9 +260,10 @@ if __name__ == "__main__":
     )
 
     dtype = torch.bfloat16
-    cfg = SWA_FAST_CFG
-    case = build_case(cfg, dtype)
-    out, lse = run_case(case, cfg, sparse_flash_mla)
-    check_lse(lse.cpu(), case["cpu_ref_lse"], dtype)
-    check_result(out.cpu(), case["cpu_ref"])
+    for name, cfg in FAST_SCENARIOS.items():
+        case = build_case(cfg, dtype)
+        out, lse = run_case(case, cfg, sparse_flash_mla)
+        check_lse(lse.cpu(), case["cpu_ref_lse"], dtype)
+        check_result(out.cpu(), case["cpu_ref"])
+        print(f"[{name}] passed")
     print("Kernel Output Match!")
