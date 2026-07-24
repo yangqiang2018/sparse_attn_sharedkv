@@ -1,0 +1,5 @@
+# sparse_flash_mla/ mirrors the example submitted to tile-ai/tilelang-ascend and
+# keeps that repository's formatting (140-column ruff). Reformatting it with this
+# repository's default settings would make the snapshot diverge from the upstream
+# pull request, so keep it out of both the formatter and the linter.
+extend-exclude = ["sparse_flash_mla"]
